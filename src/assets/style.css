@@ -79,14 +79,18 @@ pre, code, .blob, kbd { font-family: ui-monospace, "SF Mono", Menlo, Consolas, m
 .add-panel {
   position: absolute; right: 0; top: 100%; z-index: 20;
   background: var(--bg-panel); border: 1px solid var(--border); border-top: none;
-  border-radius: 0 0 6px 6px; padding: 0.8rem; width: 22rem;
+  border-radius: 0 0 6px 6px; padding: 0.6rem 0.8rem; width: 22rem;
 }
-.add-panel form { display: flex; gap: 0.4rem; flex-wrap: wrap; }
-.add-panel input[name="url"] { flex: 1 1 100%; }
-.add-panel input { padding: 0.35rem 0.5rem; }
+/* every input on its own full-width row, button flush at the bottom */
+.add-panel form { display: flex; flex-direction: column; gap: 0.4rem; }
+.add-panel input { padding: 0.35rem 0.5rem; width: 100%; box-sizing: border-box; }
+.add-panel button[type="submit"] { align-self: flex-start; }
+/* job-status responses carry an out-of-band #app refresh div; never let it
+   take up space inside the panel even if htmx is slow to extract it */
+#add-result [hx-swap-oob] { display: none; }
 
 /* ---------- inputs ---------- */
-input, button {
+input, button, select {
   font: inherit; color: var(--text); background: var(--bg-inset);
   border: 1px solid var(--border); border-radius: 6px; padding: 0.35rem 0.6rem;
 }
@@ -322,11 +326,23 @@ table.files tr:last-child td { border-bottom: none; }
 
 /* ---------- settings ---------- */
 .detail.narrow { max-width: 800px; }
-.settings-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin: 0.5rem 0; }
-.settings-row label { flex: 1; color: var(--text); }
+/* ---------- form rows ----------
+   Two-column grid: fixed label column, inputs start at one shared left edge
+   and fill the rest. Wider labels where needed via --label-w (settings). */
+.settings-row {
+  display: grid;
+  grid-template-columns: var(--label-w, 9rem) 1fr;
+  gap: 0.7rem;
+  align-items: center;
+  margin: 0.5rem 0;
+}
+.settings-form { --label-w: 17rem; }
+.settings-row label { color: var(--text); }
+.settings-row input:not([type="checkbox"]), .settings-row select, .settings-row textarea {
+  width: 100%; box-sizing: border-box;
+}
 .settings-row input[type="number"] { width: 7rem; text-align: right; }
-.settings-row input[type="text"] { flex: 0 1 24rem; }
-.settings-row input[type="checkbox"] { width: 1rem; height: 1rem; }
+.settings-row input[type="checkbox"] { width: 1rem; height: 1rem; justify-self: start; padding: 0; margin: 0; }
 
 .origin-form { display: flex; gap: 0.4rem; margin: 0.6rem 0; }
 .origin-form input[type="url"] { flex: 1; }
@@ -339,7 +355,8 @@ table.files tr:last-child td { border-bottom: none; }
 }
 .metadata-form { margin-top: 0.6rem; }
 .metadata-form .settings-row { align-items: flex-start; }
-.metadata-form textarea { flex: 0 1 24rem; font: inherit; padding: 0.35rem 0.6rem;
+.metadata-form .settings-row label { padding-top: 0.4rem; }
+.metadata-form textarea { font: inherit; padding: 0.35rem 0.6rem;
   background: var(--bg-inset); border: 1px solid var(--border); border-radius: 6px; color: var(--text); }
 
 /* ---------- notifications ---------- */

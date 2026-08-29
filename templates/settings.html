@@ -38,9 +38,9 @@
       <div class="settings-row"><label>Enabled</label>
         <input type="checkbox" name="llm_enabled" value="1" {% if ctx.llm_enabled %}checked{% endif %}></div>
       <div class="settings-row"><label>Endpoint URL</label>
-        <input type="text" name="llm_url" value="{{ ctx.llm_url }}" size="40" placeholder="http://192.168.0.1:11434/v1"></div>
+        <input type="text" name="llm_url" value="{{ ctx.llm_url }}" placeholder="http://192.168.0.1:11434/v1"></div>
       <div class="settings-row"><label>Model</label>
-        <input type="text" name="llm_model" value="{{ ctx.llm_model }}" size="40" placeholder="(server default)"></div>
+        <input type="text" name="llm_model" value="{{ ctx.llm_model }}" placeholder="(server default)"></div>
       <div class="settings-row"><label>Batch size (repos per request)</label>
         <input type="number" name="llm_batch" value="{{ ctx.llm_batch }}" min="1"></div>
       <div class="settings-row"><label>Disable thinking mode</label>
@@ -51,7 +51,7 @@
       <h2>Instance</h2>
       <p class="note">Fixed for the running server: edit the config file and restart to change these.</p>
       <div class="settings-row"><label>Listen on</label><input type="text" value="{{ ctx.bind }}" disabled></div>
-      <div class="settings-row"><label>Archive root</label><input type="text" value="{{ ctx.archive_root }}" size="40" disabled></div>
+      <div class="settings-row"><label>Archive root</label><input type="text" value="{{ ctx.archive_root }}" disabled></div>
     </section>
 
     <button type="submit" class="refresh-btn">Save settings</button>

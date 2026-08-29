@@ -56,7 +56,7 @@
             <input name="url" type="url" placeholder="https://github.com/owner/repo.git" required>
             <input name="tags" placeholder="tags, comma separated (optional)">
             <input name="folder" list="add-folder-list" placeholder="folder (optional, e.g. games/decomp)">
-            <datalist id="add-folder-list" hx-get="/folders/options" hx-trigger="load" hx-swap="innerHTML"></datalist>
+            <datalist id="add-folder-list" hx-get="/folders/options" hx-trigger="load" hx-target="this" hx-swap="innerHTML"></datalist>
             <button type="submit">Archive</button>
           </form>
           <div id="add-result"></div>
