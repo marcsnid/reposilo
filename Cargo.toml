@@ -1,0 +1,38 @@
+[package]
+name = "reposilo"
+version = "0.1.0"
+edition = "2021"
+description = "Self-hosted git repo archiver that saves and manages code repositories"
+license = "MIT"
+
+[[bin]]
+name = "reposilo"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "process", "fs", "time", "net"] }
+axum = { version = "0.8", features = ["json"] }
+sha2 = "0.10"
+hex = "0.4"
+semver = "1"
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+reqwest = { version = "0.12", features = ["json"] }
+askama = "0.14"
+pulldown-cmark = "0.13"
+zip = "4"
+tar = "0.4"
+zstd = "0.13"
+rust-argon2 = "2"
+tokio-util = { version = "0.7", features = ["io"] }
+
+tempfile = "3"
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+{% block title %}{{ ctx.rel }} · reposilo{% endblock %}
+{% block content %}
+<div class="detail">
+  <div class="detail-head">
+    <div>
+      <h1><a href="{{ ctx.back_url }}">←</a> {{ ctx.name }}</h1>
+      <div class="detail-sub">
+        <span class="badge forge-{{ ctx.forge }}">{{ ctx.forge }}</span>
+        {% if ctx.unidentified %}<span class="badge danger">unidentified</span>{% endif %}
+        {% if ctx.remote_state == "dead" %}<span class="badge danger">remote dead (archived copy only)</span>{% else if ctx.remote_state == "unavailable" %}<span class="badge danger">remote gone</span>{% endif %}
+        {% if !ctx.origin.is_empty() %}<a class="origin" href="{{ ctx.origin }}">{{ ctx.origin }}</a>{% endif %}
+      </div>
+    </div>
+    <button class="refresh-btn"
+      hx-post="/repos/{{ ctx.rel }}/refresh"
+      hx-target="#job-status" hx-swap="innerHTML">⟳ Refresh now</button>
+  </div>
+  <div id="job-status"></div>
+
+  {% if !ctx.description.is_empty() %}<p class="detail-desc">{{ ctx.description }}</p>{% endif %}
+
+  <div class="detail-cols">
+    <div class="detail-main">
+      {% if !ctx.readme_html.is_empty() %}
+      <section class="panel">
+        <h2>{{ ctx.readme_file }}</h2>
+        <div class="readme">{{ ctx.readme_html|safe }}</div>
+        {% if ctx.readme_truncated %}<p class="note">README truncated at 256 KB.</p>{% endif %}
+      </section>
+      {% endif %}
+
+      {% if !ctx.files.is_empty() %}
+      <section class="panel">
+        <h2>Files</h2>
+        <table class="files">
+          <tbody>
+            {% for f in ctx.files %}
+            <tr>
+              <td>
+                {% if f.is_dir %}<span class="file dir"><svg class="icon" viewBox="0 0 16 16"><path d="M1.5 3.2v10.3h13V5.4H7.9L6.4 3.2z"/></svg> {{ f.name }}</span>
+                {% else if !f.url.is_empty() %}<a class="file" href="{{ f.url }}"><svg class="icon" viewBox="0 0 16 16"><path d="M3 1.5h6.2L13 5.3v9.2H3z"/><path d="M9.2 1.5v3.8H13"/></svg> {{ f.name }}</a>
+                {% else %}<span class="file dim"><svg class="icon" viewBox="0 0 16 16"><path d="M3 1.5h6.2L13 5.3v9.2H3z"/><path d="M9.2 1.5v3.8H13"/></svg> {{ f.name }}</span>{% endif %}
+              </td>
+              <td class="right">{{ f.size_human }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </section>
+      {% endif %}
+    </div>
+
+    <aside class="detail-side">
+      <section class="panel">
+        <h2>Tags</h2>
+        {% include "tags_edit.html" %}
+        {% if !ctx.suggested_tags.is_empty() %}
+        <h2>Suggested</h2>
+        <div class="chips">
+          {% for t in ctx.suggested_tags %}
+          <form class="chip-form" hx-post="/repos/{{ ctx.rel }}/tags" hx-target="#tag-editor" hx-swap="outerHTML">
+            <input type="hidden" name="op" value="add">
+            <input type="hidden" name="value" value="{{ t }}">
+            <input type="hidden" name="tags" value="{{ ctx.tags_csv }}">
+            <button type="submit" class="chip">+ #{{ t }}</button>
+          </form>
+          {% endfor %}
+        </div>
+        {% endif %}
+      </section>
+
+      <section class="panel">
+        <h2>About</h2>
+        <details class="metadata-editor">
+          <summary>&#9998; Edit metadata</summary>
+          <form class="metadata-form" hx-post="/repos/{{ ctx.rel }}/metadata" hx-target="#metadata-result">
+            <div class="settings-row"><label>Name</label>
+              <input type="text" name="name" value="{{ ctx.name }}"></div>
+            <div class="settings-row"><label>Description</label>
+              <textarea name="description" rows="2" placeholder="shown on the card">{{ ctx.description }}</textarea></div>
+            <div class="settings-row"><label>Notes</label>
+              <textarea name="notes" rows="2" placeholder="private notes">{{ ctx.notes }}</textarea></div>
+            <div class="settings-row"><label>Origin</label>
+              <input type="url" name="origin" value="{{ ctx.origin }}" placeholder="https://github.com/owner/repo.git"></div>
+            <p class="note">Changing the origin (re)assigns where this repo came from; unidentified repos get promoted out of _unknown into their owner-repo folder. Empty fields are cleared.</p>
+            <button type="submit" class="refresh-btn">Save metadata</button>
+          </form>
+          <div id="metadata-result"></div>
+        </details>
+        <dl class="meta">
+          <dt>Archived size</dt><dd>{{ ctx.total_size }}</dd>
+          {% if !ctx.language.is_empty() %}<dt>Language</dt><dd><span class="lang"><i class="dot {{ ctx.lang_class }}"></i> {{ ctx.language }}</span></dd>{% endif %}
+          <dt>Default branch</dt><dd>{{ ctx.default_branch }}</dd>
+          <dt>Schedule</dt><dd>every {{ ctx.schedule_days }} days</dd>
+          <dt>Retention</dt><dd>
+            {% if ctx.keep_branch == -1 %}keep all snapshots{% else %}keep newest {{ ctx.keep_branch }} snapshot(s){% endif %},
+            {% if ctx.keep_releases == -1 %}keep all releases{% else %}keep newest {{ ctx.keep_releases }} release(s){% endif %}
+          </dd>
+          <dt>Added</dt><dd>{{ ctx.added }}</dd>
+          <dt>Last checked</dt><dd>{{ ctx.last_checked }}</dd>
+        </dl>
+        {% if !ctx.notes.is_empty() %}
+        <h2>Notes</h2>
+        <p class="notes">{{ ctx.notes }}</p>
+        {% endif %}
+      </section>
+
+      {% if !ctx.releases.is_empty() %}
+      <section class="panel">
+        <h2>Releases</h2>
+        <ul class="snaps">
+          {% for s in ctx.releases %}
+          <li>
+            <a class="dl" href="{{ s.download_url }}" download>{{ s.version }}</a>
+            <span class="snap-meta">{{ s.commit_short }} · {{ s.date }} · {{ s.size_human }}</span>
+            {% if !s.changelog_html.is_empty() %}
+            <details><summary class="dim" style="font-size:0.8rem;cursor:pointer">changelog</summary>
+              <div class="readme">{{ s.changelog_html|safe }}</div>
+            </details>
+            {% endif %}
+          </li>
+          {% endfor %}
+        </ul>
+      </section>
+      {% endif %}
+
+      {% if !ctx.branch_snapshots.is_empty() %}
+      <section class="panel">
+        <h2>Branch snapshots</h2>
+        <ul class="snaps">
+          {% for s in ctx.branch_snapshots %}
+          <li>
+            <a class="dl" href="{{ s.download_url }}" download>{{ s.label }}@{{ s.commit_short }}</a>
+            <span class="snap-meta">{{ s.date }} · {{ s.size_human }}</span>
+          </li>
+          {% endfor %}
+        </ul>
+      </section>
+      {% endif %}
+    </aside>
+  </div>
+</div>
+{% endblock %}

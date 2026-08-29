@@ -1,0 +1,19 @@
+<div class="tag-editor" id="tag-editor">
+  <div class="chips">
+    {% for t in ctx.tags %}
+    <form class="chip-form" hx-post="/repos/{{ ctx.rel }}/tags" hx-target="#tag-editor" hx-swap="outerHTML">
+      <input type="hidden" name="op" value="remove">
+      <input type="hidden" name="value" value="{{ t }}">
+      <input type="hidden" name="tags" value="{{ ctx.tags_csv }}">
+      <button type="submit" class="chip active">#{{ t }} <b>×</b></button>
+    </form>
+    {% endfor %}
+    {% if ctx.tags.is_empty() %}<span class="dim">no tags yet</span>{% endif %}
+  </div>
+  <form class="tag-add" hx-post="/repos/{{ ctx.rel }}/tags" hx-target="#tag-editor" hx-swap="outerHTML">
+    <input type="hidden" name="op" value="add">
+    <input type="hidden" name="tags" value="{{ ctx.tags_csv }}">
+    <input type="text" name="value" placeholder="add tag…" required maxlength="64">
+    <button type="submit">Add</button>
+  </form>
+</div>

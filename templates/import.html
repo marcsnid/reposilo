@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Import · reposilo{% endblock %}
+{% block content %}
+<div class="detail">
+  <div class="detail-head"><h1>Import a zip collection</h1></div>
+  <p class="detail-desc">
+    Point reposilo at a folder of zipped repositories. Each zip is inspected offline
+    (.git config, package manifests, README). Detected repos land in the archive with their
+    origin; the rest can be parked as unknown (still taggable &amp; browseable) or identified
+    with GitHub search suggestions. Imported zips are never touched by retention pruning.
+  </p>
+  <div id="import-area">
+    {% include "import_form.html" %}
+  </div>
+</div>
+{% endblock %}
