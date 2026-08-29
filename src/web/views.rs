@@ -127,11 +127,26 @@ pub struct RepoCard {
 
 #[derive(Debug, Clone)]
 pub struct FolderLink {
+    pub rel: String,
     pub name: String,
     pub url: String,
     pub count: usize,
     pub active: bool,
     pub depth: usize,
+    /// Emoji icon from the folder manifest; empty = colored dot.
+    pub icon: String,
+    /// CSS class for the default colored dot (stable per folder name).
+    pub dot_class: String,
+    /// Left padding for unlimited nesting depth, e.g. "0.9rem".
+    pub indent: String,
+    /// URL of the sidebar edit form for this folder.
+    pub edit_url: String,
+}
+
+/// Encode a slash-separated archive path for use in a URL path (slashes
+/// must survive; each segment is percent-encoded on its own).
+pub fn path_encode(p: &str) -> String {
+    p.split('/').map(urlencode).collect::<Vec<_>>().join("/")
 }
 
 #[derive(Debug, Clone)]
@@ -177,6 +192,9 @@ pub struct FragmentT {
 struct TreeBuilder {
     children: std::collections::BTreeMap<String, TreeBuilder>,
     repos: usize,
+    /// Explicitly-managed folder (has folder.json) or an implicit prefix.
+    explicit: bool,
+    icon: Option<String>,
 }
 
 impl TreeBuilder {
@@ -188,22 +206,76 @@ impl TreeBuilder {
         }
         node.repos += 1;
     }
+
+    /// Mark a folder as explicitly-managed (folder.json on disk), so it
+    /// shows even when empty; may carry an icon.
+    fn insert_folder(&mut self, rel: &str, icon: Option<String>) {
+        let mut node = self;
+        for p in rel.split('/') {
+            node = node.children.entry(p.to_string()).or_default();
+            node.explicit = true;
+        }
+        node.icon = icon;
+    }
 }
 
-fn flatten_tree(node: &TreeBuilder, path: &str, depth: usize, max_depth: usize, out: &mut Vec<(String, usize, usize)>) {
-    if depth > max_depth {
-        return;
-    }
+fn flatten_tree(
+    node: &TreeBuilder,
+    path: &str,
+    depth: usize,
+    out: &mut Vec<(String, usize, usize, Option<String>, bool)>,
+) {
     for (name, child) in &node.children {
         let child_path = if path.is_empty() { name.clone() } else { format!("{path}/{name}") };
         let count = count_repos(child);
-        out.push((child_path.clone(), count, depth));
-        flatten_tree(child, &child_path, depth + 1, max_depth, out);
+        out.push((child_path.clone(), count, depth, child.icon.clone(), child.explicit));
+        flatten_tree(child, &child_path, depth + 1, out);
     }
 }
 
 fn count_repos(node: &TreeBuilder) -> usize {
     node.repos + node.children.values().map(count_repos).sum::<usize>()
+}
+
+/// Every folder path the archive knows: explicit folder.json dirs plus
+/// implicit prefixes derived from repo rels (sorted, deduped).
+pub fn all_folder_paths(index: &crate::index::Index) -> Vec<String> {
+    let mut options = std::collections::BTreeSet::new();
+    let mut add = |rel: &str, skip_last: bool| {
+        let parts: Vec<&str> = rel.split('/').collect();
+        let n = if skip_last { parts.len().saturating_sub(1) } else { parts.len() };
+        let mut prefix = String::new();
+        for part in &parts[..n] {
+            prefix = if prefix.is_empty() { part.to_string() } else { format!("{prefix}/{part}") };
+            options.insert(prefix.clone());
+        }
+    };
+    for f in &index.folders {
+        add(&f.rel, false);
+    }
+    for r in &index.repos {
+        add(&r.rel, true);
+    }
+    options.into_iter().collect()
+}
+
+/// A path is usable as a folder if it exists in the index (explicit or
+/// implicit) and doesn't run through a repo directory.
+pub fn valid_folder_path(path: &str, index: &crate::index::Index) -> bool {
+    if index
+        .repos
+        .iter()
+        .any(|r| path == r.rel || path.starts_with(&format!("{}/", r.rel)))
+    {
+        return false;
+    }
+    all_folder_paths(index).iter().any(|p| p == path)
+}
+
+/// Stable color for a folder's default dot: hash of the folder path
+/// (nested folders get distinct colors, same folder always the same).
+fn folder_dot_color(path: &str) -> u32 {
+    path.bytes().map(|b| b as u32).fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b)) % 8
 }
 
 pub async fn build_list_ctx(st: &Arc<AppState>, tags: &[String], q: &str, folder: &str) -> ListCtx {
@@ -253,21 +325,29 @@ pub async fn build_list_ctx(st: &Arc<AppState>, tags: &[String], q: &str, folder
         })
         .collect();
 
-    // sidebar: folders (up to 2 levels deep)
+    // sidebar: folders at any nesting depth, with icons
     let mut tree = TreeBuilder::default();
     for r in &index.repos {
         tree.insert(&r.rel);
     }
+    for f in &index.folders {
+        tree.insert_folder(&f.rel, f.manifest.icon.clone());
+    }
     let mut flat = Vec::new();
-    flatten_tree(&tree, "", 0, 2, &mut flat);
+    flatten_tree(&tree, "", 0, &mut flat);
     let folders: Vec<FolderLink> = flat
         .into_iter()
-        .map(|(path, count, depth)| FolderLink {
+        .map(|(path, count, depth, icon, _explicit)| FolderLink {
             name: path.rsplit('/').next().unwrap_or(&path).to_string(),
+            rel: path.clone(),
             url: page_url(tags, q, &path),
             count,
             active: folder == path,
             depth,
+            icon: icon.unwrap_or_default(),
+            dot_class: format!("dot-{}", folder_dot_color(&path) % 8),
+            indent: format!("{:.1}rem", depth as f32 * 0.75),
+            edit_url: format!("/folders/edit?rel={}", urlencode(&path)),
         })
         .collect();
 
@@ -333,6 +413,32 @@ pub struct FileView {
 }
 
 #[derive(Debug, Clone)]
+pub struct FolderFormCtx {
+    /// "new" or "edit"
+    pub mode: String,
+    /// Full rel path (edit mode; empty for new).
+    pub rel: String,
+    /// POST target (path-encoded).
+    pub update_url: String,
+    /// Folder name (last path segment).
+    pub name: String,
+    /// Parent folder path (empty = archive root).
+    pub parent: String,
+    /// Existing folders, for the parent dropdown.
+    pub parents: Vec<String>,
+    /// Current icon (empty = colored dot).
+    pub icon: String,
+    /// Repo count inside (edit mode); 0 allows delete.
+    pub count: usize,
+}
+
+#[derive(Template)]
+#[template(path = "folder_form.html")]
+pub struct FolderFormT {
+    pub ctx: FolderFormCtx,
+}
+
+#[derive(Debug, Clone)]
 pub struct DetailCtx {
     pub rel: String,
     pub name: String,
@@ -341,10 +447,11 @@ pub struct DetailCtx {
     pub description: String,
     pub notes: String,
     pub tags: Vec<String>,
-    pub tags_csv: String,
+    pub suggested_tags: Vec<String>,
+    pub folder: String,
+    pub folder_options: Vec<String>,
     pub unidentified: bool,
     pub stars: String,
-    pub suggested_tags: Vec<String>,
     pub default_branch: String,
     pub language: String,
     pub lang_class: String,
@@ -375,7 +482,7 @@ pub struct DetailT {
 pub struct TagsCtx {
     pub rel: String,
     pub tags: Vec<String>,
-    pub tags_csv: String,
+    pub suggested_tags: Vec<String>,
 }
 
 #[derive(Template)]
@@ -426,6 +533,14 @@ pub async fn build_detail_ctx(st: &Arc<AppState>, repo: &crate::index::RepoEntry
         .map(|e| e.sidecar.commit.clone())
         .or_else(|| repo.releases.first().map(|e| e.sidecar.commit.clone()))
         .unwrap_or_default();
+
+    // folder the repo sits in (parent rel, empty = archive root) plus every
+    // folder path the archive knows, for the move dropdown
+    let folder = repo.rel.rsplit_once('/').map(|(p, _)| p.to_string()).unwrap_or_default();
+    let folder_options = {
+        let index = st.index.read().await;
+        all_folder_paths(&index)
+    };
 
     let snap_view = |e: &crate::index::SnapshotEntry| SnapView {
         label: e.sidecar.r#ref.clone(),
@@ -510,6 +625,8 @@ pub async fn build_detail_ctx(st: &Arc<AppState>, repo: &crate::index::RepoEntry
         forge: m.forge.clone(),
         description: m.description.clone().unwrap_or_default(),
         notes: m.notes.clone().unwrap_or_default(),
+        folder,
+        folder_options,
         stars: m.stars.map(|s| format!("⭐ {s}")).unwrap_or_default(),
         unidentified: m.unidentified,
         suggested_tags: m
@@ -519,7 +636,6 @@ pub async fn build_detail_ctx(st: &Arc<AppState>, repo: &crate::index::RepoEntry
             .cloned()
             .collect(),
         tags: m.tags.clone(),
-        tags_csv: m.tags.join(","),
         default_branch: m.default_branch.clone(),
         language: m.language.clone().unwrap_or_default(),
         lang_class: m.language.as_deref().map(lang_class).unwrap_or_default().to_string(),

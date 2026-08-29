@@ -45,6 +45,7 @@ fn templates_render_balanced_divs() {
         ("detail", include_str!("../templates/repo_detail.html")),
         ("blob", include_str!("../templates/blob.html")),
         ("tags", include_str!("../templates/tags_edit.html")),
+        ("folder_form", include_str!("../templates/folder_form.html")),
         ("job", include_str!("../templates/job_status.html")),
         ("base", include_str!("../templates/base.html")),
     ] {
@@ -249,20 +250,32 @@ async fn web_ui_full_flow() -> Result<()> {
         .await?;
     assert!(blob.contains("<h1>WebTest</h1>"));
 
-    // tag add via the form endpoint
+    // tag add via the form endpoint: the client posts only the edit;
+    // the manifest on disk is the tag list of record.
     let resp = client
         .post(format!("{base}/repos/remotes-webproj/tags"))
-        .form(&[("op", "add"), ("value", "added-tag"), ("tags", "webtest,fixture")])
+        .form(&[("op", "add"), ("value", "added-tag")])
         .send()
         .await?;
     assert_eq!(resp.status(), 200);
     let body = resp.text().await?;
     assert!(body.contains("#added-tag"), "{body}");
 
+    // regression: a second add must accumulate, not overwrite (the old form
+    // carried a stale client-side tag list that clobbered the first add)
+    let body = client
+        .post(format!("{base}/repos/remotes-webproj/tags"))
+        .form(&[("op", "add"), ("value", "another-tag")])
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert!(body.contains("#added-tag") && body.contains("#another-tag"), "{body}");
+
     // tag remove
     let body = client
         .post(format!("{base}/repos/remotes-webproj/tags"))
-        .form(&[("op", "remove"), ("value", "added-tag"), ("tags", "webtest,fixture,added-tag")])
+        .form(&[("op", "remove"), ("value", "added-tag")])
         .send()
         .await?
         .text()
@@ -273,7 +286,175 @@ async fn web_ui_full_flow() -> Result<()> {
     let manifest: serde_json::Value = serde_json::from_str(&fs::read_to_string(
         tmp.path().join("archive/remotes-webproj/repo.json"),
     )?)?;
-    assert_eq!(manifest["tags"][0], "fixture");
+    let tags: Vec<&str> = manifest["tags"].as_array().unwrap().iter().map(|t| t.as_str().unwrap()).collect();
+    assert_eq!(tags, ["another-tag", "fixture", "webtest"], "tags sorted, added-tag removed");
+
+    Ok(())
+}
+#[tokio::test]
+async fn folder_management_flow() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let remote = make_remote(tmp.path(), "webproj");
+
+    let (base, _st) = spawn_server(test_cfg(&tmp.path().join("archive"))).await;
+    let client = reqwest::Client::new();
+
+    // add a repo first
+    client
+        .post(format!("{base}/repos/add"))
+        .form(&[("url", file_url(&remote).as_str()), ("tags", "webtest")])
+        .send()
+        .await?;
+    wait_jobs_done(&base).await;
+
+    // create a folder via the GUI endpoint
+    let resp = client
+        .post(format!("{base}/folders/create"))
+        .form(&[("parent", ""), ("name", "games"), ("icon", "🎮")])
+        .send()
+        .await?;
+    assert_eq!(resp.status(), 200);
+    // folder.json on disk carries the icon
+    let fm: serde_json::Value = serde_json::from_str(&fs::read_to_string(
+        tmp.path().join("archive/games/folder.json"),
+    )?)?;
+    assert_eq!(fm["icon"], "🎮");
+    // empty folder is visible in the sidebar with count 0 and its icon
+    let page = client.get(format!("{base}/")).send().await?.text().await?;
+    assert!(page.contains("games"), "{page}");
+    assert!(page.contains("🎮"), "{page}");
+
+    // nested folder: decomp under games
+    let resp = client
+        .post(format!("{base}/folders/create"))
+        .form(&[("parent", "games"), ("name", "decomp"), ("icon", "")])
+        .send()
+        .await?;
+    assert_eq!(resp.status(), 200);
+    assert!(tmp.path().join("archive/games/decomp/folder.json").exists());
+
+    // move the repo into games/decomp via the metadata form
+    let resp = client
+        .post(format!("{base}/repos/remotes-webproj/metadata"))
+        .form(&[("folder", "games/decomp"), ("name", "WebTest"), ("description", ""), ("notes", "")])
+        .send()
+        .await?;
+    assert_eq!(resp.status(), 200);
+    assert!(
+        tmp.path().join("archive/games/decomp/remotes-webproj/repo.json").exists(),
+        "repo moved on disk"
+    );
+    // sidebar shows the nested folder with count 1
+    let page = client.get(format!("{base}/")).send().await?.text().await?;
+    assert!(page.contains("decomp"), "{page}");
+
+    // rename the inner folder
+    let resp = client
+        .post(format!("{base}/folders/update"))
+        .form(&[("rel", "games/decomp"), ("op", "save"), ("name", "n64"), ("icon", "🕹")])
+        .send()
+        .await?;
+    assert_eq!(resp.status(), 200);
+    assert!(tmp.path().join("archive/games/n64/remotes-webproj/repo.json").exists());
+    let page = client.get(format!("{base}/")).send().await?.text().await?;
+    assert!(page.contains("🕹"), "{page}");
+
+    // delete with a repo inside must fail
+    let body = client
+        .post(format!("{base}/folders/update"))
+        .form(&[("rel", "games/n64"), ("op", "delete"), ("name", "n64"), ("icon", "")])
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert!(body.contains("move them out first"), "{body}");
+    assert!(tmp.path().join("archive/games/n64").exists());
+
+    // move the repo back out, then delete succeeds
+    client
+        .post(format!("{base}/repos/games/n64/remotes-webproj/metadata"))
+        .form(&[("folder", ""), ("name", "WebTest"), ("description", ""), ("notes", "")])
+        .send()
+        .await?;
+    assert!(tmp.path().join("archive/remotes-webproj/repo.json").exists());
+    let resp = client
+        .post(format!("{base}/folders/update"))
+        .form(&[("rel", "games/n64"), ("op", "delete"), ("name", "n64"), ("icon", "")])
+        .send()
+        .await?;
+    assert_eq!(resp.status(), 200);
+    assert!(!tmp.path().join("archive/games/n64").exists());
+
+    // invalid names are rejected
+    let body = client
+        .post(format!("{base}/folders/create"))
+        .form(&[("parent", ""), ("name", "a/b"), ("icon", "")])
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert!(body.contains("invalid folder name"), "{body}");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn drag_move_and_add_with_folder() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let remote = make_remote(tmp.path(), "webproj");
+
+    let (base, _st) = spawn_server(test_cfg(&tmp.path().join("archive"))).await;
+    let client = reqwest::Client::new();
+
+    // add with a folder: the job places the repo under it when it finishes
+    client
+        .post(format!("{base}/repos/add"))
+        .form(&[
+            ("url", file_url(&remote).as_str()),
+            ("tags", "webtest"),
+            ("folder", "tools/cli"),
+        ])
+        .send()
+        .await?;
+    wait_jobs_done(&base).await;
+    assert!(
+        tmp.path().join("archive/tools/cli/remotes-webproj/repo.json").exists(),
+        "add with folder places the repo there"
+    );
+
+    // folder options endpoint lists the implicit folder chain
+    let opts = client.get(format!("{base}/folders/options")).send().await?.text().await?;
+    assert!(opts.contains("tools"), "{opts}");
+    assert!(opts.contains("tools/cli"), "{opts}");
+
+    // drag-and-drop move: tools/cli -> tools (one level up)
+    let resp = client
+        .post(format!("{base}/repos/move"))
+        .form(&[("rel", "tools/cli/remotes-webproj"), ("folder", "tools")])
+        .send()
+        .await?;
+    assert_eq!(resp.status(), 200);
+    assert!(tmp.path().join("archive/tools/remotes-webproj/repo.json").exists());
+    assert!(!tmp.path().join("archive/tools/cli/remotes-webproj").exists());
+
+    // drop on "All repositories" (empty folder) moves back to the root
+    let resp = client
+        .post(format!("{base}/repos/move"))
+        .form(&[("rel", "tools/remotes-webproj"), ("folder", "")])
+        .send()
+        .await?;
+    assert_eq!(resp.status(), 200);
+    assert!(tmp.path().join("archive/remotes-webproj/repo.json").exists());
+
+    // a folder path running through another repo is rejected
+    let body = client
+        .post(format!("{base}/repos/move"))
+        .form(&[("rel", "remotes-webproj"), ("folder", "remotes-webproj/sub")])
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert!(body.contains("invalid folder path"), "{body}");
 
     Ok(())
 }

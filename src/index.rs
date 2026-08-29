@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
-use crate::types::{read_json, RepoManifest, SnapshotSidecar};
+use crate::types::{read_json, FolderManifest, RepoManifest, SnapshotSidecar};
 
 #[derive(Debug, Clone)]
 pub struct SnapshotEntry {
@@ -27,6 +27,17 @@ pub struct RepoEntry {
     pub branch_snapshots: Vec<SnapshotEntry>,
     /// Newest first.
     pub releases: Vec<SnapshotEntry>,
+}
+
+/// A folder with an explicit `folder.json` on disk (folders also exist
+/// implicitly for any path prefix of a repo, but only explicit ones can
+/// be empty and/or carry an icon).
+#[derive(Debug, Clone)]
+pub struct FolderEntry {
+    pub dir: PathBuf,
+    /// Path relative to the archive root, e.g. "games/decomp".
+    pub rel: String,
+    pub manifest: FolderManifest,
 }
 
 impl RepoEntry {
@@ -69,6 +80,9 @@ fn collect_snapshots(dir: &Path, out: &mut Vec<SnapshotEntry>) {
 pub struct Index {
     pub root: PathBuf,
     pub repos: Vec<RepoEntry>,
+    /// Folders carrying a folder.json (a superset of the explicit folders;
+    /// implicit prefixes are derived from repo rels at render time).
+    pub folders: Vec<FolderEntry>,
 }
 
 impl Index {
@@ -78,12 +92,14 @@ impl Index {
             bail!("archive root does not exist: {}", root.display());
         }
         let mut repos = Vec::new();
-        Self::walk(root, root, &mut repos)?;
+        let mut folders = Vec::new();
+        Self::walk(root, root, &mut repos, &mut folders)?;
         repos.sort_by(|a, b| a.rel.cmp(&b.rel));
-        Ok(Self { root: root.to_path_buf(), repos })
+        folders.sort_by(|a, b| a.rel.cmp(&b.rel));
+        Ok(Self { root: root.to_path_buf(), repos, folders })
     }
 
-    fn walk(root: &Path, dir: &Path, out: &mut Vec<RepoEntry>) -> Result<()> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<RepoEntry>, folders: &mut Vec<FolderEntry>) -> Result<()> {
         for entry in fs::read_dir(dir)? {
             let p = entry?.path();
             if !p.is_dir() {
@@ -102,7 +118,17 @@ impl Index {
                     .into_owned();
                 out.push(RepoEntry::load(p, rel)?);
             } else {
-                Self::walk(root, &p, out)?;
+                if p.join("folder.json").exists() {
+                    let rel = p
+                        .strip_prefix(root)
+                        .unwrap_or(&p)
+                        .to_string_lossy()
+                        .into_owned();
+                    let manifest = read_json::<FolderManifest>(&p.join("folder.json"))
+                        .unwrap_or_default();
+                    folders.push(FolderEntry { dir: p.clone(), rel, manifest });
+                }
+                Self::walk(root, &p, out, folders)?;
             }
         }
         Ok(())

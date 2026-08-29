@@ -6,6 +6,8 @@ Each repo is kept as shallow snapshots and release tags (plain zips on
 disk), so the archive is still browsable and searchable if the remote ever
 goes away.
 
+[![repository gallery](screenshots/reposilo-main.png)](screenshots/reposilo-main.png)
+
 ## What it does
 
 - **Archive** any git repo as a shallow snapshot (zip or tar.zst) + release
@@ -23,6 +25,8 @@ goes away.
   all read from the zip on demand (no unzip needed)
 - **Notify** on new releases with readable changelogs (GitHub release notes
   or `CHANGELOG.md` at the tag); optional webhook for external alerts
+
+[![repo detail page](screenshots/reposilo-repo.png)](screenshots/reposilo-repo.png)
 
 ## Storage model (datahoarder-first)
 
@@ -55,7 +59,7 @@ reposilo init --root /path/to/archive
 reposilo user add yourname --password <pw>   # optional: enable login
 
 # add + manage repos
-reposilo add https://github.com/Decompals/sm64.git --tag decomps --tag n64
+reposilo add https://github.com/n64decomp/sm64.git --tag decomps --tag n64
 reposilo list --tag decomps --tag n64
 reposilo refresh all                         # pull new snapshots/releases
 reposilo reindex --catalog                    # stats + catalog.json
@@ -72,12 +76,16 @@ reposilo prune-shallow                       # remove old git stores (zip-only)
 reposilo serve
 # open http://127.0.0.1:8765:
 #   - search, tag-filter, browse repos with rendered READMEs
-#   - edit metadata (name, description, notes, origin, tags) per repo
+#   - create and manage folders (any nesting depth, emoji icons or colored dots);
+#     drag cards onto a folder to move repos between them
+#   - edit metadata (name, description, notes, origin, folder, tags) per repo
 #   - import zips from Settings; assign origins to _unknown repos
 #   - notifications with readable release changelogs
 #   - dark/light theme, settings (retention, scheduler, llama.cpp)
 #   - a REST API; downloads stream straight from disk
+```
 
+```sh
 # AI auto-tagging (needs llama.cpp configured in Settings)
 reposilo autotag --dry-run                   # preview suggested tags
 reposilo autotag                             # apply (merges, never removes)
@@ -142,8 +150,8 @@ while the server is running (hot-reload).
 
 ```sh
 cargo build --release
-cargo test         # 47 tests, fully offline (file:// fixture remotes)
-cargo clippy       # clean
+cargo test
+cargo clippy
 ```
 
 Single binary (templates + CSS + htmx compiled in). No external services

@@ -26,6 +26,17 @@ pub struct RetentionOverride {
     pub keep_releases: Option<i64>,
 }
 
+/// A folder manifest, stored as `folder.json` in any archive-tree folder.
+/// Folders without one still exist implicitly (derived from repo paths);
+/// the manifest carries display settings (icon) and makes an empty folder
+/// visible to the index.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FolderManifest {
+    /// A short emoji; empty = the default colored dot.
+    pub icon: Option<String>,
+}
+
 /// The repo manifest, stored as `repo.json` in each repo directory.
 /// This file is the registry: no central repo list exists
 #[derive(Debug, Clone, Serialize, Deserialize)]

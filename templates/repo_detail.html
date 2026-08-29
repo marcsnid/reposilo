@@ -55,19 +55,6 @@
       <section class="panel">
         <h2>Tags</h2>
         {% include "tags_edit.html" %}
-        {% if !ctx.suggested_tags.is_empty() %}
-        <h2>Suggested</h2>
-        <div class="chips">
-          {% for t in ctx.suggested_tags %}
-          <form class="chip-form" hx-post="/repos/{{ ctx.rel }}/tags" hx-target="#tag-editor" hx-swap="outerHTML">
-            <input type="hidden" name="op" value="add">
-            <input type="hidden" name="value" value="{{ t }}">
-            <input type="hidden" name="tags" value="{{ ctx.tags_csv }}">
-            <button type="submit" class="chip">+ #{{ t }}</button>
-          </form>
-          {% endfor %}
-        </div>
-        {% endif %}
       </section>
 
       <section class="panel">
@@ -83,7 +70,13 @@
               <textarea name="notes" rows="2" placeholder="private notes">{{ ctx.notes }}</textarea></div>
             <div class="settings-row"><label>Origin</label>
               <input type="url" name="origin" value="{{ ctx.origin }}" placeholder="https://github.com/owner/repo.git"></div>
-            <p class="note">Changing the origin (re)assigns where this repo came from; unidentified repos get promoted out of _unknown into their owner-repo folder. Empty fields are cleared.</p>
+            <div class="settings-row"><label>Folder</label>
+              <input type="text" name="folder" value="{{ ctx.folder }}" list="folder-list" placeholder="e.g. tools/go/tui, blank = root">
+              <datalist id="folder-list">
+                {% for f in ctx.folder_options %}
+                <option value="{{ f }}"></option>
+                {% endfor %}
+              </datalist></div>
             <button type="submit" class="refresh-btn">Save metadata</button>
           </form>
           <div id="metadata-result"></div>

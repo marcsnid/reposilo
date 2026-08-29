@@ -18,6 +18,29 @@
       d.dataset.theme = n;
       try { localStorage.setItem('rs-theme', n); } catch (e) {}
     }
+    // drag-and-drop: repo cards onto sidebar folders
+    function dragRepo(ev) {
+      ev.dataTransfer.setData('text/reposilo-rel', ev.currentTarget.dataset.rel);
+      ev.dataTransfer.effectAllowed = 'move';
+    }
+    function dragOverFolder(ev) {
+      ev.preventDefault();
+      ev.currentTarget.classList.add('dragover');
+    }
+    function dragLeaveFolder(ev) {
+      ev.currentTarget.classList.remove('dragover');
+    }
+    function dropRepo(ev) {
+      ev.preventDefault();
+      ev.currentTarget.classList.remove('dragover');
+      var rel = ev.dataTransfer.getData('text/reposilo-rel');
+      if (!rel) return;
+      htmx.ajax('POST', '/repos/move', {
+        target: '#toast',
+        swap: 'innerHTML',
+        values: { rel: rel, folder: ev.currentTarget.dataset.folder || '' }
+      });
+    }
   </script>
   <link rel="stylesheet" href="/assets/style.css">
   <script src="/assets/htmx.min.js" defer></script>
@@ -32,6 +55,8 @@
           <form hx-post="/repos/add" hx-target="#add-result" hx-swap="innerHTML">
             <input name="url" type="url" placeholder="https://github.com/owner/repo.git" required>
             <input name="tags" placeholder="tags, comma separated (optional)">
+            <input name="folder" list="add-folder-list" placeholder="folder (optional, e.g. tools/rust/cli)">
+            <datalist id="add-folder-list" hx-get="/folders/options" hx-trigger="load" hx-target="this" hx-swap="innerHTML"></datalist>
             <button type="submit">Archive</button>
           </form>
           <div id="add-result"></div>
@@ -49,6 +74,7 @@
       </a>
     </div>
   </header>
+  <div id="toast"></div>
   {% block content %}{% endblock %}
 </body>
 </html>

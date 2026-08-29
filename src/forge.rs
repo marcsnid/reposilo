@@ -74,17 +74,17 @@ mod tests {
 
     #[test]
     fn github_https() {
-        let i = detect("https://github.com/Decompals/sm64.git").unwrap();
+        let i = detect("https://github.com/n64decomp/sm64.git").unwrap();
         assert_eq!(i.kind, ForgeKind::GitHub);
-        assert_eq!(i.owner, "Decompals");
+        assert_eq!(i.owner, "n64decomp");
         assert_eq!(i.name, "sm64");
     }
 
     #[test]
     fn github_ssh() {
-        let i = detect("git@github.com:Decompals/sm64.git").unwrap();
+        let i = detect("git@github.com:n64decomp/sm64.git").unwrap();
         assert_eq!(i.kind, ForgeKind::GitHub);
-        assert_eq!(i.owner, "Decompals");
+        assert_eq!(i.owner, "n64decomp");
         assert_eq!(i.name, "sm64");
     }
 
