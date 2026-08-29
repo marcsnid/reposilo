@@ -509,8 +509,7 @@ pub fn valid_move_target(path: &str, index: &Index) -> bool {
 }
 
 /// Move a repo into a folder (empty = archive root), returning its new rel.
-/// Does not lock: callers acquire the repo lock (or otherwise guarantee no
-/// concurrent job on that repo) and reindex afterwards.
+/// Callers hold the repo lock and reindex afterwards.
 pub async fn move_repo_to_folder(
     st: &Arc<AppState>,
     repo: &RepoEntry,

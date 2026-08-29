@@ -55,7 +55,7 @@
           <form hx-post="/repos/add" hx-target="#add-result" hx-swap="innerHTML">
             <input name="url" type="url" placeholder="https://github.com/owner/repo.git" required>
             <input name="tags" placeholder="tags, comma separated (optional)">
-            <input name="folder" list="add-folder-list" placeholder="folder (optional, e.g. games/decomp)">
+            <input name="folder" list="add-folder-list" placeholder="folder (optional, e.g. tools/rust/cli)">
             <datalist id="add-folder-list" hx-get="/folders/options" hx-trigger="load" hx-target="this" hx-swap="innerHTML"></datalist>
             <button type="submit">Archive</button>
           </form>

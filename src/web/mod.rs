@@ -291,9 +291,8 @@ async fn update_tags(
         Some(r) => r,
         None => return (StatusCode::NOT_FOUND, "no such repo").into_response(),
     };
-    // The manifest on disk is the source of truth; the client posts only the
-    // edit to apply. (An earlier version took the full tag list from the form,
-    // which lost edits when two forms on one page held different stale copies.)
+    // The manifest on disk is the source of truth; the form posts only the edit
+    // to apply (no client-side tag list that could be stale).
     let manifest_path = repo.dir.join("repo.json");
     let mut manifest = match crate::types::read_json::<crate::types::RepoManifest>(&manifest_path) {
         Ok(m) => m,
@@ -494,8 +493,8 @@ fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
-/// GET /folders/options: <option> list for the add-repo folder datalist
-/// (lazily loaded once per page, so the static topbar form stays cacheable).
+/// GET /folders/options: <option> list for the topbar's folder datalist
+/// (the topbar has no template context, so it fetches its folder list itself).
 async fn folders_options(State(st): State<Arc<AppState>>) -> Response {
     let paths = { let index = st.index.read().await; views::all_folder_paths(&index) };
     let opts: String = paths
@@ -604,8 +603,6 @@ struct FolderCreateForm {
 }
 
 /// POST /folders/create: mkdir + folder.json, then refresh the sidebar via OOB.
-/// The form vanishes (the OOB #app swap replaces it); the new folder showing
-/// up in the tree is the feedback.
 async fn folders_create(
     State(st): State<Arc<AppState>>,
     Form(form): Form<FolderCreateForm>,

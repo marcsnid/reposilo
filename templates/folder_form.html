@@ -10,7 +10,7 @@
         <option value="{{ p }}">{{ p }}</option>
         {% endfor %}
       </select></div>
-    <p class="note">Nested folders use full paths, e.g. create "decomp" with parent "games" for games/decomp.</p>
+    <p class="note">Nested folders use full paths, e.g. create "cli" with parent "rust" for rust/cli.</p>
   {% else %}
   <form hx-post="{{ ctx.update_url }}" hx-target="#folder-form" hx-swap="outerHTML">
     <div class="settings-row"><label>Name</label>

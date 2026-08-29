@@ -81,12 +81,11 @@ pre, code, .blob, kbd { font-family: ui-monospace, "SF Mono", Menlo, Consolas, m
   background: var(--bg-panel); border: 1px solid var(--border); border-top: none;
   border-radius: 0 0 6px 6px; padding: 0.6rem 0.8rem; width: 22rem;
 }
-/* every input on its own full-width row, button flush at the bottom */
+/* every input on its own full-width row */
 .add-panel form { display: flex; flex-direction: column; gap: 0.4rem; }
 .add-panel input { padding: 0.35rem 0.5rem; width: 100%; box-sizing: border-box; }
 .add-panel button[type="submit"] { align-self: flex-start; }
-/* job-status responses carry an out-of-band #app refresh div; never let it
-   take up space inside the panel even if htmx is slow to extract it */
+/* job-status responses embed an OOB #app refresh div; keep it out of the layout */
 #add-result [hx-swap-oob] { display: none; }
 
 /* ---------- inputs ---------- */
@@ -326,9 +325,7 @@ table.files tr:last-child td { border-bottom: none; }
 
 /* ---------- settings ---------- */
 .detail.narrow { max-width: 800px; }
-/* ---------- form rows ----------
-   Two-column grid: fixed label column, inputs start at one shared left edge
-   and fill the rest. Wider labels where needed via --label-w (settings). */
+/* ---------- form rows (two-column grid; label width via --label-w) ---------- */
 .settings-row {
   display: grid;
   grid-template-columns: var(--label-w, 9rem) 1fr;
