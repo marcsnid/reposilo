@@ -1,0 +1,13 @@
+{% if !ctx.done %}
+<div class="job-status" hx-get="/repos/job-status/{{ ctx.id }}" hx-trigger="every 1s" hx-swap="outerHTML">
+  ... {{ ctx.message }}
+</div>
+{% else if ctx.failed %}
+<div class="job-status failed">&#10007; {{ ctx.message }}</div>
+{% else %}
+<div class="job-status ok">
+  &#10003; {{ ctx.message }}
+  {% if !ctx.view_url.is_empty() %} · <a href="{{ ctx.view_url }}">view</a>{% endif %}
+</div>
+{% endif %}
+{% if !ctx.oob_app.is_empty() %}{{ ctx.oob_app|safe }}{% endif %}

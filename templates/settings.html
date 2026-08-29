@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}Settings · reposilo{% endblock %}
+{% block content %}
+<div class="detail narrow">
+  <div class="detail-head"><h1>Settings</h1></div>
+  {% if ctx.saved %}<div class="job-status ok">Saved &#10003; (applied live where possible)</div>{% endif %}
+
+  <form class="settings-form" hx-post="/settings" hx-target="#settings-area" hx-swap="outerHTML">
+    <div id="settings-area">
+    <section class="panel">
+      <h2>Retention</h2>
+      <p class="note">How much history to keep per repo. <b>-1 keeps everything</b>, 1 keeps only the newest. Per-repo overrides live on each repo page.</p>
+      <div class="settings-row"><label>Default-branch snapshots to keep</label>
+        <input type="number" name="keep_branch" value="{{ ctx.keep_branch }}" min="-1"></div>
+      <div class="settings-row"><label>Releases to keep</label>
+        <input type="number" name="keep_releases" value="{{ ctx.keep_releases }}" min="-1"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Scheduler</h2>
+      <p class="note">How often the background loop checks remotes. Unchanged repos cost a single ls-remote; nothing is cloned unless something moved.</p>
+      <div class="settings-row"><label>Enabled</label>
+        <input type="checkbox" name="sched_enabled" value="1" {% if ctx.sched_enabled %}checked{% endif %}></div>
+      <div class="settings-row"><label>Snapshot cadence (days)</label>
+        <input type="number" name="interval_days" value="{{ ctx.interval_days }}" min="1"></div>
+      <div class="settings-row"><label>Release polling (hours)</label>
+        <input type="number" name="poll_hours" value="{{ ctx.poll_hours }}" min="1"></div>
+      <div class="settings-row"><label>Loop interval (seconds)</label>
+        <input type="number" name="poll_every" value="{{ ctx.poll_every }}" min="60"></div>
+      <div class="settings-row"><label>Dead after (days unreachable)</label>
+        <input type="number" name="dead_after" value="{{ ctx.dead_after }}" min="0"></div>
+      <p class="note">A remote unreachable for this many consecutive days is marked <b>dead</b> and the scheduler stops contacting it. 0 = never declare dead. A manual refresh resurrects it if it ever comes back.</p>
+    </section>
+
+    <section class="panel">
+      <h2>llama.cpp</h2>
+      <p class="note">Any OpenAI-compatible endpoint (llama-server, ollama, LM Studio, a LAN box). Used for two things: <b>auto-tagging</b> (batch tags repos from their READMEs) and the <b>llama.cpp button</b> on the import review form, which reads a mystery zip’s fingerprint (filename, file list, README excerpt) and proposes a project name plus GitHub search queries to track down zips the offline detection couldn’t identify.</p>
+      <div class="settings-row"><label>Enabled</label>
+        <input type="checkbox" name="llm_enabled" value="1" {% if ctx.llm_enabled %}checked{% endif %}></div>
+      <div class="settings-row"><label>Endpoint URL</label>
+        <input type="text" name="llm_url" value="{{ ctx.llm_url }}" size="40" placeholder="http://192.168.0.1:11434/v1"></div>
+      <div class="settings-row"><label>Model</label>
+        <input type="text" name="llm_model" value="{{ ctx.llm_model }}" size="40" placeholder="(server default)"></div>
+      <div class="settings-row"><label>Batch size (repos per request)</label>
+        <input type="number" name="llm_batch" value="{{ ctx.llm_batch }}" min="1"></div>
+      <div class="settings-row"><label>Disable thinking mode</label>
+        <input type="checkbox" name="disable_thinking" value="1" {% if ctx.disable_thinking %}checked{% endif %}></div>
+    </section>
+
+    <section class="panel">
+      <h2>Instance</h2>
+      <p class="note">Fixed for the running server: edit the config file and restart to change these.</p>
+      <div class="settings-row"><label>Listen on</label><input type="text" value="{{ ctx.bind }}" disabled></div>
+      <div class="settings-row"><label>Archive root</label><input type="text" value="{{ ctx.archive_root }}" size="40" disabled></div>
+    </section>
+
+    <button type="submit" class="refresh-btn">Save settings</button>
+    </div>
+  </form>
+
+  <section class="panel">
+    <h2>AI tagging</h2>
+    <p class="note">Runs the configured llama.cpp over all untagged repos (batched, README-based). Configure the endpoint above first.</p>
+    <button class="refresh-btn"
+      hx-post="/api/autotag" hx-swap="none"
+      onclick="this.disabled=true; this.textContent='tagging… (check the bell icon in a few minutes)'">
+      Tag untagged repos now</button>
+  </section>
+
+  <section class="panel">
+    <h2>Import a zip collection</h2>
+    <p class="note">Point reposilo at a folder of zipped repositories; detection, GitHub suggestions and llama.cpp identification take it from there.</p>
+    <div id="import-area">
+      {% include "import_form.html" %}
+    </div>
+  </section>
+</div>
+{% endblock %}

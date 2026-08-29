@@ -1,0 +1,25 @@
+{% if !ctx.error.is_empty() %}
+<div class="import-error">⚠ {{ ctx.error }}</div>
+{% endif %}
+{% if !ctx.llm_name.is_empty() %}
+<div class="llm-result">
+  llama.cpp guesses this is <b>{{ ctx.llm_name }}</b>. Search:
+  {% for q in ctx.llm_queries %}
+  <button type="button" class="chip" hx-get="{{ q.url }}" hx-target="#suggest_{{ ctx.i }}">{{ q.q }}</button>
+  {% endfor %}
+</div>
+{% endif %}
+{% if !ctx.candidates.is_empty() %}
+<ul class="candidates">
+  {% for c in ctx.candidates %}
+  <li>
+    <a class="chip active" onclick="document.getElementById('origin_{{ ctx.i }}').value='{{ c.url }}'">{{ c.full_name }} ⭐{{ c.stars }}</a>
+    <span class="dim">{{ c.description }}</span>
+  </li>
+  {% endfor %}
+</ul>
+{% else if ctx.error.is_empty() %}
+{% if ctx.llm_name.is_empty() %}
+<p class="dim">No candidates for “{{ ctx.query }}”: try another query or enter the origin manually.</p>
+{% endif %}
+{% endif %}

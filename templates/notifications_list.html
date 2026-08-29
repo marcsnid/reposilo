@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Notifications · reposilo{% endblock %}
+{% block content %}
+<div class="detail narrow">
+  <div class="detail-head"><h1>Notifications</h1></div>
+  {% if !ctx.items.is_empty() %}
+  {% if ctx.can_mark_read %}
+  <form method="post" action="/notifications" style="margin:0.5rem 0">
+    <button type="submit" class="chip">mark all read</button>
+  </form>
+    {% endif %}
+  {% endif %}
+  {% if ctx.items.is_empty() %}
+  <p class="dim">no notifications yet: they appear when new releases are archived or remotes go dead</p>
+  {% else %}
+  {% for n in ctx.items %}
+  <div class="panel notification {% if n.kind == "new_release" %}new-release{% endif %}">
+    <div class="notif-head">
+      <b>{{ n.title }}</b>
+      <span class="dim">{{ n.at }} · <a href="/repos/{{ n.repo }}">{{ n.repo }}</a></span>
+    </div>
+    {% if !n.changelog_html.is_empty() %}
+    <div class="readme">{{ n.changelog_html|safe }}</div>
+    {% endif %}
+  </div>
+  {% endfor %}
+  {% endif %}
+</div>
+{% endblock %}

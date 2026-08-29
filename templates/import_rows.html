@@ -1,0 +1,48 @@
+{% if ctx.rows.is_empty() %}
+<div class="panel"><h2>No zips found</h2><p>That directory contained no .zip files.</p></div>
+{% else %}
+<p class="note">
+  {{ ctx.count }} zip(s) found. Confirm/edit the origin (detected ones are pre-filled), set tags,
+  or leave a row marked <b>unknown</b> to park it. Click the GitHub button for search
+  suggestions{% if ctx.llm_enabled %}, or the llama.cpp button to identify a zip from its
+  contents{% endif %}. Uncheck rows to skip them.
+</p>
+<form class="import-rows" hx-post="/import/commit" hx-target="#import-job-status">
+  <input type="hidden" name="scan" value="{{ ctx.scan_id }}">
+  <label class="dim"><input type="checkbox" name="keep" value="1"> keep originals (copy instead of move)</label>
+  <div class="job-status" id="import-job-status"></div>
+  {% for r in ctx.rows %}
+  <div class="import-row panel">
+    <div class="import-row-head">
+      <input type="checkbox" name="include_{{ r.i }}" value="1" checked>
+      <b>{{ r.file_name }}</b> <span class="dim">({{ r.size_human }})</span>
+      {% if !r.evidence.is_empty() %}<span class="badge">{{ r.evidence }}</span>{% endif %}
+      {% if !r.detected_name.is_empty() %}<span class="dim">“{{ r.detected_name }}”</span>{% endif %}
+    </div>
+    {% if !r.detected_description.is_empty() %}<p class="card-desc">{{ r.detected_description }}</p>{% endif %}
+    {% if !r.readme_excerpt.is_empty() %}
+    <details><summary class="dim">README excerpt</summary>
+      <pre class="blob small">{{ r.readme_excerpt }}</pre>
+    </details>
+    {% endif %}
+    <div class="import-row-form">
+      <input type="text" name="origin_{{ r.i }}" id="origin_{{ r.i }}" value="{{ r.origin_value }}"
+             placeholder="origin URL (https://github.com/owner/repo.git)">
+      <input type="text" name="tags_{{ r.i }}" value="{{ r.tags_value }}" placeholder="tags, comma separated">
+      <label class="dim"><input type="checkbox" name="unknown_{{ r.i }}" value="1"
+             {% if r.unknown_default %}checked{% endif %}> unknown</label>
+    </div>
+    <div class="import-row-actions">
+      <button type="button" class="chip" hx-get="{{ r.suggest_url }}" hx-target="#suggest_{{ r.i }}">GitHub</button>
+      {% if ctx.llm_enabled %}
+      <button type="button" class="chip"
+              hx-post="/import/llm" hx-vals='{"scan": "{{ ctx.scan_id }}", "i": "{{ r.i }}"}'
+              hx-target="#suggest_{{ r.i }}">llama.cpp</button>
+      {% endif %}
+    </div>
+    <div id="suggest_{{ r.i }}"></div>
+  </div>
+  {% endfor %}
+  <button type="submit" class="refresh-btn">Import selected</button>
+</form>
+{% endif %}

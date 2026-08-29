@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}{{ ctx.name }} · {{ ctx.rel }}{% endblock %}
+{% block content %}
+<div class="detail">
+  <div class="detail-head">
+    <div>
+      <h1><a href="{{ ctx.back_url }}">←</a> <span class="file-path">{{ ctx.name }}</span></h1>
+      <div class="detail-sub">
+        <span class="badge">{{ ctx.commit }}</span>
+      </div>
+    </div>
+  </div>
+  <section class="panel">
+    {% if ctx.is_markdown %}
+    <div class="readme">{{ ctx.content|safe }}</div>
+    {% else %}
+    <pre class="blob">{{ ctx.content }}</pre>
+    {% endif %}
+    {% if ctx.truncated %}<p class="note">File truncated at 512 KB.</p>{% endif %}
+  </section>
+</div>
+{% endblock %}
