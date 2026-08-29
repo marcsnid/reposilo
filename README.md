@@ -142,9 +142,18 @@ while the server is running (hot-reload).
 
 - **Release binaries/assets**: downloading the files attached to a release,
   not just the source snapshot
+- **git bundle archives**: a full-history bundle saved alongside the
+  snapshot, so a dead repo can be re-established (re-cloned, re-pushed),
+  not just browsed
 - **Content-addressed dedup across repos**: currently dedup is per-repo
   (a release zip and branch snapshot pointing at the same commit share one
   file on disk), but identical content in *different* repos is stored twice
+- **Forge enrichment beyond GitHub**: stars, topics, and release notes for
+  GitLab and Forgejo
+- **Archive export/sync**: a guided way to move an archive tree between
+  machines (verify integrity, rebuild the index on the far end)
+- **Dockerfile**: add Dockerfile support and container pushing. This is vital
+  for the selfhosted claims as it enables most normal workflows.
 
 ## Development
 
