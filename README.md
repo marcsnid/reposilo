@@ -55,7 +55,7 @@ reposilo init --root /path/to/archive
 reposilo user add yourname --password <pw>   # optional: enable login
 
 # add + manage repos
-reposilo add https://github.com/Decompals/sm64.git --tag decomps --tag n64
+reposilo add https://github.com/n64decomp/sm64.git --tag decomps --tag n64
 reposilo list --tag decomps --tag n64
 reposilo refresh all                         # pull new snapshots/releases
 reposilo reindex --catalog                    # stats + catalog.json

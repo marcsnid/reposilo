@@ -269,9 +269,8 @@ async fn blob_page(st: &Arc<AppState>, rel: &str, blob: &str) -> Response {
 
 #[derive(Deserialize, Default)]
 struct TagEditForm {
-    #[serde(default)] tags: String, // current tags csv
     #[serde(default)] op: String,    // "add" | "remove"
-    #[serde(default)] value: String,
+    #[serde(default)] value: String, // tag to add/remove
 }
 
 /// POST /repos/{rel}/tags: add or remove a tag, returns the editor fragment.
@@ -284,14 +283,15 @@ async fn update_tags(
         Some(r) => r,
         None => return (StatusCode::NOT_FOUND, "no such repo").into_response(),
     };
-    let current: Vec<String> = form
-        .tags
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(String::from)
-        .collect();
-    let mut tags = current;
+    // The manifest on disk is the source of truth; the client posts only the
+    // edit to apply. (An earlier version took the full tag list from the form,
+    // which lost edits when two forms on one page held different stale copies.)
+    let manifest_path = repo.dir.join("repo.json");
+    let mut manifest = match crate::types::read_json::<crate::types::RepoManifest>(&manifest_path) {
+        Ok(m) => m,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    };
+    let mut tags = manifest.tags.clone();
     match form.op.as_str() {
         "add" => {
             let v = form.value.trim().to_string();
@@ -310,17 +310,18 @@ async fn update_tags(
     }
     tags.sort();
     tags.dedup();
-    let manifest_path = repo.dir.join("repo.json");
-    let mut manifest = match crate::types::read_json::<crate::types::RepoManifest>(&manifest_path) {
-        Ok(m) => m,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
-    };
     manifest.tags = tags.clone();
     if let Err(e) = crate::types::write_json(&manifest_path, &manifest) {
         return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response();
     }
     let _ = st.reindex().await;
-    let ctx = TagsCtx { rel: rel.to_string(), tags_csv: tags.join(","), tags };
+    let suggested_tags: Vec<String> = manifest
+        .suggested_tags
+        .iter()
+        .filter(|t| !tags.iter().any(|e| e.eq_ignore_ascii_case(t)))
+        .cloned()
+        .collect();
+    let ctx = TagsCtx { rel: rel.to_string(), tags, suggested_tags };
     render(&TagsT { ctx })
 }
 
@@ -351,7 +352,6 @@ async fn repo_post(
 ) -> Response {
     if let Some(rel) = rest.strip_suffix("/tags") {
         let edit = TagEditForm {
-            tags: form.get("tags").cloned().unwrap_or_default(),
             op: form.get("op").cloned().unwrap_or_default(),
             value: form.get("value").cloned().unwrap_or_default(),
         };
@@ -359,11 +359,7 @@ async fn repo_post(
     } else if let Some(rel) = rest.strip_suffix("/refresh") {
         refresh_ui(&st, rel).await
     } else if let Some(rel) = rest.strip_suffix("/origin") {
-        let edit = TagEditForm {
-            tags: form.get("tags").cloned().unwrap_or_default(),
-            op: form.get("op").cloned().unwrap_or_default(),
-            value: form.get("value").cloned().unwrap_or_default(),
-        };
+        let edit = OriginForm { value: form.get("value").cloned().unwrap_or_default() };
         assign_origin_ui(&st, rel, edit).await
     } else if let Some(rel) = rest.strip_suffix("/metadata") {
         save_metadata_ui(&st, rel, form).await
@@ -435,9 +431,13 @@ async fn save_metadata_ui(st: &Arc<AppState>, rel: &str, form: HashMap<String, S
 
 /// POST /repos/{rel}/origin (form): assign an origin to a repo (promotes
 /// _unknown/ entries to their owner-repo folder and self-heals on refresh).
-async fn assign_origin_ui(st: &Arc<AppState>, rel: &str, form: TagEditForm) -> Response {
-    let TagEditForm { op: _, tags: _, value } = form;
-    let origin = value.trim().to_string();
+#[derive(Deserialize, Default)]
+struct OriginForm {
+    #[serde(default)] value: String, // origin URL
+}
+
+async fn assign_origin_ui(st: &Arc<AppState>, rel: &str, form: OriginForm) -> Response {
+    let origin = form.value.trim().to_string();
     if origin.is_empty() {
         return html(r#"<div class="import-error">origin URL is required</div>"#.into());
     }

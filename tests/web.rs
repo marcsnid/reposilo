@@ -249,20 +249,32 @@ async fn web_ui_full_flow() -> Result<()> {
         .await?;
     assert!(blob.contains("<h1>WebTest</h1>"));
 
-    // tag add via the form endpoint
+    // tag add via the form endpoint: the client posts only the edit;
+    // the manifest on disk is the tag list of record.
     let resp = client
         .post(format!("{base}/repos/remotes-webproj/tags"))
-        .form(&[("op", "add"), ("value", "added-tag"), ("tags", "webtest,fixture")])
+        .form(&[("op", "add"), ("value", "added-tag")])
         .send()
         .await?;
     assert_eq!(resp.status(), 200);
     let body = resp.text().await?;
     assert!(body.contains("#added-tag"), "{body}");
 
+    // regression: a second add must accumulate, not overwrite (the old form
+    // carried a stale client-side tag list that clobbered the first add)
+    let body = client
+        .post(format!("{base}/repos/remotes-webproj/tags"))
+        .form(&[("op", "add"), ("value", "another-tag")])
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert!(body.contains("#added-tag") && body.contains("#another-tag"), "{body}");
+
     // tag remove
     let body = client
         .post(format!("{base}/repos/remotes-webproj/tags"))
-        .form(&[("op", "remove"), ("value", "added-tag"), ("tags", "webtest,fixture,added-tag")])
+        .form(&[("op", "remove"), ("value", "added-tag")])
         .send()
         .await?
         .text()
@@ -273,7 +285,8 @@ async fn web_ui_full_flow() -> Result<()> {
     let manifest: serde_json::Value = serde_json::from_str(&fs::read_to_string(
         tmp.path().join("archive/remotes-webproj/repo.json"),
     )?)?;
-    assert_eq!(manifest["tags"][0], "fixture");
+    let tags: Vec<&str> = manifest["tags"].as_array().unwrap().iter().map(|t| t.as_str().unwrap()).collect();
+    assert_eq!(tags, ["another-tag", "fixture", "webtest"], "tags sorted, added-tag removed");
 
     Ok(())
 }

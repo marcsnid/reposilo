@@ -55,19 +55,6 @@
       <section class="panel">
         <h2>Tags</h2>
         {% include "tags_edit.html" %}
-        {% if !ctx.suggested_tags.is_empty() %}
-        <h2>Suggested</h2>
-        <div class="chips">
-          {% for t in ctx.suggested_tags %}
-          <form class="chip-form" hx-post="/repos/{{ ctx.rel }}/tags" hx-target="#tag-editor" hx-swap="outerHTML">
-            <input type="hidden" name="op" value="add">
-            <input type="hidden" name="value" value="{{ t }}">
-            <input type="hidden" name="tags" value="{{ ctx.tags_csv }}">
-            <button type="submit" class="chip">+ #{{ t }}</button>
-          </form>
-          {% endfor %}
-        </div>
-        {% endif %}
       </section>
 
       <section class="panel">

@@ -341,10 +341,9 @@ pub struct DetailCtx {
     pub description: String,
     pub notes: String,
     pub tags: Vec<String>,
-    pub tags_csv: String,
+    pub suggested_tags: Vec<String>,
     pub unidentified: bool,
     pub stars: String,
-    pub suggested_tags: Vec<String>,
     pub default_branch: String,
     pub language: String,
     pub lang_class: String,
@@ -375,7 +374,7 @@ pub struct DetailT {
 pub struct TagsCtx {
     pub rel: String,
     pub tags: Vec<String>,
-    pub tags_csv: String,
+    pub suggested_tags: Vec<String>,
 }
 
 #[derive(Template)]
@@ -519,7 +518,6 @@ pub async fn build_detail_ctx(st: &Arc<AppState>, repo: &crate::index::RepoEntry
             .cloned()
             .collect(),
         tags: m.tags.clone(),
-        tags_csv: m.tags.join(","),
         default_branch: m.default_branch.clone(),
         language: m.language.clone().unwrap_or_default(),
         lang_class: m.language.as_deref().map(lang_class).unwrap_or_default().to_string(),
