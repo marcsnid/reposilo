@@ -432,18 +432,42 @@ async fn repo_get(
 }
 
 /// Spawn a background add job (shared by the REST API and the web UI).
-pub async fn spawn_add_job(st: &Arc<AppState>, url: &str, tags: &[String], notes: Option<String>) -> u64 {
+/// `folder` optionally parks the freshly archived repo under a category
+/// folder (empty = archive root).
+pub async fn spawn_add_job(
+    st: &Arc<AppState>,
+    url: &str,
+    tags: &[String],
+    notes: Option<String>,
+    folder: Option<String>,
+) -> u64 {
     let st2 = st.clone();
     let job_url = url.to_string();
     let id = st.create_job("add", Some(job_url.clone())).await;
     let url = job_url.clone();
     let tags = tags.to_vec();
+    let folder = folder.filter(|f| !f.trim().is_empty());
     tokio::spawn(async move {
         let result = Archiver::new(st2.cfg().await).add_repo(&url, &tags, notes).await;
         match result {
             Ok(dir) => {
                 tracing::info!(repo = ?dir, "add finished");
                 let _ = st2.reindex().await;
+                if let Some(folder) = &folder {
+                    let root = st2.root().await;
+                    let rel = dir.strip_prefix(&root).unwrap_or(&dir).to_string_lossy().into_owned();
+                    if let Some(repo) = st2.find_repo(&rel).await {
+                        match move_repo_to_folder(&st2, &repo, folder).await {
+                            Ok(_) => {
+                                let _ = st2.reindex().await;
+                            }
+                            Err(e) => {
+                                // the archive itself succeeded; only the placement failed
+                                tracing::warn!(repo = %rel, "folder move failed: {e}");
+                            }
+                        }
+                    }
+                }
                 st2.finish_job(id, None).await;
             }
             Err(e) => {
@@ -453,6 +477,78 @@ pub async fn spawn_add_job(st: &Arc<AppState>, url: &str, tags: &[String], notes
         }
     });
     id
+}
+
+/// A single folder name component: no separators, no hidden/reserved names.
+pub fn valid_folder_name(name: &str) -> bool {
+    let n = name.trim();
+    !n.is_empty()
+        && !n.contains('/')
+        && !n.contains('\\')
+        && n != "."
+        && n != ".."
+        && !n.starts_with('.')
+        && n != "_unknown" // reserved for unidentified imports
+        && n.len() <= 64
+}
+
+/// A repo-move target: every component is a legal folder name and the path
+/// doesn't collide with (or run through) another repo's directory. The
+/// folder does not need to exist yet; moving creates it implicitly.
+pub fn valid_move_target(path: &str, index: &Index) -> bool {
+    if path.is_empty() {
+        return true;
+    }
+    if !path.split('/').all(valid_folder_name) {
+        return false;
+    }
+    !index
+        .repos
+        .iter()
+        .any(|r| r.rel == path || path.starts_with(&format!("{}/", r.rel)))
+}
+
+/// Move a repo into a folder (empty = archive root), returning its new rel.
+/// Does not lock: callers acquire the repo lock (or otherwise guarantee no
+/// concurrent job on that repo) and reindex afterwards.
+pub async fn move_repo_to_folder(
+    st: &Arc<AppState>,
+    repo: &RepoEntry,
+    dest_folder: &str,
+) -> Result<String, String> {
+    let dest_folder = dest_folder.trim().trim_matches('/');
+    let current_parent = repo.rel.rsplit_once('/').map(|(p, _)| p.to_string()).unwrap_or_default();
+    if dest_folder == current_parent {
+        return Ok(repo.rel.clone());
+    }
+    if !dest_folder.is_empty() {
+        let ok = { let index = st.index.read().await; valid_move_target(dest_folder, &index) };
+        if !ok {
+            return Err(format!("invalid folder path: {dest_folder}"));
+        }
+    }
+    let root = st.root().await;
+    let repo_name = repo.rel.rsplit('/').next().unwrap_or(&repo.rel).to_string();
+    let dest = if dest_folder.is_empty() {
+        root.join(&repo_name)
+    } else {
+        root.join(dest_folder).join(&repo_name)
+    };
+    if dest == repo.dir {
+        return Ok(repo.rel.clone());
+    }
+    if dest.exists() {
+        return Err(format!("cannot move: {} already exists", dest.display()));
+    }
+    if let Some(parent) = dest.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("cannot create folder: {e}"))?;
+    }
+    tokio::fs::rename(&repo.dir, &dest)
+        .await
+        .map_err(|e| format!("cannot move repo: {e}"))?;
+    Ok(dest.strip_prefix(&root).unwrap_or(&dest).to_string_lossy().into_owned())
 }
 
 async fn create_repo(
@@ -468,8 +564,9 @@ async fn create_repo(
         .map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect())
         .unwrap_or_default();
     let notes = body["notes"].as_str().map(String::from);
+    let folder = body["folder"].as_str().map(String::from);
 
-    let id = spawn_add_job(&st, url, &tags, notes).await;
+    let id = spawn_add_job(&st, url, &tags, notes, folder).await;
     Ok((StatusCode::ACCEPTED, Json(json!({ "job_id": id, "url": url }))).into_response())
 }
 

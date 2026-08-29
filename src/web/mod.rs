@@ -17,8 +17,8 @@ use crate::server::AppState;
 
 pub mod views;
 use views::{
-    build_detail_ctx, build_list_ctx, page_url, BlobCtx, BlobT, DetailT, FragmentT, IndexT, JobCtx,
-    JobT, TagsCtx, TagsT,
+    build_detail_ctx, build_list_ctx, page_url, BlobCtx, BlobT, DetailT, FolderFormCtx, FolderFormT,
+    FragmentT, IndexT, JobCtx, JobT, TagsCtx, TagsT,
 };
 
 pub fn router() -> Router<Arc<AppState>> {
@@ -33,6 +33,13 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/import/commit", post(import_commit))
         .route("/repos/add", post(add_repo_form))
         .route("/repos/job-status/{id}", get(job_status))
+        .route("/folders/new", get(folders_new))
+        .route("/folders/close", get(folders_close))
+        .route("/folders/edit", get(folders_edit_form))
+        .route("/folders/create", post(folders_create))
+        .route("/folders/update", post(folders_update))
+        .route("/folders/options", get(folders_options))
+        .route("/repos/move", post(repo_move))
         .route(
             "/repos/{*rest}",
             get(repo_page).post(repo_post),
@@ -122,7 +129,8 @@ async fn add_repo_form(
     }
     let tags: Vec<String> = csv_param(&form, "tags");
     let notes = form.get("notes").map(|s| s.to_string()).filter(|s| !s.is_empty());
-    let id = crate::server::spawn_add_job(&st, &url, &tags, notes).await;
+    let folder = form.get("folder").map(|s| s.to_string()).filter(|s| !s.trim().is_empty());
+    let id = crate::server::spawn_add_job(&st, &url, &tags, notes, folder).await;
     let ctx = JobCtx {
         id,
         message: format!("Archiving {url}…"),
@@ -395,6 +403,21 @@ async fn save_metadata_ui(st: &Arc<AppState>, rel: &str, form: HashMap<String, S
         }
     }
 
+    // folder move (applies after origin relocation, so both compose)
+    let desired_folder = form
+        .get("folder")
+        .map(|s| s.trim().trim_matches('/').to_string())
+        .unwrap_or_default();
+    if let Some(moved) = st.find_repo(&new_rel).await {
+        match crate::server::move_repo_to_folder(st, &moved, &desired_folder).await {
+            Ok(nr) => new_rel = nr,
+            Err(e) => {
+                st.unlock_repo(rel).await;
+                return html(format!(r#"<div class="import-error">{e}</div>"#));
+            }
+        }
+    }
+
     // plain metadata fields
     let manifest_path = if new_rel != repo.rel {
         st.root().await.join(&new_rel).join("repo.json")
@@ -465,6 +488,221 @@ async fn assign_origin_ui(st: &Arc<AppState>, rel: &str, form: OriginForm) -> Re
 fn _keep_page_url(tags: &[String], q: &str, folder: &str) -> String {
     page_url(tags, q, folder)
 }
+// ---------- folders (sidebar tree management) ----------
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+/// GET /folders/options: <option> list for the add-repo folder datalist
+/// (lazily loaded once per page, so the static topbar form stays cacheable).
+async fn folders_options(State(st): State<Arc<AppState>>) -> Response {
+    let paths = { let index = st.index.read().await; views::all_folder_paths(&index) };
+    let opts: String = paths
+        .iter()
+        .map(|p| format!("<option value=\"{}\"></option>", html_escape(p)))
+        .collect();
+    html(opts)
+}
+
+#[derive(Deserialize, Default)]
+struct MoveForm {
+    #[serde(default)] rel: String,
+    #[serde(default)] folder: String,
+}
+
+/// POST /repos/move: drag-and-drop target. Moves a repo into a folder and
+/// answers with an out-of-bounds #app refresh; errors land in #toast.
+async fn repo_move(State(st): State<Arc<AppState>>, Form(form): Form<MoveForm>) -> Response {
+    let err = |msg: String| html(format!(r#"<div class="import-error">{}</div>"#, html_escape(&msg)));
+    let rel = form.rel.trim().trim_matches('/').to_string();
+    let Some(repo) = st.find_repo(&rel).await else {
+        return err(format!("no such repo: {rel}"));
+    };
+    if !st.try_lock_repo(&rel).await {
+        return err(format!("a job is running for {rel}; try again when it finishes"));
+    }
+    let result = crate::server::move_repo_to_folder(&st, &repo, &form.folder).await;
+    st.unlock_repo(&rel).await;
+    match result {
+        Ok(_) => {
+            st.reindex().await.ok();
+            html(oob_app_refresh(&st).await)
+        }
+        Err(e) => err(e),
+    }
+}
+
+/// GET /folders/new: the create form (parent dropdown from the index).
+async fn folders_new(State(st): State<Arc<AppState>>) -> Response {
+    let ctx = {
+        let index = st.index.read().await;
+        FolderFormCtx {
+            mode: "new".into(),
+            rel: String::new(),
+            update_url: "/folders/create".into(),
+            name: String::new(),
+            parent: String::new(),
+            parents: views::all_folder_paths(&index),
+            icon: String::new(),
+            count: 0,
+        }
+    };
+    render(&FolderFormT { ctx })
+}
+
+/// GET /folders/close: empty response; the cancel button clears the slot.
+async fn folders_close() -> Response {
+    html(String::new())
+}
+
+/// GET /folders/edit?rel=…: the edit form for an existing folder.
+async fn folders_edit_form(
+    State(st): State<Arc<AppState>>,
+    Query(map): Query<HashMap<String, String>>,
+) -> Response {
+    let rel = map.get("rel").cloned().unwrap_or_default();
+    let ctx = {
+        let index = st.index.read().await;
+        let is_known = views::valid_folder_path(&rel, &index);
+        let icon = index
+            .folders
+            .iter()
+            .find(|f| f.rel == rel)
+            .and_then(|f| f.manifest.icon.clone())
+            .unwrap_or_default();
+        let count = index
+            .repos
+            .iter()
+            .filter(|r| r.rel.starts_with(&format!("{rel}/")))
+            .count();
+        (is_known, icon, count)
+    };
+    if !ctx.0 {
+        return html("<div class=\"import-error\">no such folder</div>".into());
+    }
+    let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
+    render(&FolderFormT {
+        ctx: FolderFormCtx {
+            mode: "edit".into(),
+            rel: rel.clone(),
+            update_url: "/folders/update".into(),
+            name,
+            parent: String::new(),
+            parents: Vec::new(),
+            icon: ctx.1,
+            count: ctx.2,
+        },
+    })
+}
+
+#[derive(Deserialize, Default)]
+struct FolderCreateForm {
+    #[serde(default)] parent: String,
+    #[serde(default)] name: String,
+    #[serde(default)] icon: String,
+}
+
+/// POST /folders/create: mkdir + folder.json, then refresh the sidebar via OOB.
+/// The form vanishes (the OOB #app swap replaces it); the new folder showing
+/// up in the tree is the feedback.
+async fn folders_create(
+    State(st): State<Arc<AppState>>,
+    Form(form): Form<FolderCreateForm>,
+) -> Response {
+    let err = |msg: String| html(format!(r#"<div class="import-error">{msg}</div>"#));
+    let name = form.name.trim().to_string();
+    let parent = form.parent.trim().trim_matches('/').to_string();
+    if !crate::server::valid_folder_name(&name) {
+        return err("invalid folder name (no slashes, not hidden, not _unknown)".into());
+    }
+    if !parent.is_empty() {
+        let ok = { let index = st.index.read().await; views::valid_folder_path(&parent, &index) };
+        if !ok {
+            return err(format!("unknown parent folder: {parent}"));
+        }
+    }
+    let rel = if parent.is_empty() { name.clone() } else { format!("{parent}/{name}") };
+    let root = st.root().await;
+    let dir = root.join(&rel);
+    if dir.exists() {
+        return err(format!("{rel} already exists"));
+    }
+    if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+        return err(format!("cannot create folder: {e}"));
+    }
+    let manifest = crate::types::FolderManifest { icon: Some(form.icon.trim().to_string()).filter(|s| !s.is_empty()) };
+    if let Err(e) = crate::types::write_json(&dir.join("folder.json"), &manifest) {
+        return err(format!("cannot write folder.json: {e}"));
+    }
+    st.reindex().await.ok();
+    html(oob_app_refresh(&st).await)
+}
+
+#[derive(Deserialize, Default)]
+struct FolderUpdateForm {
+    #[serde(default)] rel: String,
+    #[serde(default)] op: String,
+    #[serde(default)] name: String,
+    #[serde(default)] icon: String,
+}
+
+/// POST /folders/update: rename, set icon, or delete (only when empty).
+async fn folders_update(
+    State(st): State<Arc<AppState>>,
+    Form(form): Form<FolderUpdateForm>,
+) -> Response {
+    let err = |msg: String| html(format!(r#"<div class="import-error">{msg}</div>"#));
+    let rel = form.rel.trim().trim_matches('/').to_string();
+    let root = st.root().await;
+    let dir = root.join(&rel);
+
+    let (is_known, count) = {
+        let index = st.index.read().await;
+        let known = views::valid_folder_path(&rel, &index);
+        let count = index.repos.iter().filter(|r| r.rel.starts_with(&format!("{rel}/"))).count();
+        (known, count)
+    };
+    if !is_known {
+        return err(format!("no such folder: {rel}"));
+    }
+
+    if form.op == "delete" {
+        if count > 0 {
+            return err(format!("folder holds {count} repos; move them out first"));
+        }
+        if let Err(e) = tokio::fs::remove_dir_all(&dir).await {
+            return err(format!("cannot delete folder: {e}"));
+        }
+        st.reindex().await.ok();
+        return html(oob_app_refresh(&st).await);
+    }
+
+    // save: rename when the name changed
+    let name = form.name.trim().to_string();
+    if !crate::server::valid_folder_name(&name) {
+        return err("invalid folder name (no slashes, not hidden, not _unknown)".into());
+    }
+    let parent = rel.rsplit_once('/').map(|(p, _)| p.to_string()).unwrap_or_default();
+    let new_rel = if parent.is_empty() { name.clone() } else { format!("{parent}/{name}") };
+    if new_rel != rel {
+        let new_dir = root.join(&new_rel);
+        if new_dir.exists() {
+            return err(format!("{new_rel} already exists"));
+        }
+        if let Err(e) = tokio::fs::rename(&dir, &new_dir).await {
+            return err(format!("cannot rename folder: {e}"));
+        }
+    }
+    let dir = root.join(&new_rel);
+    let manifest = crate::types::FolderManifest { icon: Some(form.icon.trim().to_string()).filter(|s| !s.is_empty()) };
+    if let Err(e) = crate::types::write_json(&dir.join("folder.json"), &manifest) {
+        return err(format!("cannot write folder.json: {e}"));
+    }
+    st.reindex().await.ok();
+    html(oob_app_refresh(&st).await)
+}
+
 // ---------- settings ----------
 
 async fn settings_page(State(st): State<Arc<AppState>>) -> Response {

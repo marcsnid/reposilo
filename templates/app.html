@@ -17,14 +17,17 @@
 
 <div class="layout">
   <aside class="sidebar">
-    <h3>Folders</h3>
+    <h3>Folders <button class="fnew" title="new folder" hx-get="/folders/new" hx-target="#folder-form-slot">＋</button></h3>
+    <div id="folder-form-slot"></div>
     <ul class="folders">
-      <li><a class="{% if ctx.folder == "" %}active{% endif %}" hx-get="{{ ctx.all_folders_url }}" hx-target="#app" hx-push-url="true">All repositories <span class="count">{{ ctx.total }}</span></a></li>
+      <li data-folder="" ondragover="dragOverFolder(event)" ondragleave="dragLeaveFolder(event)" ondrop="dropRepo(event)"><a class="{% if ctx.folder == "" %}active{% endif %}" hx-get="{{ ctx.all_folders_url }}" hx-target="#app" hx-push-url="true">All repositories <span class="count">{{ ctx.total }}</span></a></li>
       {% for f in ctx.folders %}
-      <li class="depth-{{ f.depth }}">
+      <li style="padding-left: {{ f.indent }}" data-folder="{{ f.rel }}" ondragover="dragOverFolder(event)" ondragleave="dragLeaveFolder(event)" ondrop="dropRepo(event)">
+        <span class="ficon">{% if !f.icon.is_empty() %}{{ f.icon }}{% else %}<span class="fdot {{ f.dot_class }}"></span>{% endif %}</span>
         <a class="{% if f.active %}active{% endif %}" hx-get="{{ f.url }}" hx-target="#app" hx-push-url="true">
           {{ f.name }} <span class="count">{{ f.count }}</span>
         </a>
+        <button class="fedit" title="edit folder" hx-get="{{ f.edit_url }}" hx-target="#folder-form-slot">&#9998;</button>
       </li>
       {% endfor %}
     </ul>
@@ -48,7 +51,7 @@
     {% else %}
     <div class="grid">
       {% for r in ctx.repos %}
-      <div class="card">
+      <div class="card" draggable="true" data-rel="{{ r.rel }}" ondragstart="dragRepo(event)">
         <div class="card-head">
           <a class="card-title" href="/repos/{{ r.rel }}">{{ r.name }}</a>
           <span class="badge forge-{{ r.forge }}">{{ r.forge }}</span>

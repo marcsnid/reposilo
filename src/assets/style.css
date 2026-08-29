@@ -112,6 +112,37 @@ button:hover, button[type="submit"]:hover { background: var(--chip-hover); }
 .sidebar .count { color: var(--text-muted); font-size: 0.8rem; }
 .folders li.depth-1 { padding-left: 0.9rem; }
 .folders li.depth-2 { padding-left: 1.8rem; }
+
+/* folder icons: emoji or a colored dot when unset (color hashes from the path) */
+.ficon { display: inline-block; width: 1.2em; text-align: center; }
+.fdot { display: inline-block; width: 0.55rem; height: 0.55rem; border-radius: 50%; vertical-align: middle; margin-bottom: 0.1rem; }
+.dot-0 { background: #e5534b; }
+.dot-1 { background: #e0823d; }
+.dot-2 { background: #bb8009; }
+.dot-3 { background: #57ab5a; }
+.dot-4 { background: #3992c4; }
+.dot-5 { background: #8250df; }
+.dot-6 { background: #d6318c; }
+.dot-7 { background: #768390; }
+.fnew { background: none; border: none; color: var(--text-muted); cursor: pointer; padding: 0 0.3rem; font-size: 0.9rem; }
+.fnew:hover { color: var(--accent); }
+.fedit { background: none; border: none; color: var(--text-muted); cursor: pointer; padding: 0 0.2rem; font-size: 0.7rem; opacity: 0; }
+.folders li:hover .fedit, .fedit:focus { opacity: 1; }
+.fedit:hover { color: var(--accent); }
+.folders li.dragover { background: var(--chip-active); border-radius: 6px; }
+.card[draggable] { cursor: grab; }
+.card[draggable]:active { cursor: grabbing; }
+#toast .import-error { margin: 0.4rem 1.2rem; max-width: 40rem; }
+.folder-form { padding: 0.6rem; margin: 0 0 0.6rem; font-size: 0.85rem; }
+.folder-form .note { margin: 0.3rem 0; }
+.emoji-pick { display: flex; flex-wrap: wrap; gap: 0.2rem; margin: 0.4rem 0; }
+.emoji-pick button { background: var(--chip-bg); border: 1px solid var(--border); border-radius: 6px; cursor: pointer; padding: 0.1rem 0.3rem; font-size: 0.95rem; }
+.emoji-pick button:hover { background: var(--chip-hover); }
+.folder-form .form-buttons { display: flex; gap: 0.4rem; margin-top: 0.5rem; flex-wrap: wrap; }
+.folder-form .form-buttons button[type="submit"] { background: var(--chip-bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 0.25rem 0.7rem; cursor: pointer; }
+.folder-form .form-buttons button[type="submit"]:hover { background: var(--chip-hover); }
+.folder-form .dim-btn { background: none; color: var(--text-muted); border: none; cursor: pointer; padding: 0.25rem 0.4rem; font-size: 0.85rem; }
+.folder-form .dim-btn:hover { color: var(--danger); }
 .taglist li a { display: inline-block; }
 
 .main { flex: 1; min-width: 0; }
