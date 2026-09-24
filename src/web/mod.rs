@@ -268,6 +268,7 @@ async fn blob_page(st: &Arc<AppState>, rel: &str, blob: &str) -> Response {
     let content = if is_markdown {
         crate::files::markdown_to_html(&text)
     } else {
+        // plain text: blob.html renders it through askama's auto-escaping
         text
     };
     let ctx = BlobCtx {

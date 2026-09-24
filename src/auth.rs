@@ -148,7 +148,7 @@ pub fn add_user(root: &Path, username: &str, password: &str) -> anyhow::Result<(
         created: crate::archiver::now_rfc3339(),
         last_seen: None,
     });
-    std::fs::write(users_path(root), serde_json::to_string_pretty(&file)?)?;
+    crate::types::write_atomic(&users_path(root), serde_json::to_string_pretty(&file)?.as_bytes())?;
     Ok(())
 }
 
@@ -160,7 +160,7 @@ pub fn remove_user(root: &Path, username: &str) -> anyhow::Result<()> {
     if file.users.len() == before {
         anyhow::bail!("no such user: {username}");
     }
-    std::fs::write(users_path(root), serde_json::to_string_pretty(&file)?)?;
+    crate::types::write_atomic(&users_path(root), serde_json::to_string_pretty(&file)?.as_bytes())?;
     Ok(())
 }
 
@@ -176,7 +176,7 @@ pub fn set_last_seen(root: &Path, username: &str) -> anyhow::Result<()> {
     if let Some(u) = file.users.iter_mut().find(|u| u.username == username) {
         u.last_seen = Some(crate::archiver::now_rfc3339());
     }
-    std::fs::write(users_path(root), serde_json::to_string_pretty(&file)?)?;
+    crate::types::write_atomic(&users_path(root), serde_json::to_string_pretty(&file)?.as_bytes())?;
     Ok(())
 }
 

@@ -236,13 +236,14 @@ impl Config {
         self.archive.root = p.to_string_lossy().into_owned();
     }
 
-    /// Save config to a TOML file.
+    /// Save config to a TOML file (atomic: temp + rename).
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("cannot create config dir {}", parent.display()))?;
         }
-        fs::write(path, toml::to_string_pretty(self)?)?;
+        let s = toml::to_string_pretty(self)?;
+        crate::types::write_atomic(path, s.as_bytes())?;
         Ok(())
     }
 }

@@ -108,12 +108,17 @@ pub fn pick_readme(entries: &[FileEntry]) -> Option<&FileEntry> {
 
 /// Render markdown to HTML.
 pub fn markdown_to_html(md: &str) -> String {
-    use pulldown_cmark::{html, Options, Parser};
+    use pulldown_cmark::{html, Event, Options, Parser};
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_TASKLISTS);
-    let parser = Parser::new_ext(md, opts);
+    // Archived content is untrusted: render raw HTML as literal text instead of
+    // passing it through (prevents stored XSS from a README/changelog).
+    let parser = Parser::new_ext(md, opts).map(|ev| match ev {
+        Event::Html(s) | Event::InlineHtml(s) => Event::Text(s),
+        other => other,
+    });
     let mut out = String::new();
     html::push_html(&mut out, parser);
     out
@@ -217,6 +222,18 @@ pub async fn readme_description(shallow: &Path, rev: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn markdown_renders_raw_html_as_literal_text() {
+        // Archived content is untrusted: a <script>/onerror in a README must
+        // never survive into the page as executable HTML.
+        let html = markdown_to_html("hi <script>alert(1)</script> <img src=x onerror=alert(2)>");
+        assert!(!html.contains("<script>"), "raw script survived: {html}");
+        assert!(!html.contains("<img"), "raw img survived: {html}");
+        assert!(html.contains("&lt;script&gt;"), "should be escaped text: {html}");
+        // real markdown still renders
+        assert!(markdown_to_html("**bold**").contains("<strong>bold</strong>"));
+    }
 
     #[test]
     fn first_paragraph_skips_headings_and_badges() {

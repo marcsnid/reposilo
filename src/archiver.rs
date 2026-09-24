@@ -511,8 +511,19 @@ impl Archiver {
         if let Some(existing) =
             find_same_commit(repo_dir, &sidecar.commit, &self.cfg.archive.format, &zip_path)
         {
-            let _ = fs::remove_file(&zip_path);
-            fs::hard_link(&existing, &zip_path).context("hard link dedup")?;
+            // Link to a temp name, then swap it in. If the filesystem doesn't
+            // support hard links (some volume/mount types), we keep the fresh
+            // copy instead of failing the whole snapshot.
+            let tmp = zip_path.with_extension("dedup.tmp");
+            match fs::hard_link(&existing, &tmp) {
+                Ok(()) => {
+                    let _ = fs::rename(&tmp, &zip_path);
+                }
+                Err(e) => {
+                    let _ = fs::remove_file(&tmp);
+                    tracing::warn!(error = %e, "hard link dedup unsupported; keeping a second copy");
+                }
+            }
         }
 
         // hash the file as it now exists on disk (the original's bytes if linked)

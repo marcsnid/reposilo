@@ -127,16 +127,66 @@ pub struct SnapshotSidecar {
     pub zip: ZipInfo,
 }
 
+/// Write `contents` to `path` atomically: temp file in the same directory,
+/// then rename over the target. A crash or full disk can never leave a
+/// half-written manifest/sidecar that would then fail to parse.
+pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)
+        .with_context(|| format!("cannot create temp file next to {}", path.display()))?;
+    tmp.write_all(contents)?;
+    tmp.flush()?;
+    let _ = tmp.as_file().sync_all();
+    tmp.persist(path)
+        .map_err(|e| e.error)
+        .with_context(|| format!("cannot write {}", path.display()))?;
+    Ok(())
+}
+
 pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let mut s = serde_json::to_string_pretty(value)?;
     s.push('\n');
-    fs::write(path, s)
-        .with_context(|| format!("cannot write {}", path.display()))?;
-    Ok(())
+    write_atomic(path, s.as_bytes())
 }
 
 pub fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
     let s = fs::read_to_string(path)
         .with_context(|| format!("cannot read {}", path.display()))?;
     Ok(serde_json::from_str(&s)?)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_json_roundtrips_and_leaves_no_temp_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("x.json");
+        write_json(&p, &serde_json::json!({ "a": 1 })).unwrap();
+        let v: serde_json::Value = read_json(&p).unwrap();
+        assert_eq!(v["a"], 1);
+        // the temp file used for the atomic rename must be gone
+        let leftovers: Vec<String> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n != "x.json")
+            .collect();
+        assert!(leftovers.is_empty(), "unexpected leftover files: {leftovers:?}");
+    }
+
+    #[test]
+    fn write_json_overwrites_existing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("x.json");
+        write_json(&p, &serde_json::json!({ "a": 1 })).unwrap();
+        write_json(&p, &serde_json::json!({ "b": 2 })).unwrap();
+        let v: serde_json::Value = read_json(&p).unwrap();
+        assert!(v.get("a").is_none());
+        assert_eq!(v["b"], 2);
+    }
 }

@@ -553,3 +553,48 @@ async fn repo_delete_ui_with_files_removes_the_directory() -> Result<()> {
     );
     Ok(())
 }
+
+/// Untrusted file contents must never render as executable HTML in the blob
+/// viewer (stored XSS from an archived repo).
+#[tokio::test]
+async fn blob_viewer_escapes_untrusted_html() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let remote = make_remote(tmp.path(), "xssproj");
+    // push an untrusted HTML file so it lands in the snapshot
+    let work = tmp.path().join("work-xssproj");
+    fs::write(work.join("evil.html"), "<script>alert('xss')</script>\n")?;
+    git_ok(&["add", "."], Some(&work));
+    let mut args = ID.to_vec();
+    args.extend(["commit", "-m", "add evil"]);
+    git_ok(&args, Some(&work));
+    git_ok(&["push", "origin", "master"], Some(&work));
+    let (base, _st) = spawn_server(test_cfg(&tmp.path().join("archive"))).await;
+    let client = reqwest::Client::new();
+
+    let _: serde_json::Value = client
+        .post(format!("{base}/api/repos"))
+        .json(&serde_json::json!({ "url": file_url(&remote) }))
+        .send()
+        .await?
+        .json()
+        .await?;
+    wait_jobs_done(&base).await;
+
+    let detail: serde_json::Value = client
+        .get(format!("{base}/api/repos/remotes-xssproj"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    let file = detail["branch_snapshots"][0]["file"].as_str().unwrap().to_string();
+
+    let page = client
+        .get(format!("{base}/repos/remotes-xssproj/blob/{file}/evil.html"))
+        .send()
+        .await?;
+    assert_eq!(page.status(), 200);
+    let html = page.text().await?;
+    assert!(!html.contains("<script>alert"), "raw script survived: {html}");
+    assert!(html.contains("alert("), "file text should still be shown: {html}");
+    Ok(())
+}

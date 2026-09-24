@@ -116,7 +116,16 @@ impl Index {
                     .unwrap_or(&p)
                     .to_string_lossy()
                     .into_owned();
-                out.push(RepoEntry::load(p, rel)?);
+                // One unreadable manifest must not take down the whole archive:
+                // skip it (loudly) so the server still starts and reindexes.
+                match RepoEntry::load(p, rel.clone()) {
+                    Ok(repo) => out.push(repo),
+                    Err(e) => tracing::error!(
+                        repo = %rel,
+                        error = %format!("{e:#}"),
+                        "skipping repo with an unreadable manifest"
+                    ),
+                }
             } else {
                 if p.join("folder.json").exists() {
                     let rel = p
@@ -240,5 +249,27 @@ mod tests {
         let orphan = root.join("orphan-repo");
         fs::create_dir_all(orphan.join("branch").join("master")).unwrap();
         assert!(find_repo_by_slug(root, "orphan-repo").is_none());
+    }
+
+    /// A single unreadable manifest must not fail the whole index (that would
+    /// stop the server from starting); it is skipped with a log instead.
+    #[test]
+    fn load_skips_a_corrupt_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let good = root.join("owner-good");
+        fs::create_dir_all(&good).unwrap();
+        fs::write(
+            good.join("repo.json"),
+            r#"{"forge":"generic","name":"good","added":"2025-01-01T00:00:00Z","default_branch":"master"}"#,
+        )
+        .unwrap();
+        let bad = root.join("owner-bad");
+        fs::create_dir_all(&bad).unwrap();
+        fs::write(bad.join("repo.json"), "{ this is not json").unwrap();
+
+        let index = Index::load(root).unwrap();
+        assert_eq!(index.repos.len(), 1);
+        assert_eq!(index.repos[0].rel, "owner-good");
     }
 }
