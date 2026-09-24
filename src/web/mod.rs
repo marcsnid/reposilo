@@ -25,6 +25,7 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(index_page))
         .route("/notifications", get(notifications_page).post(notifications_mark_read))
+        .route("/stats", get(stats_page))
         .route("/import", get(import_page))
         .route("/settings", get(settings_page).post(settings_save))
         .route("/import/scan", post(import_scan))
@@ -762,6 +763,13 @@ async fn settings_page(State(st): State<Arc<AppState>>) -> Response {
     render(&views::SettingsT { ctx: views::settings_ctx_from(&cfg, false) })
 }
 
+/// GET /stats: totals + a 7-day chart + recent days, no collector required.
+async fn stats_page(State(st): State<Arc<AppState>>) -> Response {
+    let (m, t) = st.stats_snapshot().await;
+    let cfg = st.cfg().await;
+    render(&views::StatsT { ctx: views::stats_ctx_from(&m, &t, &cfg) })
+}
+
 #[derive(Default)]
 struct SettingsForm(HashMap<String, String>);
 
@@ -793,6 +801,18 @@ async fn settings_save(
     cfg.llm.model = f.0.get("llm_model").map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     cfg.llm.batch_size = num(&f, "llm_batch", cfg.llm.batch_size).max(1);
     cfg.llm.disable_thinking = f.0.get("disable_thinking").map(|v| v == "1").unwrap_or(false);
+    cfg.otel.enabled = f.0.get("otel_enabled").map(|v| v == "1").unwrap_or(false);
+    if let Some(ep) = f.0.get("otel_endpoint") {
+        if !ep.trim().is_empty() {
+            cfg.otel.endpoint = ep.trim().to_string();
+        }
+    }
+    if let Some(sn) = f.0.get("otel_service") {
+        if !sn.trim().is_empty() {
+            cfg.otel.service_name = sn.trim().to_string();
+        }
+    }
+    cfg.otel.interval_secs = num(&f, "otel_interval", cfg.otel.interval_secs).max(10);
 
     // apply live
     *st.cfg.write().await = cfg.clone();

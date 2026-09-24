@@ -370,3 +370,46 @@ async fn tar_zst_download_endpoint() -> Result<()> {
     assert!(!bytes.is_empty());
     Ok(())
 }
+/// Stats are recorded through the real job path and served on both the JSON
+/// API and the web page, and persisted for restarts.
+#[tokio::test]
+async fn stats_endpoint_reports_totals_and_activity() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let (remote, _work) = make_remote(tmp.path(), "statsproj");
+    let archive = tmp.path().join("archive");
+    fs::create_dir_all(&archive)?;
+    let (base, _st) = spawn_server(test_cfg(&archive)).await;
+    let client = reqwest::Client::new();
+
+    let resp: Value = client
+        .post(format!("{base}/api/repos"))
+        .json(&serde_json::json!({ "url": file_url(&remote) }))
+        .send()
+        .await?
+        .json()
+        .await?;
+    let job = wait_job(&base, resp["job_id"].as_u64().unwrap()).await;
+    assert_eq!(job["status"], "done", "{job}");
+
+    let stats: Value = client
+        .get(format!("{base}/api/stats"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(stats["totals"]["repos"], 1, "{stats}");
+    assert_eq!(stats["totals"]["add_ok"], 1, "{stats}");
+    assert_eq!(stats["totals"]["snapshots"], 1, "{stats}");
+    assert!(stats["days"].as_array().is_some(), "{stats}");
+
+    // the web stats page renders without a collector
+    let page = client.get(format!("{base}/stats")).send().await?;
+    assert_eq!(page.status(), 200);
+    let html = page.text().await?;
+    assert!(html.contains("repositories"), "{html}");
+    assert!(html.contains("Last 7 days"), "{html}");
+
+    // counters are persisted for the next process start
+    assert!(archive.join("metrics.json").exists());
+    Ok(())
+}

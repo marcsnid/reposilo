@@ -12,6 +12,7 @@ pub mod forgeapi;
 pub mod importer;
 pub mod index;
 pub mod llm;
+pub mod metrics;
 pub mod server;
 pub mod tagging;
 pub mod types;

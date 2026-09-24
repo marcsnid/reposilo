@@ -47,6 +47,8 @@ fn templates_render_balanced_divs() {
         ("tags", include_str!("../templates/tags_edit.html")),
         ("folder_form", include_str!("../templates/folder_form.html")),
         ("job", include_str!("../templates/job_status.html")),
+        ("settings", include_str!("../templates/settings.html")),
+        ("stats", include_str!("../templates/stats.html")),
         ("base", include_str!("../templates/base.html")),
     ] {
         let (o, c) = div_balance(tpl);

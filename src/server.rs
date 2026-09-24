@@ -88,6 +88,8 @@ pub struct AppState {
     /// zip (central directory) but a full decompress for tar.zst, so the UI
     /// loads it once per repo page and reuses it; entries expire on their own.
     pub listing_cache: Mutex<HashMap<String, (std::time::Instant, Arc<crate::files::ArchiveIndex>)>>,
+    /// Runtime + per-day stats for the built-in stats page and OTLP.
+    pub metrics: Mutex<crate::metrics::Metrics>,
     next_job_id: AtomicU64,
     next_scan_id: AtomicU64,
 }
@@ -116,6 +118,7 @@ impl AppState {
             scans: Mutex::new(HashMap::new()),
             job_notes: Mutex::new(HashMap::new()),
             listing_cache: Mutex::new(HashMap::new()),
+            metrics: Mutex::new(crate::metrics::Metrics::load(&root)),
             users: std::sync::Mutex::new(crate::auth::Users::load(&root)),
             sessions: crate::auth::SessionStore::new(),
             next_job_id: AtomicU64::new(1),
@@ -330,6 +333,47 @@ impl AppState {
     /// Find a repo by rel path; returns a clone so no lock is held.
     pub async fn find_repo(&self, rel: &str) -> Option<RepoEntry> {
         self.index.read().await.find(rel).cloned()
+    }
+
+    /// Bump one or more metric counters and persist (small JSON, cheap).
+    pub async fn record(&self, fields: &[&str]) {
+        if fields.is_empty() {
+            return;
+        }
+        let root = self.root().await;
+        let mut m = self.metrics.lock().await;
+        for f in fields {
+            m.bump(f);
+        }
+        m.prune();
+        m.save(&root);
+    }
+
+    /// Current index-derived gauges (repos, snapshots, dead/unavailable...).
+    pub async fn totals(&self) -> crate::metrics::Totals {
+        let index = self.index.read().await;
+        let mut t = crate::metrics::Totals::default();
+        for r in &index.repos {
+            t.repos += 1;
+            t.snapshots += r.branch_snapshots.len() as u64;
+            t.releases += r.releases.len() as u64;
+            match r.manifest.remote_state.as_deref() {
+                Some("dead") => t.dead += 1,
+                Some("unavailable") => t.unavailable += 1,
+                _ => {}
+            }
+            if r.manifest.tags.is_empty() {
+                t.untagged += 1;
+            }
+        }
+        t
+    }
+
+    /// A consistent (metrics, totals) snapshot for the stats page / OTLP.
+    pub async fn stats_snapshot(&self) -> (crate::metrics::Metrics, crate::metrics::Totals) {
+        let metrics = self.metrics.lock().await.clone();
+        let totals = self.totals().await;
+        (metrics, totals)
     }
 }
 
@@ -603,10 +647,12 @@ pub async fn spawn_add_job(
                     }
                 }
                 st2.finish_job(id, None).await;
+                st2.record(&["add_ok"]).await;
             }
             Err(e) => {
                 tracing::error!(repo = %url, "add failed: {e:#}");
                 st2.finish_job(id, Some(format!("{e:#}"))).await;
+                st2.record(&["add_fail"]).await;
             }
         }
     });
@@ -763,13 +809,14 @@ pub async fn spawn_refresh_job(
                 }
                 let _ = st.reindex().await;
                 st.finish_job(id, None).await;
+                st.record(&fields).await;
             }
             Err(e) => {
                 tracing::error!(repo = %rel, "refresh failed: {e:#}");
                 st.finish_job(id, Some(format!("{e:#}"))).await;
+                st.record(&["refresh_fail"]).await;
             }
         }
-        st.unlock_repo(&rel).await;
     });
     id
 }
@@ -1040,6 +1087,33 @@ async fn reindex_route(State(st): State<Arc<AppState>>) -> Result<Response, ApiE
     })))
 }
 
+/// GET /api/stats: totals + the last 30 days of counters.
+async fn stats(State(st): State<Arc<AppState>>) -> Result<Response, ApiError> {
+    let (m, t) = st.stats_snapshot().await;
+    let sums = m.sums();
+    let mut totals = serde_json::to_value(&t).unwrap_or_default();
+    if let (Some(obj), Ok(serde_json::Value::Object(sobj))) =
+        (totals.as_object_mut(), serde_json::to_value(&sums))
+    {
+        for (k, v) in sobj {
+            obj.insert(k, v);
+        }
+    }
+    let days: Vec<Value> = m
+        .days
+        .iter()
+        .rev()
+        .take(30)
+        .rev()
+        .map(|(date, s)| json!({ "date": date, "stats": s }))
+        .collect();
+    Ok(ok_json(json!({
+        "started_at": m.started_at,
+        "totals": totals,
+        "days": days,
+    })))
+}
+
 // ---------- scheduler ----------
 
 fn hours_since_rfc3339(s: &str) -> Option<f64> {
@@ -1097,6 +1171,33 @@ async fn scheduler_loop(st: Arc<AppState>) {
     }
 }
 
+/// Periodically push a metrics snapshot to OTLP when enabled. Always running
+/// so the setting can be toggled live; a no-op (just a timer) when disabled.
+async fn otel_loop(st: Arc<AppState>) {
+    loop {
+        let cfg = st.cfg().await;
+        if cfg.otel.enabled {
+            let (metrics, totals) = st.stats_snapshot().await;
+            if let Err(e) = crate::metrics::export_otlp(
+                &cfg.otel.endpoint,
+                &cfg.otel.service_name,
+                &metrics,
+                &totals,
+            )
+            .await
+            {
+                tracing::warn!(error = %e, "OTLP export failed");
+            }
+        }
+        let secs = if cfg.otel.enabled {
+            cfg.otel.interval_secs.max(10)
+        } else {
+            60
+        };
+        tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+    }
+}
+
 // ---------- router & serve ----------
 
 pub fn router(st: Arc<AppState>) -> Router {
@@ -1117,6 +1218,7 @@ pub fn router(st: Arc<AppState>) -> Router {
         .route("/api/jobs", get(list_jobs))
         .route("/api/notifications", get(list_notifications))
         .route("/api/reindex", post(reindex_route))
+        .route("/api/stats", get(stats))
         .route("/api/bell", get(bell_count))
         .route("/api/autotag", post(autotag_trigger))
         .route("/login", axum::routing::get(crate::auth::login_page).post(crate::auth::login_submit))
@@ -1133,6 +1235,7 @@ pub async fn serve(cfg: Config, config_path: Option<PathBuf>, no_scheduler: bool
     } else {
         tracing::info!("scheduler disabled");
     }
+    tokio::spawn(otel_loop(st.clone()));
     let bind = st.cfg().await.server.bind.clone();
     let app = router(st);
     let listener = tokio::net::TcpListener::bind(&bind)

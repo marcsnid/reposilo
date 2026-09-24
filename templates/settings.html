@@ -48,6 +48,19 @@
     </section>
 
     <section class="panel">
+      <h2>OpenTelemetry</h2>
+      <p class="note">Optional: push metrics (repos, refreshes, failures, releases) to an OTLP/HTTP collector. The built-in <a href="/stats">Stats</a> page always works without this.</p>
+      <div class="settings-row"><label>Enabled</label>
+        <input type="checkbox" name="otel_enabled" value="1" {% if ctx.otel_enabled %}checked{% endif %}></div>
+      <div class="settings-row"><label>OTLP endpoint</label>
+        <input type="text" name="otel_endpoint" value="{{ ctx.otel_endpoint }}" placeholder="http://localhost:4318"></div>
+      <div class="settings-row"><label>Service name</label>
+        <input type="text" name="otel_service" value="{{ ctx.otel_service }}" placeholder="reposilo"></div>
+      <div class="settings-row"><label>Push interval (seconds)</label>
+        <input type="number" name="otel_interval" value="{{ ctx.otel_interval }}" min="10"></div>
+    </section>
+
+    <section class="panel">
       <h2>Instance</h2>
       <p class="note">Fixed for the running server: edit the config file and restart to change these.</p>
       <div class="settings-row"><label>Listen on</label><input type="text" value="{{ ctx.bind }}" disabled></div>

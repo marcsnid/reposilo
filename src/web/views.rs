@@ -805,6 +805,11 @@ pub struct SettingsCtx {
     pub llm_model: String,
     pub llm_batch: String,
     pub disable_thinking: bool,
+    // otel
+    pub otel_enabled: bool,
+    pub otel_endpoint: String,
+    pub otel_service: String,
+    pub otel_interval: String,
     pub saved: bool,
 }
 
@@ -830,6 +835,10 @@ pub fn settings_ctx_from(cfg: &crate::config::Config, saved: bool) -> SettingsCt
         llm_model: cfg.llm.model.clone().unwrap_or_default(),
         llm_batch: cfg.llm.batch_size.to_string(),
         disable_thinking: cfg.llm.disable_thinking,
+        otel_enabled: cfg.otel.enabled,
+        otel_endpoint: cfg.otel.endpoint.clone(),
+        otel_service: cfg.otel.service_name.clone(),
+        otel_interval: cfg.otel.interval_secs.to_string(),
         saved,
     }
 }
@@ -868,4 +877,143 @@ pub struct NotificationsCtx {
 #[template(path = "notifications_list.html")]
 pub struct NotificationsT {
     pub ctx: NotificationsCtx,
+}
+
+// ---------- stats view ----------
+
+#[derive(Debug, Clone)]
+pub struct DayView {
+    pub date: String,      // short label, e.g. "09-24"
+    pub full_date: String, // "2025-09-24"
+    pub ok: u64,
+    pub fail: u64,
+    pub releases: u64,
+    pub snapshots: u64,
+    pub adds: u64,
+    pub adds_fail: u64,
+    pub remote_gone: u64,
+    pub ok_h: u32,   // 0..100 for the chart
+    pub fail_h: u32, // 0..100
+}
+
+#[derive(Debug, Clone)]
+pub struct StatsCtx {
+    pub started_at: String,
+    pub repos: u64,
+    pub snapshots: u64,
+    pub releases: u64,
+    pub dead: u64,
+    pub unavailable: u64,
+    pub untagged: u64,
+    pub refresh_ok: u64,
+    pub refresh_fail: u64,
+    pub add_ok: u64,
+    pub add_fail: u64,
+    pub new_releases: u64,
+    pub new_snapshots: u64,
+    pub remote_gone: u64,
+    pub success_pct: String,
+    pub week: Vec<DayView>,
+    pub days: Vec<DayView>,
+    pub otel_enabled: bool,
+    pub otel_endpoint: String,
+}
+
+#[derive(askama::Template)]
+#[template(path = "stats.html")]
+pub struct StatsT {
+    pub ctx: StatsCtx,
+}
+
+pub fn stats_ctx_from(
+    metrics: &crate::metrics::Metrics,
+    totals: &crate::metrics::Totals,
+    cfg: &crate::config::Config,
+) -> StatsCtx {
+    use time::format_description::well_known::Rfc3339;
+    use time::macros::format_description;
+    let long = format_description!("[year]-[month]-[day]");
+    let short = format_description!("[month]-[day]");
+    let now = time::OffsetDateTime::now_utc();
+
+    let day_view = |date: String, s: &crate::metrics::DayStats, max: u64| -> DayView {
+        let pct = |v: u64| -> u32 {
+            if max == 0 {
+                0
+            } else {
+                ((v as f64 / max as f64) * 100.0).round() as u32
+            }
+        };
+        let short_date = time::OffsetDateTime::parse(&format!("{date}T00:00:00Z"), &Rfc3339)
+            .ok()
+            .and_then(|t| t.format(&short).ok())
+            .unwrap_or_else(|| date.clone());
+        DayView {
+            date: short_date,
+            full_date: date,
+            ok: s.refresh_ok,
+            fail: s.refresh_fail,
+            releases: s.new_releases,
+            snapshots: s.new_snapshots,
+            adds: s.add_ok,
+            adds_fail: s.add_fail,
+            remote_gone: s.remote_gone,
+            ok_h: pct(s.refresh_ok),
+            fail_h: pct(s.refresh_fail),
+        }
+    };
+
+    // last 7 days (zero days included), ascending, for the chart
+    let zero = crate::metrics::DayStats::default();
+    let mut week_raw: Vec<(String, crate::metrics::DayStats)> = Vec::new();
+    for i in (0..7i64).rev() {
+        let key = (now - time::Duration::days(i)).format(&long).unwrap_or_default();
+        let s = metrics.days.get(&key).cloned().unwrap_or_else(|| zero.clone());
+        week_raw.push((key, s));
+    }
+    let wmax = week_raw.iter().map(|(_, s)| s.refresh_ok.max(s.refresh_fail)).max().unwrap_or(0);
+    let week: Vec<DayView> = week_raw.iter().map(|(k, s)| day_view(k.clone(), s, wmax)).collect();
+
+    // retained days with any activity, newest first, for the table
+    let dmax = metrics.days.values().map(|s| s.refresh_ok.max(s.refresh_fail)).max().unwrap_or(0);
+    let mut days: Vec<DayView> = metrics
+        .days
+        .iter()
+        .rev()
+        .filter(|(_, s)| {
+            s.refresh_ok + s.refresh_fail + s.add_ok + s.add_fail + s.new_releases + s.new_snapshots + s.remote_gone > 0
+        })
+        .map(|(k, s)| day_view(k.clone(), s, dmax))
+        .collect();
+    days.truncate(30);
+
+    let sums = metrics.sums();
+    let total_ops = sums.refresh_ok + sums.refresh_fail;
+    let success_pct = if total_ops == 0 {
+        "—".to_string()
+    } else {
+        format!("{:.1}%", (sums.refresh_ok as f64 / total_ops as f64) * 100.0)
+    };
+
+    StatsCtx {
+        started_at: metrics.started_at.clone(),
+        repos: totals.repos,
+        snapshots: totals.snapshots,
+        releases: totals.releases,
+        dead: totals.dead,
+        unavailable: totals.unavailable,
+        untagged: totals.untagged,
+        refresh_ok: sums.refresh_ok,
+        refresh_fail: sums.refresh_fail,
+        add_ok: sums.add_ok,
+        add_fail: sums.add_fail,
+        new_releases: sums.new_releases,
+        new_snapshots: sums.new_snapshots,
+        remote_gone: sums.remote_gone,
+        success_pct,
+        week,
+        days,
+        otel_enabled: cfg.otel.enabled,
+        otel_endpoint: cfg.otel.endpoint.clone(),
+    }
 }

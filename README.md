@@ -131,7 +131,25 @@ url = "http://192.168.0.1:11434/v1"  # any OpenAI-compatible endpoint
 
 [notifications]
 # webhook_url = "https://hooks.example.com/your-hook"  # new releases + dead links
+
+[otel]
+# enabled = true
+# endpoint = "http://localhost:4318"  # OTLP/HTTP collector base URL; /v1/metrics is appended
+# service_name = "reposilo"
+# interval_secs = 60
 ```
+
+### Stats and monitoring
+
+Every instance has a built-in **Stats** page (`/stats`, also in the top bar)
+and a JSON API at `/api/stats`. It shows current totals (repos, snapshots,
+releases, dead/unavailable remotes, untagged) plus a per-day 7-day bar chart
+of refresh successes vs failures and a table of recent days. Counters are
+persisted to `<archive>/metrics.json` for 90 days, so they survive restarts.
+
+Setting `[otel] enabled = true` additionally pushes the same numbers to an
+OpenTelemetry collector over OTLP/HTTP (JSON). It is optional and best-effort:
+a failing collector only logs a warning and never affects archiving.
 
 ### Users and auth
 

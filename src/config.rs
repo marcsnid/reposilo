@@ -16,6 +16,7 @@ pub struct Config {
     pub git: GitCfg,
     pub github: GithubCfg,
     pub llm: LlmCfg,
+    pub otel: OtelCfg,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,6 +116,30 @@ impl Default for RetentionCfg {
 pub struct NotificationsCfg {
     /// Optional webhook URL notified on new releases / dead remotes.
     pub webhook_url: Option<String>,
+}
+
+/// Optional OpenTelemetry OTLP/HTTP metrics export.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OtelCfg {
+    pub enabled: bool,
+    /// Collector base URL, e.g. http://localhost:4318 (the /v1/metrics path is
+    /// appended automatically).
+    pub endpoint: String,
+    pub service_name: String,
+    /// How often to push a snapshot, in seconds.
+    pub interval_secs: u64,
+}
+
+impl Default for OtelCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: "http://localhost:4318".into(),
+            service_name: "reposilo".into(),
+            interval_secs: 60,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

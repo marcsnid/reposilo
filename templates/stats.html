@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Stats · reposilo{% endblock %}
+{% block content %}
+<div class="detail narrow">
+  <div class="detail-head"><h1>Stats</h1></div>
+  {% if ctx.otel_enabled %}
+  <div class="job-status ok">Exporting to OpenTelemetry: {{ ctx.otel_endpoint }}</div>
+  {% endif %}
+  <p class="note">Metrics since {{ ctx.started_at }}. Daily counters are kept for 90 days.</p>
+
+  <section class="panel">
+    <h2>Archive</h2>
+    <div class="stat-grid">
+      <div class="stat-card"><div class="stat-num">{{ ctx.repos }}</div><div class="stat-label">repositories</div></div>
+      <div class="stat-card"><div class="stat-num">{{ ctx.snapshots }}</div><div class="stat-label">branch snapshots</div></div>
+      <div class="stat-card"><div class="stat-num">{{ ctx.releases }}</div><div class="stat-label">releases</div></div>
+      <div class="stat-card"><div class="stat-num">{{ ctx.untagged }}</div><div class="stat-label">untagged</div></div>
+      <div class="stat-card{% if ctx.dead > 0 %} stat-bad{% endif %}"><div class="stat-num">{{ ctx.dead }}</div><div class="stat-label">dead remotes</div></div>
+      <div class="stat-card"><div class="stat-num">{{ ctx.unavailable }}</div><div class="stat-label">unavailable</div></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Activity</h2>
+    <div class="stat-grid">
+      <div class="stat-card"><div class="stat-num">{{ ctx.refresh_ok }}</div><div class="stat-label">refreshes ok</div></div>
+      <div class="stat-card{% if ctx.refresh_fail > 0 %} stat-bad{% endif %}"><div class="stat-num">{{ ctx.refresh_fail }}</div><div class="stat-label">refresh failures</div></div>
+      <div class="stat-card"><div class="stat-num">{{ ctx.success_pct }}</div><div class="stat-label">success rate</div></div>
+      <div class="stat-card"><div class="stat-num">{{ ctx.new_releases }}</div><div class="stat-label">new releases</div></div>
+      <div class="stat-card"><div class="stat-num">{{ ctx.new_snapshots }}</div><div class="stat-label">new snapshots</div></div>
+      <div class="stat-card"><div class="stat-num">{{ ctx.remote_gone }}</div><div class="stat-label">remote-gone events</div></div>
+    </div>
+
+    <h3>Last 7 days</h3>
+    <div class="chart">
+      {% for d in ctx.week %}
+      <div class="chart-col" title="{{ d.full_date }} — {{ d.ok }} ok, {{ d.fail }} failed">
+        <div class="chart-bars">
+          <div class="bar bar-ok" style="height: {{ d.ok_h }}%"></div>
+          <div class="bar bar-fail" style="height: {{ d.fail_h }}%"></div>
+        </div>
+        <div class="chart-label">{{ d.date }}</div>
+      </div>
+      {% endfor %}
+    </div>
+    <div class="chart-legend"><span class="swatch bar-ok"></span> ok &nbsp; <span class="swatch bar-fail"></span> failed</div>
+
+    {% if ctx.days.is_empty() %}
+    <p class="note">No activity recorded yet.</p>
+    {% else %}
+    <h3>Recent days</h3>
+    <table class="stats-table">
+      <thead><tr><th>Date</th><th>Refreshes</th><th>Failures</th><th>Adds</th><th>Releases</th><th>Snapshots</th></tr></thead>
+      <tbody>
+      {% for d in ctx.days %}
+        <tr>
+          <td>{{ d.full_date }}</td>
+          <td>{{ d.ok }}</td>
+          <td>{% if d.fail > 0 %}<span class="bad">{{ d.fail }}</span>{% else %}0{% endif %}</td>
+          <td>{{ d.adds }}{% if d.adds_fail > 0 %} <span class="bad">({{ d.adds_fail }} failed)</span>{% endif %}</td>
+          <td>{{ d.releases }}</td>
+          <td>{{ d.snapshots }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}
