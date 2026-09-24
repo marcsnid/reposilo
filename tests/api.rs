@@ -283,6 +283,58 @@ async fn add_job_failure_is_reported() -> Result<()> {
 }
 
 #[tokio::test]
+async fn refresh_and_add_queue_locks() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let (remote, _work) = make_remote(tmp.path(), "lockproj");
+    let archive = tmp.path().join("archive");
+    fs::create_dir_all(&archive)?;
+    let cfg = test_cfg(&archive);
+    Archiver::new(cfg.clone())
+        .add_repo(&file_url(&remote), &[], None)
+        .await?;
+    let (base, st) = spawn_server(cfg).await;
+    let client = reqwest::Client::new();
+
+    // A held repo lock makes a manual refresh 409 instead of racing the lock.
+    assert!(st.try_lock_repo("remotes-lockproj").await);
+    let r = client
+        .post(format!("{base}/api/repos/remotes-lockproj/refresh"))
+        .send()
+        .await?;
+    assert_eq!(r.status(), 409, "a locked repo must reject concurrent refresh");
+    st.unlock_repo("remotes-lockproj").await;
+
+    // ...and is accepted once the lock is released.
+    let resp: Value = client
+        .post(format!("{base}/api/repos/remotes-lockproj/refresh"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    let job = wait_job(&base, resp["job_id"].as_u64().unwrap()).await;
+    assert_eq!(job["status"], "done", "{job}");
+
+    // An add whose owner-repo slug is locked fails fast through the job queue
+    // rather than two clones racing in the same directory.
+    assert!(st.try_lock_repo("remotes-lockproj").await);
+    let resp: Value = client
+        .post(format!("{base}/api/repos"))
+        .json(&serde_json::json!({ "url": file_url(&remote) }))
+        .send()
+        .await?
+        .json()
+        .await?;
+    let job = wait_job(&base, resp["job_id"].as_u64().unwrap()).await;
+    assert_eq!(job["status"], "failed", "{job}");
+    assert!(
+        job["error"].as_str().unwrap().contains("already running"),
+        "{job}"
+    );
+    st.unlock_repo("remotes-lockproj").await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn tar_zst_download_endpoint() -> Result<()> {
     let tmp = tempfile::tempdir()?;
     let (remote, _work) = make_remote(tmp.path(), "zdl");

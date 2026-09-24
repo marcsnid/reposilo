@@ -458,3 +458,96 @@ async fn drag_move_and_add_with_folder() -> Result<()> {
 
     Ok(())
 }
+
+/// Repo deletion is a UI flow: a confirm step plus an explicit "also delete
+/// files" check. Unchecked = unregister only (snapshots stay on disk).
+#[tokio::test]
+async fn repo_delete_ui_confirms_then_deletes() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let remote = make_remote(tmp.path(), "delproj");
+    let archive = tmp.path().join("archive");
+    fs::create_dir_all(&archive)?;
+    let (base, _st) = spawn_server(test_cfg(&archive)).await;
+    let client = reqwest::Client::new();
+
+    let _: serde_json::Value = client
+        .post(format!("{base}/api/repos"))
+        .json(&serde_json::json!({ "url": file_url(&remote) }))
+        .send()
+        .await?
+        .json()
+        .await?;
+    wait_jobs_done(&base).await;
+
+    // the detail page offers a Danger zone delete
+    let detail = client
+        .get(format!("{base}/repos/remotes-delproj"))
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert!(detail.contains("Danger zone"), "{detail}");
+    assert!(detail.contains("/repos/remotes-delproj/delete"), "{detail}");
+
+    // the confirm fragment asks, and offers the extra file-delete check
+    let confirm = client
+        .get(format!("{base}/repos/remotes-delproj/delete"))
+        .send()
+        .await?;
+    assert_eq!(confirm.status(), 200);
+    let body = confirm.text().await?;
+    assert!(body.contains("also permanently delete the archive files"), "{body}");
+    assert!(body.contains("name=\"files\""), "{body}");
+
+    // POST without the check => unregister only, snapshot files stay
+    let del = client
+        .post(format!("{base}/repos/remotes-delproj/delete"))
+        .form(&[("files", "0")])
+        .send()
+        .await?;
+    assert_eq!(del.status(), 200);
+    let gone = client
+        .get(format!("{base}/repos/remotes-delproj"))
+        .send()
+        .await?;
+    assert_eq!(gone.status(), 404, "repo must leave the index");
+    assert!(!archive.join("remotes-delproj").join("repo.json").exists());
+    assert!(
+        archive.join("remotes-delproj").join("branch").exists(),
+        "files must be kept when the box is unchecked"
+    );
+    Ok(())
+}
+
+/// With the extra check ticked, the archive directory is removed entirely.
+#[tokio::test]
+async fn repo_delete_ui_with_files_removes_the_directory() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let remote = make_remote(tmp.path(), "purgeproj");
+    let archive = tmp.path().join("archive");
+    fs::create_dir_all(&archive)?;
+    let (base, _st) = spawn_server(test_cfg(&archive)).await;
+    let client = reqwest::Client::new();
+
+    let _: serde_json::Value = client
+        .post(format!("{base}/api/repos"))
+        .json(&serde_json::json!({ "url": file_url(&remote) }))
+        .send()
+        .await?
+        .json()
+        .await?;
+    wait_jobs_done(&base).await;
+    assert!(archive.join("remotes-purgeproj").is_dir());
+
+    let del = client
+        .post(format!("{base}/repos/remotes-purgeproj/delete"))
+        .form(&[("files", "1")])
+        .send()
+        .await?;
+    assert_eq!(del.status(), 200);
+    assert!(
+        !archive.join("remotes-purgeproj").exists(),
+        "checking the box must delete the archive files"
+    );
+    Ok(())
+}

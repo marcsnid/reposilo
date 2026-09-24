@@ -597,7 +597,10 @@ pub async fn build_detail_ctx(st: &Arc<AppState>, repo: &crate::index::RepoEntry
             None => (String::new(), String::new(), false),
         };
         let zip_name = e.sidecar.zip.file.clone();
-        let entries = crate::files::list_zip(&zip_path).unwrap_or_default();
+        let entries = match st.archive_index(&zip_path).await {
+            Some(idx) => idx.list_root(),
+            None => Vec::new(),
+        };
         let files: Vec<FileView> = entries
             .iter()
             .map(|ent| {

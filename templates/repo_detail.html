@@ -131,6 +131,15 @@
         </ul>
       </section>
       {% endif %}
+
+      <section class="panel">
+        <h2>Danger zone</h2>
+        <p class="note">Remove this repository. You'll be asked to confirm, with an option to also delete the archived files.</p>
+        <button class="refresh-btn"
+          hx-get="/repos/{{ ctx.rel }}/delete"
+          hx-target="#delete-area" hx-swap="innerHTML">Delete repository</button>
+        <div id="delete-area"></div>
+      </section>
     </aside>
   </div>
 </div>

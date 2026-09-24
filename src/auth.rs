@@ -39,6 +39,9 @@ struct UsersFile {
 #[derive(Debug, Clone)]
 pub struct Session {
     pub username: String,
+    /// Server-side expiry: the cookie's Max-Age only bounds the browser, not
+    /// the token. Older tokens are rejected and swept so the map stays bounded.
+    expires_at: std::time::Instant,
 }
 
 // ---------- users.json management (archive-root file, reloaded on mtime) ----------
@@ -48,6 +51,10 @@ pub struct Users {
     users: Vec<User>,
     path: Option<PathBuf>,
     mtime: Option<std::time::SystemTime>,
+    /// True when users.json exists but could not be read or parsed. Auth then
+    /// fails *closed*: logins are rejected until the file is fixed, rather
+    /// than silently opening the server to everyone.
+    corrupt: bool,
 }
 
 impl Users {
@@ -61,28 +68,44 @@ impl Users {
     fn reload(&mut self) {
         let Some(path) = &self.path else { return };
         let Ok(meta) = std::fs::metadata(path) else {
+            // no file at all => auth deliberately off
             self.users.clear();
             self.mtime = None;
+            self.corrupt = false;
             return;
         };
-        if Some(meta.modified().unwrap_or(std::time::UNIX_EPOCH)) == self.mtime && !self.users.is_empty() {
+        let mtime = meta.modified().ok();
+        if mtime == self.mtime && (!self.users.is_empty() || self.corrupt) {
             return;
         }
         match std::fs::read_to_string(path) {
             Ok(s) => match serde_json::from_str::<UsersFile>(&s) {
                 Ok(f) => {
                     self.users = f.users;
-                    self.mtime = meta.modified().ok();
+                    self.mtime = mtime;
+                    self.corrupt = false;
                 }
-                Err(_) => self.users.clear(),
+                Err(e) => {
+                    // fail closed: keep auth required but reject every login
+                    tracing::error!(path = %path.display(), error = %e, "users.json is unreadable; auth fails closed");
+                    self.users.clear();
+                    self.mtime = mtime;
+                    self.corrupt = true;
+                }
             },
-            Err(_) => self.users.clear(),
+            Err(e) => {
+                tracing::error!(path = %path.display(), error = %e, "cannot read users.json; auth fails closed");
+                self.users.clear();
+                self.mtime = mtime;
+                self.corrupt = true;
+            }
         }
     }
 
     pub fn is_empty(&mut self) -> bool {
         self.reload();
-        self.users.is_empty()
+        // a corrupt file must NOT be treated as "no auth configured"
+        self.users.is_empty() && !self.corrupt
     }
 
     pub fn verify(&mut self, username: &str, password: &str) -> Option<User> {
@@ -195,15 +218,31 @@ impl SessionStore {
 
     pub fn create(&self, username: &str) -> String {
         let token = random_hex().unwrap_or_else(|_| hex::encode(crate::archiver::now_rfc3339()));
-        self.sessions
-            .lock()
-            .unwrap()
-            .insert(token.clone(), Session { username: username.to_string() });
+        let now = std::time::Instant::now();
+        let mut sessions = self.sessions.lock().unwrap();
+        // sweep expired sessions so a long-running process can't accumulate them
+        sessions.retain(|_, s| s.expires_at > now);
+        sessions.insert(
+            token.clone(),
+            Session {
+                username: username.to_string(),
+                expires_at: now + std::time::Duration::from_secs(SESSION_SECS),
+            },
+        );
         token
     }
 
     pub fn get(&self, token: &str) -> Option<Session> {
-        self.sessions.lock().unwrap().get(token).cloned()
+        let now = std::time::Instant::now();
+        let mut sessions = self.sessions.lock().unwrap();
+        match sessions.get(token) {
+            Some(s) if s.expires_at > now => Some(s.clone()),
+            Some(_) => {
+                sessions.remove(token);
+                None
+            }
+            None => None,
+        }
     }
 
     pub fn remove(&self, token: &str) {
@@ -358,4 +397,68 @@ pub async fn mw(st: State<Arc<AppState>>, req: Request, next: Next) -> Response 
         [(header::LOCATION, "/login")],
     )
         .into_response()
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sessions_expire_server_side_and_are_swept() {
+        let store = SessionStore::new();
+        let past = std::time::Instant::now() - std::time::Duration::from_secs(1);
+
+        // an already-expired token is rejected and removed
+        store.sessions.lock().unwrap().insert(
+            "old".into(),
+            Session { username: "u".into(), expires_at: past },
+        );
+        assert!(store.get("old").is_none(), "expired token must be rejected");
+        assert!(store.sessions.lock().unwrap().get("old").is_none(), "and swept");
+
+        // create() sweeps stale entries so the map can't grow over months
+        store.sessions.lock().unwrap().insert(
+            "stale".into(),
+            Session { username: "u".into(), expires_at: past },
+        );
+        let tok = store.create("alice");
+        assert!(store.sessions.lock().unwrap().get("stale").is_none());
+        assert_eq!(store.get(&tok).unwrap().username, "alice");
+
+        store.remove(&tok);
+        assert!(store.get(&tok).is_none());
+    }
+
+    #[test]
+    fn corrupt_users_file_fails_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        // no file at all => auth is deliberately off
+        let mut none = Users::load(root);
+        assert!(none.is_empty());
+
+        // a corrupt file must require auth but reject every login
+        std::fs::write(root.join("users.json"), "{ this is not json").unwrap();
+        let mut bad = Users::load(root);
+        assert!(!bad.is_empty(), "corrupt users.json must not open the server");
+        assert!(bad.verify("alice", "pw").is_none());
+        assert!(bad.find("alice").is_none());
+
+        // fixing the file re-opens normal operation
+        std::fs::write(
+            root.join("users.json"),
+            serde_json::to_string(&UsersFile { users: vec![User {
+                username: "alice".into(),
+                password_hash: hash_password("pw").unwrap(),
+                created: "2025-01-01T00:00:00Z".into(),
+                last_seen: None,
+            }] })
+            .unwrap(),
+        )
+        .unwrap();
+        // force a reload by bumping mtime via a fresh Users instance
+        let mut good = Users::load(root);
+        assert!(!good.is_empty());
+        assert!(good.verify("alice", "pw").is_some());
+    }
 }

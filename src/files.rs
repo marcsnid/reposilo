@@ -385,22 +385,99 @@ mod language_tests {
 
 // ---------- archive browsing (zip OR tar.zst; format detected by extension) ----------
 
+/// A parsed archive listing: every entry name + size, and the common project
+/// prefix. Building this is the expensive part for `tar.zst` (it must
+/// decompress the stream), so the UI caches it per browsing session and reuses
+/// it for the root listing and for resolving blob paths.
+pub struct ArchiveIndex {
+    entries: Vec<(String, u64)>,
+    prefix: Option<String>,
+}
+
+impl ArchiveIndex {
+    pub fn build(path: &Path) -> Option<Self> {
+        let entries: Vec<(String, u64)> = match fmt_of(path)? {
+            ArchFmt::Zip => {
+                let names = zip_entry_names(path)?;
+                let sizes = entry_sizes(path);
+                names
+                    .into_iter()
+                    .map(|n| {
+                        let s = *sizes.get(&n).unwrap_or(&0);
+                        (n, s)
+                    })
+                    .collect()
+            }
+            ArchFmt::TarZst => tar_entries(path)?.into_iter().map(|(n, s, _)| (n, s)).collect(),
+        };
+        let names: Vec<String> = entries.iter().map(|(n, _)| n.clone()).collect();
+        let prefix = zip_common_prefix(&names);
+        Some(Self { entries, prefix })
+    }
+
+    fn strip_prefix<'a>(&self, n: &'a str) -> &'a str {
+        match &self.prefix {
+            Some(p) => {
+                let pre = format!("{p}/");
+                n.strip_prefix(&pre).unwrap_or(n)
+            }
+            None => n,
+        }
+    }
+
+    /// Root-level listing: directories first, then files, case-insensitive.
+    pub fn list_root(&self) -> Vec<ZipEntryView> {
+        let mut out: Vec<ZipEntryView> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (name, size) in &self.entries {
+            let base = name.rsplit('/').next().unwrap_or(name);
+            if name.is_empty() || base.eq_ignore_ascii_case(".reposilo.json") {
+                continue;
+            }
+            let stripped = self.strip_prefix(name);
+            if stripped.is_empty() {
+                continue;
+            }
+            let mut parts = stripped.split('/');
+            let top = parts.next().unwrap_or("").to_string();
+            let deeper = parts.next().is_some();
+            if top.is_empty() {
+                continue;
+            }
+            let key = top.to_lowercase();
+            if seen.insert(key) {
+                out.push(ZipEntryView { name: top, is_dir: deeper, size: if deeper { 0 } else { *size } });
+            }
+        }
+        out.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+        out
+    }
+
+    /// Resolve a root-level file name to its exact archive entry (traversal
+    /// guard: only names present in the listing are reachable).
+    pub fn find(&self, file: &str) -> Option<String> {
+        let full = match &self.prefix {
+            Some(p) => format!("{p}/{file}"),
+            None => file.to_string(),
+        };
+        if file != ".reposilo.json" && self.entries.iter().any(|(n, _)| n == &full) {
+            Some(full)
+        } else {
+            None
+        }
+    }
+}
+
 /// List a snapshot archive's root entries (format auto-detected).
 /// Directories first, then files, case-insensitive by name.
 pub fn list_archive(path: &Path) -> Option<Vec<ZipEntryView>> {
-    match fmt_of(path)? {
-        ArchFmt::Zip => list_zip(path),
-        ArchFmt::TarZst => list_tar_zst(path),
-    }
+    ArchiveIndex::build(path).map(|i| i.list_root())
 }
 
 /// Locate the archive entry whose stripped name equals `file`
 /// (central directory / header listing is the traversal guard).
 pub fn find_archive_entry(path: &Path, file: &str) -> Option<String> {
-    match fmt_of(path)? {
-        ArchFmt::Zip => zip_find_entry(path, file),
-        ArchFmt::TarZst => tar_find_entry(path, file),
-    }
+    ArchiveIndex::build(path).and_then(|i| i.find(file))
 }
 
 /// Read one entry (exact archive name), capped at `max` bytes.
@@ -419,6 +496,7 @@ pub fn readme_from_archive(path: &Path) -> Option<(String, String, bool)> {
     }
 }
 
+#[derive(Debug)]
 pub enum ArchFmt { Zip, TarZst }
 
 fn fmt_of(path: &Path) -> Option<ArchFmt> {
@@ -457,52 +535,6 @@ fn tar_entries(path: &Path) -> Option<Vec<(String, u64, bool)>> {
         out.push((name, size, is_dir));
     }
     Some(out)
-}
-
-fn list_tar_zst(path: &Path) -> Option<Vec<ZipEntryView>> {
-    let raw = tar_entries(path)?;
-    let names: Vec<String> = raw.iter().map(|(n, _, _)| n.clone()).collect();
-    let prefix = zip_common_prefix(&names);
-    let strip = |n: &str| -> String {
-        match &prefix {
-            Some(p) => n.strip_prefix(&format!("{p}/")).unwrap_or(n).to_string(),
-            None => n.to_string(),
-        }
-    };
-    let mut out: Vec<ZipEntryView> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (name, size, _) in &raw {
-        let stripped = strip(name);
-        if stripped.is_empty() {
-            continue;
-        }
-        let mut parts = stripped.split('/');
-        let top = parts.next().unwrap_or("").to_string();
-        let deeper = parts.next().is_some();
-        if top.is_empty() {
-            continue;
-        }
-        let key = top.to_lowercase();
-        if seen.insert(key) {
-            out.push(ZipEntryView { name: top, is_dir: deeper, size: if deeper { 0 } else { *size } });
-        }
-    }
-    out.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.to_lowercase().cmp(&b.name.to_lowercase())));
-    Some(out)
-}
-
-fn tar_find_entry(path: &Path, file: &str) -> Option<String> {
-    let raw = tar_entries(path)?;
-    let names: Vec<String> = raw.iter().map(|(n, _, _)| n.clone()).collect();
-    let prefix = zip_common_prefix(&names);
-    let full = match &prefix {
-        Some(p) => format!("{p}/{file}"),
-        None => file.to_string(),
-    };
-    if file != ".reposilo.json" && names.iter().any(|n| n == &full) {
-        return Some(full);
-    }
-    None
 }
 
 fn tar_read_entry(path: &Path, entry: &str, max: usize) -> Option<Vec<u8>> {

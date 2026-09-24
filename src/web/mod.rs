@@ -196,6 +196,9 @@ async fn repo_page(
     if let Some((rel, blob)) = rest.split_once("/blob/") {
         return blob_page(&st, rel, blob).await;
     }
+    if let Some(rel) = rest.strip_suffix("/delete") {
+        return delete_confirm_ui(&st, rel).await;
+    }
     let repo = match st.find_repo(&rest).await {
         Some(r) => r,
         None => {
@@ -240,9 +243,12 @@ async fn blob_page(st: &Arc<AppState>, rel: &str, blob: &str) -> Response {
         return (StatusCode::NOT_FOUND, "no such snapshot").into_response();
     };
     let zip_path = entry.dir.join(&entry.sidecar.zip.file);
-    // locate the archive entry; only names present in the central directory
-    // are reachable (traversal guard)
-    let Some(archive_entry) = crate::files::zip_find_entry(&zip_path, file) else {
+    // locate the archive entry via the cached listing; only names present in
+    // the listing are reachable (traversal guard), and both formats work
+    let Some(idx) = st.archive_index(&zip_path).await else {
+        return (StatusCode::NOT_FOUND, "no such snapshot").into_response();
+    };
+    let Some(archive_entry) = idx.find(file) else {
         return (StatusCode::NOT_FOUND, "no such file").into_response();
     };
     const MAX: usize = 512 * 1024;
@@ -370,6 +376,8 @@ async fn repo_post(
         assign_origin_ui(&st, rel, edit).await
     } else if let Some(rel) = rest.strip_suffix("/metadata") {
         save_metadata_ui(&st, rel, form).await
+    } else if let Some(rel) = rest.strip_suffix("/delete") {
+        delete_repo_ui(&st, rel, form).await
     } else {
         (StatusCode::NOT_FOUND, "unknown action").into_response()
     }
@@ -477,6 +485,53 @@ async fn assign_origin_ui(st: &Arc<AppState>, rel: &str, form: OriginForm) -> Re
             html(format!(
                 r#"<div class="job-status ok">✓ origin saved: repo is now <a href="/repos/{new_rel}">{new_rel}</a><br><span class="dim">hit ⟳ Refresh now to clone it</span></div>{oob}"#
             ))
+        }
+        Err(e) => html(format!(r#"<div class="import-error">{}</div>"#, e.1)),
+    }
+}
+
+/// GET /repos/{rel}/delete: confirmation fragment. A plain "are you sure?"
+/// plus an optional check to also delete the archive files.
+async fn delete_confirm_ui(st: &Arc<AppState>, rel: &str) -> Response {
+    if st.find_repo(rel).await.is_none() {
+        return (StatusCode::NOT_FOUND, "no such repo").into_response();
+    }
+    let e = html_escape(rel);
+    html(format!(
+        r##"<div class="job-status" style="text-align:left">
+  <p>Delete <b>{e}</b>?</p>
+  <label style="display:block;margin:0.4rem 0"><input type="checkbox" name="files" value="1"> also permanently delete the archive files (irreversible)</label>
+  <button class="refresh-btn"
+    hx-post="/repos/{rel}/delete" hx-include="closest .job-status" hx-target="#toast" hx-swap="innerHTML">Delete</button>
+  <button type="button" class="dim-btn" onclick="this.closest('.job-status').remove()">Cancel</button>
+</div>"##
+    ))
+}
+
+/// POST /repos/{rel}/delete: unregister (and optionally remove files), then
+/// send the browser back to the index.
+async fn delete_repo_ui(st: &Arc<AppState>, rel: &str, form: HashMap<String, String>) -> Response {
+    let Some(repo) = st.find_repo(rel).await else {
+        return (StatusCode::NOT_FOUND, "no such repo").into_response();
+    };
+    let delete_files = form
+        .get("files")
+        .map(|v| v == "1" || v == "on" || v == "true")
+        .unwrap_or(false);
+    match crate::server::delete_repo(st, &repo, delete_files).await {
+        Ok(()) => {
+            let msg = if delete_files {
+                "deleted repository and its files"
+            } else {
+                "removed repository from the index (files kept)"
+            };
+            let mut resp = html(format!(
+                r#"<div class="job-status ok">{msg}</div>{}"#,
+                oob_app_refresh(st).await
+            ));
+            resp.headers_mut()
+                .insert("HX-Redirect", axum::http::HeaderValue::from_static("/"));
+            resp
         }
         Err(e) => html(format!(r#"<div class="import-error">{}</div>"#, e.1)),
     }
@@ -1000,19 +1055,17 @@ async fn import_commit(
         let parked = outcomes.iter().filter(|o| o.action == "unknown-parked").count();
         let failed = outcomes.iter().filter(|o| o.action == "failed").count();
         let note = format!("Imported {imported}, parked {parked} unknown, {failed} failed");
-        if failed > 0 {
+        let summary = if failed > 0 {
             let details: Vec<String> = outcomes
                 .iter()
                 .filter(|o| o.action == "failed")
                 .map(|o| format!("{}: {}", o.file, o.detail))
                 .collect();
-            st2.job_notes
-                .lock()
-                .await
-                .insert(id, format!("{note}: {}", details.join("; ")));
+            format!("{note}: {}", details.join("; "))
         } else {
-            st2.job_notes.lock().await.insert(id, note.clone());
-        }
+            note.clone()
+        };
+        st2.set_job_note(id, summary).await;
         tracing::info!("{note}");
         let _ = st2.reindex().await;
         st2.finish_job(id, None).await;

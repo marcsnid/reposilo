@@ -113,6 +113,13 @@ keep_releases = 1          # -1 keeps everything
 default_interval_days = 7
 release_poll_hours = 24
 dead_after_days = 21       # stop checking after N days unreachable
+# The scheduler checks a repo when `min(default_interval_days * 24,
+# release_poll_hours)` has elapsed since its last check. For a plain weekly
+# cadence (weekly main + weekly release check) set release_poll_hours = 168.
+
+[git]
+# depth = 1                # 1 = shallow snapshot, 0 = full mirror
+# timeout_secs = 600       # hard kill for hung git subprocesses (network hangs)
 
 [github]
 # token = "env:GITHUB_TOKEN"  # better rate limits for enrichment
@@ -139,6 +146,10 @@ reposilo user remove alice
 
 Sessions are 7-day cookies; logout clears them. The CLI can manage users
 while the server is running (hot-reload).
+
+Auth **fails closed**: if `users.json` exists but is unreadable or corrupt,
+the server stays locked (logins are rejected) instead of silently opening up.
+Fix the file to restore access. Deleting it entirely disables auth again.
 
 ## Roadmap
 

@@ -29,6 +29,13 @@ use crate::config::Config;
 use crate::index::{Index, RepoEntry, SnapshotEntry};
 use crate::types::write_json;
 
+/// Cap on retained job / job-note entries (long-running memory bound).
+const MAX_TRACKED_JOBS: usize = 500;
+/// How long a parsed archive listing stays cached (a browsing session).
+const LISTING_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+/// Hard cap on cached listings, so memory can't grow unboundedly.
+const LISTING_CACHE_MAX: usize = 32;
+
 // ---------- state ----------
 
 #[derive(Debug, Clone, Serialize)]
@@ -65,7 +72,9 @@ pub struct AppState {
     pub config_path: Option<PathBuf>,
     pub index: RwLock<Index>,
     pub jobs: Mutex<HashMap<u64, Job>>,
-    pub running: Mutex<HashSet<String>>, // repo rels currently being worked on
+    /// Repo keys (folder basenames) currently being worked on. A plain std
+    /// mutex so a `RepoLockGuard` can release it from `Drop` (no await).
+    pub running: std::sync::Mutex<HashSet<String>>,
     pub notifications: Mutex<Vec<Notification>>,
     /// Stored import scans for the review UI (keyed by scan id).
     pub scans: Mutex<HashMap<u64, importer::ImportScan>>,
@@ -75,6 +84,10 @@ pub struct AppState {
     pub sessions: crate::auth::SessionStore,
     /// Optional summary strings shown by the job-status endpoint.
     pub job_notes: Mutex<HashMap<u64, String>>,
+    /// Short-lived parsed-archive-listing cache. Building a listing is free for
+    /// zip (central directory) but a full decompress for tar.zst, so the UI
+    /// loads it once per repo page and reuses it; entries expire on their own.
+    pub listing_cache: Mutex<HashMap<String, (std::time::Instant, Arc<crate::files::ArchiveIndex>)>>,
     next_job_id: AtomicU64,
     next_scan_id: AtomicU64,
 }
@@ -98,10 +111,11 @@ impl AppState {
             config_path,
             index: RwLock::new(index),
             jobs: Mutex::new(HashMap::new()),
-            running: Mutex::new(HashSet::new()),
+            running: std::sync::Mutex::new(HashSet::new()),
             notifications: Mutex::new(notifications),
             scans: Mutex::new(HashMap::new()),
             job_notes: Mutex::new(HashMap::new()),
+            listing_cache: Mutex::new(HashMap::new()),
             users: std::sync::Mutex::new(crate::auth::Users::load(&root)),
             sessions: crate::auth::SessionStore::new(),
             next_job_id: AtomicU64::new(1),
@@ -132,9 +146,14 @@ impl AppState {
         PathBuf::from(&self.cfg().await.archive.root)
     }
 
-    /// Rebuild the index from disk and swap it in.
+    /// Rebuild the index from disk and swap it in. The disk walk + JSON parse
+    /// can take tens of ms on a large archive, so it runs on a blocking thread
+    /// to avoid stalling the async executor (this runs after every job/edit).
     pub async fn reindex(&self) -> Result<()> {
-        let fresh = Index::load(&self.root().await)?;
+        let root = self.root().await;
+        let fresh = tokio::task::spawn_blocking(move || Index::load(&root))
+            .await
+            .map_err(|e| anyhow::anyhow!("reindex task failed: {e}"))??;
         *self.index.write().await = fresh;
         Ok(())
     }
@@ -149,8 +168,33 @@ impl AppState {
             error: None,
             created: now_rfc3339(),
         };
-        self.jobs.lock().await.insert(id, job);
+        let mut jobs = self.jobs.lock().await;
+        jobs.insert(id, job);
+        // Bound memory for a process that runs for months: keep only the newest
+        // MAX_TRACKED_JOBS entries, evicting the oldest ids first.
+        if jobs.len() > MAX_TRACKED_JOBS {
+            let mut ids: Vec<u64> = jobs.keys().copied().collect();
+            ids.sort_unstable();
+            let excess = jobs.len() - MAX_TRACKED_JOBS;
+            for old in ids.into_iter().take(excess) {
+                jobs.remove(&old);
+            }
+        }
         id
+    }
+
+    /// Record a human summary for a job, keeping `job_notes` bounded too.
+    pub async fn set_job_note(&self, id: u64, note: String) {
+        let mut notes = self.job_notes.lock().await;
+        notes.insert(id, note);
+        if notes.len() > MAX_TRACKED_JOBS {
+            let mut ids: Vec<u64> = notes.keys().copied().collect();
+            ids.sort_unstable();
+            let excess = notes.len() - MAX_TRACKED_JOBS;
+            for old in ids.into_iter().take(excess) {
+                notes.remove(&old);
+            }
+        }
     }
 
     pub(crate) async fn finish_job(&self, id: u64, error: Option<String>) {
@@ -161,9 +205,16 @@ impl AppState {
         }
     }
 
+    /// Locks are keyed by the repo's unique folder basename (the owner-repo
+    /// slug). Refresh/delete/patch pass the full relative path, add passes the
+    /// bare slug; both must resolve to the same key so they can never race.
+    fn lock_key(rel: &str) -> &str {
+        rel.rsplit('/').next().unwrap_or(rel)
+    }
+
     /// Mark a repo as being worked on; false means something is already running.
-    pub(crate) async fn try_lock_repo(&self, rel: &str) -> bool {
-        self.running.lock().await.insert(rel.to_string())
+    pub async fn try_lock_repo(&self, rel: &str) -> bool {
+        self.running.lock().unwrap().insert(Self::lock_key(rel).to_string())
     }
 
     pub async fn job(&self, id: u64) -> Option<Job> {
@@ -176,7 +227,7 @@ impl AppState {
     }
 
     pub async fn unlock_repo(&self, rel: &str) {
-        self.running.lock().await.remove(rel);
+        self.running.lock().unwrap().remove(Self::lock_key(rel));
     }
 
     pub async fn push_notification(&self, kind: &str, repo: &str, title: String, body: Option<String>) {
@@ -188,6 +239,9 @@ impl AppState {
             body,
             at: now_rfc3339(),
         };
+        // Resolve the root before taking the notifications lock: `root()` awaits
+        // the config lock, and we don't want to hold one lock across another.
+        let notif_path = self.root().await.join("notifications.json");
         let mut items = self.notifications.lock().await;
         let id = items.first().map(|i| i.id + 1).unwrap_or(1);
         let n = Notification { id, ..n };
@@ -199,7 +253,7 @@ impl AppState {
             next_id: id + 1,
             items: items.clone(),
         };
-        let _ = write_json(&self.root().await.join("notifications.json"), &file);
+        let _ = write_json(&notif_path, &file);
         drop(items);
         self.fire_webhook(&n).await;
     }
@@ -241,6 +295,38 @@ impl AppState {
         }
     }
 
+    /// Get (building + caching if needed) the parsed listing for an archive.
+    /// The cache is time-bounded and size-bounded; it never grows unbounded and
+    /// never leaves files behind.
+    pub async fn archive_index(
+        &self,
+        path: &std::path::Path,
+    ) -> Option<Arc<crate::files::ArchiveIndex>> {
+        let key = path.to_string_lossy().into_owned();
+        let now = std::time::Instant::now();
+        {
+            let mut cache = self.listing_cache.lock().await;
+            cache.retain(|_, (t, _)| now.duration_since(*t) < LISTING_TTL);
+            if let Some((t, idx)) = cache.get_mut(&key) {
+                *t = now;
+                return Some(idx.clone());
+            }
+        }
+        let p = path.to_path_buf();
+        let idx = tokio::task::spawn_blocking(move || crate::files::ArchiveIndex::build(&p))
+            .await
+            .ok()??;
+        let idx = Arc::new(idx);
+        let mut cache = self.listing_cache.lock().await;
+        if cache.len() >= LISTING_CACHE_MAX {
+            if let Some(oldest) = cache.iter().min_by_key(|(_, (t, _))| *t).map(|(k, _)| k.clone()) {
+                cache.remove(&oldest);
+            }
+        }
+        cache.insert(key, (now, idx.clone()));
+        Some(idx)
+    }
+
     /// Find a repo by rel path; returns a clone so no lock is held.
     pub async fn find_repo(&self, rel: &str) -> Option<RepoEntry> {
         self.index.read().await.find(rel).cloned()
@@ -248,6 +334,27 @@ impl AppState {
 }
 
 // ---------- errors ----------
+
+/// Releases a repo lock on drop. Owned by a spawned job so a panic or an early
+/// exit can never leave the repo permanently locked.
+pub struct RepoLockGuard {
+    st: Arc<AppState>,
+    key: String,
+}
+
+impl RepoLockGuard {
+    pub fn new(st: Arc<AppState>, rel: &str) -> Self {
+        Self { st, key: AppState::lock_key(rel).to_string() }
+    }
+}
+
+impl Drop for RepoLockGuard {
+    fn drop(&mut self) {
+        if let Ok(mut set) = self.st.running.lock() {
+            set.remove(&self.key);
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct ApiError(pub StatusCode, pub String);
@@ -450,13 +557,31 @@ pub async fn spawn_add_job(
     notes: Option<String>,
     folder: Option<String>,
 ) -> u64 {
-    let st2 = st.clone();
     let job_url = url.to_string();
     let id = st.create_job("add", Some(job_url.clone())).await;
-    let url = job_url.clone();
+    // Reserve the owner-repo slug so two concurrent adds of the same repo can
+    // never race in the same directory (the same key `refresh` uses).
+    let lock_key = crate::forge::detect(url).ok().map(|info| {
+        format!(
+            "{}-{}",
+            crate::archiver::sanitize(&info.owner),
+            crate::archiver::sanitize(&info.name)
+        )
+    });
+    if let Some(key) = &lock_key {
+        if !st.try_lock_repo(key).await {
+            st.finish_job(id, Some(format!("a job is already running for {key}")))
+                .await;
+            return id;
+        }
+    }
+    let st2 = st.clone();
+    let url = job_url;
     let tags = tags.to_vec();
     let folder = folder.filter(|f| !f.trim().is_empty());
     tokio::spawn(async move {
+        // RAII: release the slug lock even if the job panics or returns early.
+        let _lock = lock_key.as_deref().map(|k| RepoLockGuard::new(st2.clone(), k));
         let result = Archiver::new(st2.cfg().await).add_repo(&url, &tags, notes).await;
         match result {
             Ok(dir) => {
@@ -613,6 +738,8 @@ pub async fn spawn_refresh_job(
     let id = st.create_job(kind, Some(rel.clone())).await;
     let _ = permit; // moved into the task below to bound concurrency
     tokio::spawn(async move {
+        // Caller already locked the repo; this releases it on completion or panic.
+        let _lock = RepoLockGuard::new(st.clone(), &rel);
         let _permit = permit;
         let dir = { st.index.read().await.find(&rel).cloned().map(|r| r.dir) };
         let result = match dir {
@@ -621,14 +748,18 @@ pub async fn spawn_refresh_job(
         };
         match result {
             Ok(summary) => {
+                let mut fields: Vec<&str> = vec!["refresh_ok"];
                 if let Some(v) = &summary.new_release {
                     st.push_notification("new_release", &rel, format!("new release {v}"), None).await;
+                    fields.push("new_releases");
                 }
                 if summary.new_branch_snapshot {
                     st.push_notification("new_snapshot", &rel, "new branch snapshot archived".to_string(), None).await;
+                    fields.push("new_snapshots");
                 }
                 if summary.remote_unavailable {
                     st.push_notification("remote_gone", &rel, "remote unreachable; local copy intact".to_string(), None).await;
+                    fields.push("remote_gone");
                 }
                 let _ = st.reindex().await;
                 st.finish_job(id, None).await;
@@ -753,6 +884,23 @@ async fn repo_patch(
     Ok(ok_json(repo_json(&updated, false)))
 }
 
+/// Delete (unregister and optionally remove files) a repo. Shared by the API
+/// and the web UI. Returns the API error shape on failure.
+pub async fn delete_repo(st: &Arc<AppState>, repo: &RepoEntry, delete_files: bool) -> Result<(), ApiError> {
+    if !st.try_lock_repo(&repo.rel).await {
+        return Err(ApiError::conflict("a job is running for this repo"));
+    }
+    let result = if delete_files {
+        tokio::fs::remove_dir_all(&repo.dir).await
+    } else {
+        tokio::fs::remove_file(repo.dir.join("repo.json")).await
+    };
+    st.unlock_repo(&repo.rel).await;
+    result.map_err(|e| ApiError::internal(anyhow::anyhow!("delete failed: {e}")))?;
+    st.reindex().await.map_err(ApiError::internal)?;
+    Ok(())
+}
+
 /// DELETE /api/repos/{rel}?files=true|false (default false)
 async fn repo_delete(
     State(st): State<Arc<AppState>>,
@@ -767,18 +915,7 @@ async fn repo_delete(
         .get("files")
         .map(|s| s == "true" || s == "1")
         .unwrap_or(false);
-
-    if !st.try_lock_repo(&repo.rel).await {
-        return Err(ApiError::conflict("a job is running for this repo"));
-    }
-    let result = if delete_files {
-        tokio::fs::remove_dir_all(&repo.dir).await
-    } else {
-        tokio::fs::remove_file(repo.dir.join("repo.json")).await
-    };
-    st.unlock_repo(&repo.rel).await;
-    result.map_err(|e| ApiError::internal(anyhow::anyhow!("delete failed: {e}")))?;
-    st.reindex().await.map_err(ApiError::internal)?;
+    delete_repo(&st, &repo, delete_files).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -844,8 +981,7 @@ async fn list_jobs(State(st): State<Arc<AppState>>) -> Result<Response, ApiError
 
 async fn list_notifications(State(st): State<Arc<AppState>>) -> Result<Response, ApiError> {
     let ns = st.notifications.lock().await;
-    let mut list = ns.clone();
-    list.truncate(100);
+    let list: Vec<Notification> = ns.iter().take(100).cloned().collect();
     Ok(ok_json(json!({ "notifications": list })))
 }
 
@@ -913,8 +1049,9 @@ fn hours_since_rfc3339(s: &str) -> Option<f64> {
 }
 
 async fn compute_due(st: &Arc<AppState>) -> Vec<String> {
-    let index = st.index.read().await;
+    // read config first, then the index: never hold one async lock across another
     let poll_h = st.cfg().await.scheduler.release_poll_hours as f64;
+    let index = st.index.read().await;
     index
         .repos
         .iter()
@@ -1004,4 +1141,141 @@ pub async fn serve(cfg: Config, config_path: Option<PathBuf>, no_scheduler: bool
     println!("reposilo serving http://{bind} (API: /api/repos, /api/tags, /api/tree, /api/jobs)");
     axum::serve(listener, app).await.context("server crashed")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::RepoManifest;
+
+    fn manifest(origin: Option<&str>, last_checked: Option<String>, remote_state: Option<&str>) -> RepoManifest {
+        RepoManifest {
+            origin: origin.map(str::to_string),
+            forge: "generic".into(),
+            name: "x".into(),
+            added: "2025-01-01T00:00:00Z".into(),
+            tags: vec![],
+            description: None,
+            language: None,
+            default_branch: "master".into(),
+            schedule: Default::default(),
+            retention: Default::default(),
+            last_checked,
+            notes: None,
+            remote_state: remote_state.map(str::to_string),
+            unavailable_since: None,
+            suggested_tags: vec![],
+            stars: None,
+            unidentified: false,
+        }
+    }
+
+    fn rfc_days_ago(days: i64) -> String {
+        (OffsetDateTime::now_utc() - time::Duration::days(days))
+            .format(&Rfc3339)
+            .unwrap()
+    }
+
+    /// The scheduler's "who do we call out to?" decision: only live repos with
+    /// an origin whose check is older than the interval (or that were never
+    /// checked). Dead / unidentified / fresh repos must be skipped.
+    #[tokio::test]
+    async fn scheduler_due_selection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let cases = [
+            ("fresh", manifest(Some("file:///r/fresh"), Some(rfc_days_ago(0)), None)),
+            ("stale", manifest(Some("file:///r/stale"), Some(rfc_days_ago(30)), None)),
+            ("dead", manifest(Some("file:///r/dead"), Some(rfc_days_ago(30)), Some("dead"))),
+            ("imported", manifest(None, Some(rfc_days_ago(30)), None)),
+            ("never", manifest(Some("file:///r/never"), None, None)),
+        ];
+        for (name, m) in &cases {
+            let dir = root.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            crate::types::write_json(&dir.join("repo.json"), m).unwrap();
+        }
+        let mut cfg = Config::default();
+        cfg.archive.root = root.to_string_lossy().into_owned();
+        cfg.scheduler.release_poll_hours = 24;
+        let st = Arc::new(AppState::new(cfg, None).await.unwrap());
+        let mut due = compute_due(&st).await;
+        due.sort();
+        assert_eq!(due, vec!["never".to_string(), "stale".to_string()]);
+    }
+
+    /// Locks must be keyed by basename so a full relative path (refresh) and a
+    /// bare slug (add) collide instead of racing in the same directory.
+    #[tokio::test]
+    async fn lock_keys_are_normalized_to_basename() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.archive.root = tmp.path().to_string_lossy().into_owned();
+        let st = AppState::new(cfg, None).await.unwrap();
+
+        assert!(st.try_lock_repo("category/remotes-dup").await);
+        assert!(
+            !st.try_lock_repo("remotes-dup").await,
+            "the bare slug must see the path-keyed lock"
+        );
+        st.unlock_repo("remotes-dup").await;
+        assert!(
+            st.try_lock_repo("category/remotes-dup").await,
+            "unlocking by basename releases the path-keyed lock"
+        );
+        st.unlock_repo("category/remotes-dup").await;
+    }
+
+    /// Job history must stay bounded for a process that runs for months.
+    #[tokio::test]
+    async fn job_history_is_bounded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.archive.root = tmp.path().to_string_lossy().into_owned();
+        let st = AppState::new(cfg, None).await.unwrap();
+        for _ in 0..(MAX_TRACKED_JOBS + 137) {
+            st.create_job("scheduled-refresh", None).await;
+        }
+        assert!(st.jobs.lock().await.len() <= MAX_TRACKED_JOBS);
+    }
+
+    /// The RAII guard must release the repo lock even on an early exit, so a
+    /// panicking job can never leave a repo locked forever.
+    #[tokio::test]
+    async fn repo_lock_guard_releases_on_drop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.archive.root = tmp.path().to_string_lossy().into_owned();
+        let st = Arc::new(AppState::new(cfg, None).await.unwrap());
+        assert!(st.try_lock_repo("owner-repo").await);
+        {
+            let _g = RepoLockGuard::new(st.clone(), "owner-repo");
+            assert!(!st.try_lock_repo("owner-repo").await, "held while guard alive");
+        }
+        assert!(st.try_lock_repo("owner-repo").await, "released after guard drop");
+    }
+
+    /// The archive listing cache must return the same parsed index for repeat
+    /// lookups (this is what makes tar.zst browsing cheap).
+    #[tokio::test]
+    async fn archive_listing_is_cached() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.archive.root = tmp.path().to_string_lossy().into_owned();
+        let st = AppState::new(cfg, None).await.unwrap();
+
+        let zpath = tmp.path().join("x.zip");
+        {
+            let f = std::fs::File::create(&zpath).unwrap();
+            let mut z = zip::ZipWriter::new(f);
+            let opts = zip::write::SimpleFileOptions::default();
+            z.start_file("p/README.md", opts).unwrap();
+            std::io::Write::write_all(&mut z, b"# hi").unwrap();
+            z.finish().unwrap();
+        }
+        let a = st.archive_index(&zpath).await.unwrap();
+        let b = st.archive_index(&zpath).await.unwrap();
+        assert!(Arc::ptr_eq(&a, &b), "second lookup must hit the cache");
+        assert!(a.find("README.md").is_some());
+    }
 }

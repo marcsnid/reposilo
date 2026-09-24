@@ -124,8 +124,12 @@ pub fn now_rfc3339() -> String {
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".into())
 }
 
-async fn git(args: &[&str], cwd: Option<&Path>) -> Result<String> {
+/// Run a git subprocess with a hard timeout. `kill_on_drop` ensures a hung
+/// child is killed when the timeout fires, so a black-holed network can never
+/// hold a repo lock or a scheduler slot forever.
+async fn git(timeout_secs: u64, args: &[&str], cwd: Option<&Path>) -> Result<String> {
     let mut cmd = tokio::process::Command::new("git");
+    cmd.kill_on_drop(true);
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
@@ -133,10 +137,16 @@ async fn git(args: &[&str], cwd: Option<&Path>) -> Result<String> {
     cmd.env("GIT_TERMINAL_PROMPT", "0");
     cmd.env("GIT_ASKPASS", "/usr/bin/true").env("SSH_ASKPASS", "/usr/bin/true");
     cmd.args(args);
-    let out = cmd
-        .output()
-        .await
-        .with_context(|| format!("failed to spawn git {args:?} (is git installed?)"))?;
+    let out = match tokio::time::timeout(
+        std::time::Duration::from_secs(timeout_secs.max(1)),
+        cmd.output(),
+    )
+    .await
+    {
+        Ok(res) => res
+            .with_context(|| format!("failed to spawn git {args:?} (is git installed?)"))?,
+        Err(_) => bail!("git {args:?} timed out after {timeout_secs}s (network hang?)"),
+    };
     if !out.status.success() {
         bail!(
             "git {:?} failed in {}: {}",
@@ -257,7 +267,7 @@ impl Archiver {
         };
         let git_dir = temp.as_ref().map(|t| t.path()).unwrap_or(&shallow);
 
-        let branch = git(&["symbolic-ref", "--short", "HEAD"], Some(git_dir))
+        let branch = git(self.cfg.git.timeout_secs, &["symbolic-ref", "--short", "HEAD"], Some(git_dir))
             .await
             .context("could not detect default branch")?;
 
@@ -340,7 +350,7 @@ impl Archiver {
         let dest_str = dest.to_string_lossy().into_owned();
         args.push(url);
         args.push(&dest_str);
-        git(&args, None)
+        git(self.cfg.git.timeout_secs, &args, None)
             .await
             .with_context(|| format!("clone of {url} failed"))?;
         Ok(())
@@ -357,16 +367,16 @@ impl Archiver {
         }
         args.push("origin");
         args.push(&refspec);
-        git(&args, Some(shallow))
+        git(self.cfg.git.timeout_secs, &args, Some(shallow))
             .await
             .with_context(|| format!("fetch of tag {tag} failed"))?;
         let ref_name = format!("refs/tags/{tag}");
-        git(&["rev-parse", &ref_name], Some(shallow)).await
+        git(self.cfg.git.timeout_secs, &["rev-parse", &ref_name], Some(shallow)).await
     }
 
     /// List all tags on the remote and pick the newest semver one.
     async fn latest_release_tag(&self, url: &str) -> Result<Option<String>> {
-        let out = git(&["ls-remote", "--tags", url], None)
+        let out = git(self.cfg.git.timeout_secs, &["ls-remote", "--tags", url], None)
             .await
             .with_context(|| format!("ls-remote of {url} failed"))?;
         let mut tags: Vec<String> = Vec::new();
@@ -399,7 +409,7 @@ impl Archiver {
     ) -> Result<SnapshotSidecar> {
         let shallow = git_dir.to_path_buf();
         let rev = rev.unwrap_or(label);
-        let commit = git(&["rev-parse", rev], Some(&shallow))
+        let commit = git(self.cfg.git.timeout_secs, &["rev-parse", rev], Some(&shallow))
             .await
             .with_context(|| format!("rev-parse {rev} failed"))?;
         let sha7 = &commit[..commit.len().min(7)];
@@ -422,7 +432,7 @@ impl Archiver {
         fs::create_dir_all(&zip_dir).with_context(|| format!("cannot create {}", zip_dir.display()))?;
 
         let zip_path = zip_dir.join(&zip_name);
-        let committed_at = git(&["log", "-1", "--format=%cI", rev], Some(&shallow)).await.ok();
+        let committed_at = git(self.cfg.git.timeout_secs, &["log", "-1", "--format=%cI", rev], Some(&shallow)).await.ok();
 
         // changelog: forge release notes first, then CHANGELOG.md at the tag
         let changelog = if matches!(kind, SnapshotKind::Release) {
@@ -467,20 +477,24 @@ impl Archiver {
         let add_file = format!("--add-file={}", meta_path.display());
         if use_zst {
             // tar.zst: git archive to a temp tar, then stream-compress with zstd
-            let raw_tar = zip_dir.join(format!("{base_name}.tmp.tar"));
-            let output = format!("--output={}", raw_tar.display());
-            git(&["archive", "--format=tar", &prefix, &add_file, &output, rev], Some(&shallow))
+            // A NamedTempFile in the same dir auto-deletes on drop, so a failed
+            // compression (or a killed process between archive and zstd) can't
+            // leave a stray .tmp.tar behind.
+            let raw_tar = tempfile::NamedTempFile::new_in(&zip_dir)
+                .context("create temp tar")?;
+            let output = format!("--output={}", raw_tar.path().display());
+            git(self.cfg.git.timeout_secs, &["archive", "--format=tar", &prefix, &add_file, &output, rev], Some(&shallow))
                 .await
                 .with_context(|| format!("git archive {rev} failed"))?;
-            let zin = std::fs::File::open(&raw_tar).context("open temp tar")?;
+            let zin = std::fs::File::open(raw_tar.path()).context("open temp tar")?;
             let mut zout = std::fs::File::create(&zip_path).context("create tar.zst")?;
             zstd::stream::copy_encode(zin, &mut zout, self.cfg.archive.zstd_level)
                 .context("zstd compress")?;
             drop(zout);
-            let _ = fs::remove_file(&raw_tar);
+            drop(raw_tar); // removes the temp tar
         } else {
             let output = format!("--output={}", zip_path.display());
-            git(&["archive", "--format=zip", &prefix, &add_file, &output, rev], Some(&shallow))
+            git(self.cfg.git.timeout_secs, &["archive", "--format=zip", &prefix, &add_file, &output, rev], Some(&shallow))
                 .await
                 .with_context(|| format!("git archive {rev} failed"))?;
         }
@@ -544,7 +558,7 @@ impl Archiver {
 
         // Probe the remote first (cheap). If it's gone entirely, record that
         // state on the manifest and keep the local archive untouched.
-        let head_out = git(&["ls-remote", "--symref", &origin, "HEAD"], None).await;
+        let head_out = git(self.cfg.git.timeout_secs, &["ls-remote", "--symref", &origin, "HEAD"], None).await;
         let Ok(head_out) = head_out else {
             summary.remote_unavailable = true;
             // track consecutive unavailability; after dead_after_days, declare
@@ -587,7 +601,7 @@ impl Archiver {
         // the truth in both modes; keep one code path)
         let local_sha = latest_branch_commit(repo_dir, &branch).unwrap_or_default();
 
-        let remote_branch_sha = git(&["ls-remote", &origin, &branch_ref], None)
+        let remote_branch_sha = git(self.cfg.git.timeout_secs, &["ls-remote", &origin, &branch_ref], None)
             .await
             .ok()
             .and_then(|s| s.split('\t').next().map(str::to_string))
@@ -679,7 +693,7 @@ impl Archiver {
         }
         args.push("origin");
         args.push(&refspec);
-        git(&args, Some(shallow))
+        git(self.cfg.git.timeout_secs, &args, Some(shallow))
             .await
             .with_context(|| format!("fetch of branch {branch} from {origin} failed"))?;
         Ok(())

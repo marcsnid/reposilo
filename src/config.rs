@@ -124,11 +124,14 @@ pub struct GitCfg {
     pub depth: u32,
     /// Extra args passed to `git clone`.
     pub extra_args: Vec<String>,
+    /// Hard timeout (seconds) for each git subprocess. A hung network must not
+    /// hold a repo lock or a scheduler slot forever. Default 10 min.
+    pub timeout_secs: u64,
 }
 
 impl Default for GitCfg {
     fn default() -> Self {
-        Self { depth: 1, extra_args: Vec::new() }
+        Self { depth: 1, extra_args: Vec::new(), timeout_secs: 600 }
     }
 }
 
