@@ -246,7 +246,7 @@ async fn blob_page(st: &Arc<AppState>, rel: &str, blob: &str) -> Response {
         return (StatusCode::NOT_FOUND, "no such file").into_response();
     };
     const MAX: usize = 512 * 1024;
-    let bytes = match crate::files::zip_read(&zip_path, &archive_entry, MAX) {
+    let bytes = match crate::files::read_archive(&zip_path, &archive_entry, MAX) {
         Some(b) => b,
         None => return (StatusCode::NOT_FOUND, "cannot read file").into_response(),
     };

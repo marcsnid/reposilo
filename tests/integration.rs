@@ -265,3 +265,210 @@ async fn remote_gone_leaves_archive_intact() -> Result<()> {
     assert_eq!(index.filter(&["precious".into()], None).len(), 1);
     Ok(())
 }
+
+#[tokio::test]
+async fn tar_zst_end_to_end() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let archive = tmp.path().join("archive");
+    fs::create_dir_all(&archive)?;
+
+    let remote = make_remote(tmp.path(), "zproj");
+    let work = tmp.path().join("work-zproj");
+    push_tag(&work, "v1.0.0");
+
+    let mut cfg = test_cfg(&archive);
+    cfg.archive.format = "tar.zst".into();
+    let archiver = Archiver::new(cfg);
+    let repo_dir = archiver.add_repo(&file_url(&remote), &[], None).await?;
+
+    // branch snapshot is a .tar.zst with a sidecar; the sidecar name keeps the
+    // full stem (foo.tar.zst -> foo.tar.json), and the index/router must cope
+    let branch_dir = repo_dir.join("branch").join("master");
+    let archives: Vec<_> = fs::read_dir(&branch_dir)?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.to_string_lossy().ends_with(".tar.zst"))
+        .collect();
+    assert_eq!(archives.len(), 1, "one tar.zst branch snapshot");
+    let sidecar = read_json::<reposilo::types::SnapshotSidecar>(&archives[0].with_extension("json"))?;
+    assert_eq!(sidecar.format.as_deref(), Some("tar.zst"));
+    assert!(sidecar.zip.file.ends_with(".tar.zst"));
+    assert_eq!(sidecar.zip.bytes, fs::metadata(&archives[0])?.len());
+
+    // the tar.zst archive is readable with the format-detecting helpers
+    let readme = reposilo::files::readme_from_archive(&archives[0]).expect("readme in tar.zst");
+    assert!(readme.1.contains("hello"), "README extracted from tar.zst");
+    let listing = reposilo::files::list_archive(&archives[0]).expect("listing");
+    assert!(listing.iter().any(|e| e.name == "README.md"));
+    assert!(reposilo::files::find_archive_entry(&archives[0], "main.rs").is_some());
+
+    // release archived in the same format
+    let releases: Vec<_> = fs::read_dir(repo_dir.join("releases"))?.flatten().collect();
+    assert_eq!(releases.len(), 1, "one release dir");
+    let rel_files: Vec<_> = fs::read_dir(releases[0].path())?.flatten().map(|e| e.path()).collect();
+    assert!(rel_files.iter().any(|p| p.to_string_lossy().ends_with(".tar.zst")));
+    assert!(rel_files.iter().any(|p| p.to_string_lossy().ends_with(".tar.json")));
+
+    // index rebuild sees the snapshot in either format
+    let index = Index::load(&archive)?;
+    assert_eq!(index.repos.len(), 1);
+    assert_eq!(index.snapshot_count(), 2, "branch + release");
+
+    // refresh into the same format still works (and prunes to 1 + 1)
+    push_commit(&work, "more.txt", "more\n", "more");
+    let summary = archiver.refresh_repo(&repo_dir).await?;
+    assert!(summary.new_branch_snapshot);
+    Ok(())
+}
+
+#[tokio::test]
+async fn duplicate_add_is_rejected_even_under_a_folder() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let archive = tmp.path().join("archive");
+    fs::create_dir_all(&archive)?;
+
+    let remote = make_remote(tmp.path(), "dup");
+    let archiver = Archiver::new(test_cfg(&archive));
+    archiver.add_repo(&file_url(&remote), &[], None).await?;
+
+    // same URL, root location: rejected
+    let err = archiver.add_repo(&file_url(&remote), &[], None).await.unwrap_err();
+    assert!(err.to_string().contains("already archived"), "{err}");
+
+    // move the repo under a category folder and try again: still rejected
+    let repo_dir = archive.join("remotes-dup");
+    let dest = archive.join("category").join("remotes-dup");
+    fs::create_dir_all(dest.parent().unwrap())?;
+    fs::rename(&repo_dir, &dest)?;
+    let err = archiver.add_repo(&file_url(&remote), &[], None).await.unwrap_err();
+    assert!(err.to_string().contains("already archived"), "{err}");
+    assert!(!repo_dir.exists(), "no duplicate directory at the root");
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_add_leaves_no_partial_repo() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let archive = tmp.path().join("archive");
+    fs::create_dir_all(&archive)?;
+
+    let missing = tmp.path().join("remotes").join("ghost.git");
+    let archiver = Archiver::new(test_cfg(&archive));
+    let err = archiver.add_repo(&file_url(&missing), &[], None).await.unwrap_err();
+    assert!(format!("{err:#}").to_lowercase().contains("clone") || format!("{err:#}").contains("git"));
+
+    // the half-created dir must be gone so a clean retry is possible
+    assert!(!archive.join("remotes-ghost").exists(), "partial repo dir must be cleaned up");
+    let index = Index::load(&archive)?;
+    assert_eq!(index.repos.len(), 0);
+    Ok(())
+}
+/// Content dedup: a release tag pointing at the branch HEAD must hard-link to
+/// the branch snapshot (one inode, two paths), for both archive formats. The
+/// shared file keeps the original's embedded metadata; each sidecar keeps its
+/// own kind/ref/version.
+#[cfg(unix)]
+#[tokio::test]
+async fn same_commit_snapshots_share_one_inode() -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    for format in ["zip", "tar.zst"] {
+        let tmp = tempfile::tempdir()?;
+        let archive = tmp.path().join("archive");
+        fs::create_dir_all(&archive)?;
+
+        let remote = make_remote(tmp.path(), "dedup");
+        push_tag(&tmp.path().join("work-dedup"), "v1.0.0"); // tag == branch HEAD
+
+        let mut cfg = test_cfg(&archive);
+        cfg.archive.format = format.into();
+        let repo_dir = Archiver::new(cfg)
+            .add_repo(&file_url(&remote), &[], None)
+            .await?;
+
+        let find_one = |dir: &Path| -> PathBuf {
+            fs::read_dir(dir)
+                .unwrap()
+                .flatten()
+                .map(|e| e.path())
+                .find(|p| p.to_string_lossy().ends_with(&format!(".{format}")))
+                .unwrap_or_else(|| panic!("no .{format} archive in {}", dir.display()))
+        };
+        let branch = find_one(&repo_dir.join("branch").join("master"));
+        let release = find_one(&repo_dir.join("releases").join("v1.0.0"));
+
+        let (mb, mr) = (fs::metadata(&branch)?, fs::metadata(&release)?);
+        assert_eq!(
+            mb.ino(),
+            mr.ino(),
+            "[{format}] same commit must share one hard-linked file"
+        );
+        assert!(mb.nlink() >= 2, "[{format}] shared file must have >= 2 links");
+
+        // the file's bytes (and thus hash) are identical across both sidecars
+        let b_sc = read_json::<reposilo::types::SnapshotSidecar>(&branch.with_extension("json"))?;
+        let r_sc = read_json::<reposilo::types::SnapshotSidecar>(&release.with_extension("json"))?;
+        assert_eq!(b_sc.commit, r_sc.commit);
+        assert_eq!(b_sc.zip.sha256, r_sc.zip.sha256, "[{format}] shared bytes => shared hash");
+        // ...yet each sidecar still records what it really is
+        assert_eq!(b_sc.kind, "branch-snapshot");
+        assert_eq!(r_sc.kind, "release");
+        assert_eq!(r_sc.r#ref, "v1.0.0");
+        assert_eq!(r_sc.version.as_deref(), Some("1.0.0"));
+    }
+    Ok(())
+}
+
+/// `delete?files=false` unregisters a repo but keeps its snapshots. Re-adding
+/// the same URL must work (not be blocked by the leftover folder) and heal.
+#[tokio::test]
+async fn readd_after_unregister_heals_without_duplicates() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let archive = tmp.path().join("archive");
+    fs::create_dir_all(&archive)?;
+    let remote = make_remote(tmp.path(), "reup");
+    let archiver = Archiver::new(test_cfg(&archive));
+    let repo_dir = archiver.add_repo(&file_url(&remote), &[], None).await?;
+
+    // simulate delete?files=false: drop the manifest, keep the snapshots
+    fs::remove_file(repo_dir.join("repo.json"))?;
+    assert!(repo_dir.join("branch/master").is_dir());
+
+    let repo_dir2 = archiver.add_repo(&file_url(&remote), &[], None).await?;
+    assert_eq!(repo_dir, repo_dir2);
+    assert!(repo_dir2.join("repo.json").exists());
+
+    // retention kept exactly one branch snapshot; the stale one was pruned
+    let snaps: Vec<_> = fs::read_dir(repo_dir2.join("branch/master"))?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("json"))
+        .collect();
+    assert_eq!(snaps.len(), 1, "old snapshot pruned, no duplicates left");
+    Ok(())
+}
+
+/// If a re-add over an unregistered orphan fails, its on-disk snapshots must
+/// survive (the failure cleanup only removes dirs the add itself created).
+#[tokio::test]
+async fn failed_readd_over_orphan_preserves_snapshots() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let archive = tmp.path().join("archive");
+    fs::create_dir_all(&archive)?;
+
+    let orphan = archive.join("remotes-phantom").join("branch").join("master");
+    fs::create_dir_all(&orphan)?;
+    fs::write(orphan.join("precious.txt"), "keep me")?;
+
+    let missing = tmp.path().join("remotes").join("phantom.git");
+    let err = Archiver::new(test_cfg(&archive))
+        .add_repo(&file_url(&missing), &[], None)
+        .await
+        .unwrap_err();
+    assert!(!format!("{err:#}").is_empty());
+    assert!(
+        orphan.join("precious.txt").exists(),
+        "orphan snapshots must not be deleted by a failed re-add"
+    );
+    Ok(())
+}

@@ -389,26 +389,35 @@ async fn download_archive(
     if !path.starts_with(&repo_dir) {
         return Err(ApiError::not_found("no such snapshot"));
     }
-    if path.extension().and_then(|e| e.to_str()) != Some("zip") {
-        return Err(ApiError::bad_request("only zip downloads are supported"));
-    }
+    let filename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("snapshot")
+        .to_string();
+    // Both archive formats are downloadable. Detect by name because
+    // `Path::extension` on "foo.tar.zst" only yields "zst".
+    let content_type = if filename.ends_with(".tar.zst") {
+        "application/zstd"
+    } else if filename.ends_with(".zip") {
+        "application/zip"
+    } else {
+        return Err(ApiError::bad_request(
+            "only zip and tar.zst downloads are supported",
+        ));
+    };
     let file = tokio::fs::File::open(&path)
         .await
         .map_err(|_| ApiError::not_found("no such snapshot"))?;
-    let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("snapshot");
-    let content_type = if filename.ends_with(".tar.zst") {
-        "application/zstd"
-    } else {
-        "application/zip"
-    };
     let stream = tokio_util::io::ReaderStream::new(file);
     let body = Body::from_stream(stream);
     let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
-    headers.insert(
-        header::CONTENT_DISPOSITION,
-        format!("attachment; filename=\"{filename}\"").parse().unwrap(),
-    );
+    if let Ok(v) = header::HeaderValue::from_str(content_type) {
+        headers.insert(header::CONTENT_TYPE, v);
+    }
+    let disposition = format!("attachment; filename=\"{}\"", filename.replace('"', ""));
+    if let Ok(v) = header::HeaderValue::from_str(&disposition) {
+        headers.insert(header::CONTENT_DISPOSITION, v);
+    }
     Ok((headers, body).into_response())
 }
 

@@ -575,18 +575,19 @@ pub async fn build_detail_ctx(st: &Arc<AppState>, repo: &crate::index::RepoEntry
         .map(|e| e.sidecar.zip.bytes)
         .sum();
 
-    // README + root file listing, read from the newest snapshot's ZIP.
-    // (The zip is the only persistent artifact; works for imported zips too.)
+    // README + root file listing, read from the newest snapshot's archive
+    // (zip or tar.zst; the archive is the only persistent artifact, and this
+    // works for imported zips too).
     let newest = repo
         .branch_snapshots
         .first()
         .or_else(|| repo.releases.first());
     let (readme_html, readme_file, readme_truncated, files) = if let Some(e) = newest {
         let zip_path = e.dir.join(&e.sidecar.zip.file);
-        // plain README.md first (written at snapshot time); zip is the fallback
+        // plain README.md first (written at snapshot time); archive is the fallback
         let readme = match std::fs::read_to_string(repo.dir.join("README.md")) {
             Ok(text) => Some(("README.md".to_string(), text, false)),
-            Err(_) => crate::files::readme_from_zip(&zip_path),
+            Err(_) => crate::files::readme_from_archive(&zip_path),
         };
         let (readme_html, readme_file, readme_truncated) = match readme {
             Some((f, text, t)) => {

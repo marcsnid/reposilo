@@ -443,7 +443,13 @@ fn tar_entries(path: &Path) -> Option<Vec<(String, u64, bool)>> {
     for entry in arch.entries().ok()? {
         let entry = entry.ok()?;
         let name = entry.path().ok()?.to_string_lossy().into_owned();
-        if name.is_empty() || name.ends_with("/.reposilo.json") {
+        // Skip the archive metadata `git archive` prepends (a real entry, not
+        // content) and our own embedded sidecar.
+        if name.is_empty()
+            || name == "pax_global_header"
+            || name.starts_with("pax_global_header/")
+            || name.ends_with("/.reposilo.json")
+        {
             continue;
         }
         let is_dir = entry.header().entry_type().is_dir();
@@ -745,6 +751,91 @@ mod zip_tests {
         let p = tmp.path().join("c.zip");
         make_zip(&p, &[("x/readme.txt", "txt readme"), ("x/README.md", "# MD\n\nbody")]);
         let (name, text, _) = readme_from_zip(&p).unwrap();
+        assert_eq!(name, "README.md");
+        assert!(text.contains("# MD"));
+    }
+}
+
+#[cfg(test)]
+mod tarzst_tests {
+    use super::*;
+
+    fn make_tar_zst(path: &Path, files: &[(&str, &str)]) {
+        let f = File::create(path).unwrap();
+        let enc = zstd::stream::write::Encoder::new(f, 3).unwrap();
+        let mut b = tar::Builder::new(enc);
+        for (name, content) in files {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            b.append_data(&mut header, *name, content.as_bytes()).unwrap();
+        }
+        let enc = b.into_inner().unwrap();
+        enc.finish().unwrap();
+    }
+
+    #[test]
+    fn list_tar_zst_strips_prefix_and_hides_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("a.tar.zst");
+        make_tar_zst(
+            &p,
+            &[
+                ("proj/README.md", "# Hi"),
+                ("proj/src/main.rs", "fn main(){}"),
+                ("proj/docs.md", "d"),
+                ("proj/.reposilo.json", "{}"),
+            ],
+        );
+        let list = list_archive(&p).unwrap();
+        let names: Vec<&str> = list.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["src", "docs.md", "README.md"]);
+        assert!(!names.contains(&".reposilo.json"), "metadata must be hidden");
+        assert!(list.iter().find(|e| e.name == "src").unwrap().is_dir);
+    }
+
+    /// `git archive --format=tar` prepends a `pax_global_header` entry. It must
+    /// not defeat the common-prefix stripping or show up as a file.
+    #[test]
+    fn list_tar_zst_ignores_pax_global_header() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("pax.tar.zst");
+        make_tar_zst(
+            &p,
+            &[
+                ("pax_global_header", "52 comment=abc"),
+                ("proj/README.md", "# Hi"),
+                ("proj/src/main.rs", "fn main(){}"),
+            ],
+        );
+        let list = list_archive(&p).unwrap();
+        let names: Vec<&str> = list.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["src", "README.md"], "pax header must be skipped");
+        let readme = readme_from_archive(&p).expect("readme found despite pax header");
+        assert_eq!(readme.0, "README.md");
+    }
+
+    #[test]
+    fn find_and_read_tar_zst_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("b.tar.zst");
+        make_tar_zst(&p, &[("proj/hello.txt", "line one\nline two\n")]);
+        let entry = find_archive_entry(&p, "hello.txt").expect("entry found");
+        assert_eq!(entry, "proj/hello.txt");
+        let bytes = read_archive(&p, &entry, 1024).unwrap();
+        assert_eq!(String::from_utf8_lossy(&bytes), "line one\nline two\n");
+        // traversal / metadata guarded the same way as zips
+        assert!(find_archive_entry(&p, "../evil").is_none());
+        assert!(find_archive_entry(&p, ".reposilo.json").is_none());
+    }
+
+    #[test]
+    fn readme_from_tar_zst_prefers_md() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("c.tar.zst");
+        make_tar_zst(&p, &[("x/readme.txt", "txt"), ("x/README.md", "# MD\n\nbody")]);
+        let (name, text, _) = readme_from_archive(&p).unwrap();
         assert_eq!(name, "README.md");
         assert!(text.contains("# MD"));
     }

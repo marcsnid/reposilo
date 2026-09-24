@@ -8,6 +8,7 @@ use std::process::Command;
 use anyhow::Result;
 use serde_json::Value;
 
+use reposilo::archiver::Archiver;
 use reposilo::config::Config;
 use reposilo::server::{router, AppState};
 
@@ -278,5 +279,42 @@ async fn add_job_failure_is_reported() -> Result<()> {
         .send()
         .await?;
     assert_eq!(r.status(), 400);
+    Ok(())
+}
+
+#[tokio::test]
+async fn tar_zst_download_endpoint() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let (remote, _work) = make_remote(tmp.path(), "zdl");
+    let archive = tmp.path().join("archive");
+    fs::create_dir_all(&archive)?;
+    let mut cfg = test_cfg(&archive);
+    cfg.archive.format = "tar.zst".into();
+    Archiver::new(cfg.clone())
+        .add_repo(&file_url(&remote), &[], None)
+        .await?;
+    let (base, _st) = spawn_server(cfg).await;
+    let client = reqwest::Client::new();
+
+    let detail: Value = client
+        .get(format!("{base}/api/repos/remotes-zdl"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    let download = detail["branch_snapshots"][0]["download"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(download.ends_with(".tar.zst"), "{download}");
+
+    let dl = client.get(format!("{base}{download}")).send().await?;
+    assert_eq!(dl.status(), 200, "tar.zst must be downloadable");
+    assert_eq!(
+        dl.headers().get("content-type").unwrap(),
+        "application/zstd"
+    );
+    let bytes = dl.bytes().await?;
+    assert!(!bytes.is_empty());
     Ok(())
 }

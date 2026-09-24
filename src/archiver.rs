@@ -72,10 +72,11 @@ async fn fetch_changelog(cfg: &Config, origin: &str, git_dir: &Path, tag: &str, 
     None
 }
 
-/// An existing snapshot file in this repo with the same sha256 (and format),
-/// for hard-link dedup. Never the file we just created.
-fn find_same_sha(repo_dir: &Path, sha256: &str, format: &str, just_created: &Path) -> Option<PathBuf> {
-    let ext = if format == "tar.zst" { "tar.zst" } else { "zip" };
+/// An existing snapshot file in this repo with the same commit (and format),
+/// for hard-link dedup. The same commit always yields the same archive content,
+/// so the two snapshots can share one inode even though their embedded metadata
+/// differs. Never the file we just created.
+fn find_same_commit(repo_dir: &Path, commit: &str, format: &str, just_created: &Path) -> Option<PathBuf> {
     let want = format.to_string();
     for dir in [repo_dir.join("branch"), repo_dir.join("releases")] {
         let Ok(entries) = fs::read_dir(&dir) else { continue };
@@ -87,16 +88,20 @@ fn find_same_sha(repo_dir: &Path, sha256: &str, format: &str, just_created: &Pat
             let Ok(files) = fs::read_dir(&sub) else { continue };
             for f in files.flatten() {
                 let p = f.path();
-                if p.extension().and_then(|x| x.to_str()) != Some("json") || p == just_created {
+                if p.extension().and_then(|x| x.to_str()) != Some("json") {
                     continue;
                 }
                 let Ok(sc) = crate::types::read_json::<SnapshotSidecar>(&p) else { continue };
-                if sc.zip.sha256 == sha256
-                    && sc.format.as_deref().unwrap_or("zip") == want
-                {
-                    let existing = p.with_extension(ext);
-                    if existing.exists() && existing != just_created {
-                        return Some(existing);
+                if sc.commit == commit && sc.format.as_deref().unwrap_or("zip") == want {
+                    // The sidecar records the exact archive file name, which
+                    // may itself contain dots ("proj.tar.zst"). Join that name
+                    // instead of guessing with `with_extension`, which would
+                    // mangle tar.zst paths.
+                    let existing = p.parent().map(|d| d.join(&sc.zip.file));
+                    if let Some(existing) = existing {
+                        if existing != just_created && existing.exists() {
+                            return Some(existing);
+                        }
                     }
                 }
             }
@@ -180,6 +185,11 @@ impl Archiver {
     }
 
     /// Add a repo: shallow-bare clone, manifest, initial snapshots.
+    ///
+    /// Fails if the repo is already archived (same URL or same owner-repo
+    /// slug, wherever it lives). On any failure the partially-created repo
+    /// directory is removed, so a retry starts clean instead of tripping over
+    /// an orphaned `repo.json`.
     pub async fn add_repo(&self, url: &str, tags: &[String], notes: Option<String>) -> Result<PathBuf> {
         let info = forge::detect(url)?;
         let root = Path::new(&self.cfg.archive.root);
@@ -189,14 +199,49 @@ impl Archiver {
         let name = sanitize(&info.name);
         let slug = format!("{owner}-{name}");
         let repo_dir = root.join(&slug);
-        let manifest_path = repo_dir.join("repo.json");
-        if manifest_path.exists() {
+        if repo_dir.join("repo.json").exists() {
             bail!("already archived: {} (use `refresh`)", repo_dir.display());
         }
+        // The same owner-repo slug may already live under a category folder, or
+        // have been added under a different URL spelling that resolves to the
+        // same slug. Refuse duplicates with a cheap directory-name scan (no
+        // sidecar parsing), so `add` stays cheap on a large archive.
+        if let Some(existing) = crate::index::find_repo_by_slug(root, &slug) {
+            let rel = existing.strip_prefix(root).unwrap_or(&existing).to_string_lossy();
+            bail!("already archived as {rel} (use `refresh`)");
+        }
 
-        fs::create_dir_all(&repo_dir)
+        // Only auto-delete on failure if this add created the directory. If it
+        // pre-existed (e.g. an unregistered orphan from `delete?files=false`),
+        // leave the on-disk snapshots alone rather than destroying user data.
+        let pre_existing = repo_dir.exists();
+        match self
+            .add_repo_inner(url, &info, &repo_dir, &slug, tags, notes)
+            .await
+        {
+            Ok(()) => Ok(repo_dir),
+            Err(e) => {
+                if !pre_existing {
+                    // never leave a half-written repo that blocks a clean retry
+                    let _ = fs::remove_dir_all(&repo_dir);
+                }
+                Err(e)
+            }
+        }
+    }
+
+    async fn add_repo_inner(
+        &self,
+        url: &str,
+        info: &forge::ForgeInfo,
+        repo_dir: &Path,
+        rel: &str,
+        tags: &[String],
+        notes: Option<String>,
+    ) -> Result<()> {
+        fs::create_dir_all(repo_dir)
             .with_context(|| format!("cannot create {}", repo_dir.display()))?;
-        let rel = slug;
+        let manifest_path = repo_dir.join("repo.json");
 
         // The git store is ephemeral for shallow mode (depth > 0): clone to a
         // temp dir, take the zips + metadata, drop the temp. Only full-mirror
@@ -256,7 +301,7 @@ impl Archiver {
         crate::types::write_json(&manifest_path, &manifest)?;
 
         if self.cfg.scheduler.run_on_add {
-            self.snapshot_ref(&repo_dir, git_dir, &rel, &info.name, url, &branch, SnapshotKind::Branch, None, None)
+            self.snapshot_ref(repo_dir, git_dir, rel, &info.name, url, &branch, SnapshotKind::Branch, None, None)
                 .await
                 .context("failed to snapshot default branch")?;
 
@@ -264,7 +309,7 @@ impl Archiver {
                 match self.fetch_tag(git_dir, url, &tag).await {
                     Ok(_) => {
                         let version = tag.trim_start_matches(['v', 'V']);
-                        self.snapshot_ref(&repo_dir, git_dir, &rel, &info.name, url, &tag, SnapshotKind::Release, Some(version), None)
+                        self.snapshot_ref(repo_dir, git_dir, rel, &info.name, url, &tag, SnapshotKind::Release, Some(version), None)
                             .await
                             .context("failed to archive release")?;
                     }
@@ -273,13 +318,13 @@ impl Archiver {
                     }
                 }
             }
-            let pruned = self.prune_repo(&repo_dir).await?;
+            let pruned = self.prune_repo(repo_dir).await?;
             if !pruned.is_empty() {
                 tracing::info!(repo = %rel, ?pruned, "pruned on add");
             }
         }
         drop(temp); // ephemeral git store goes away; the zips are the artifact
-        Ok(repo_dir)
+        Ok(())
     }
 
     async fn clone_shallow(&self, url: &str, dest: &Path) -> Result<()> {
@@ -441,19 +486,24 @@ impl Archiver {
         }
         drop(tmp); // clean up the temp metadata file
 
-        let (bytes, sha256) = sha256_file(&zip_path)?;
         let mut sidecar = sidecar;
-        sidecar.zip = ZipInfo { file: zip_name.clone(), bytes, sha256: sha256.clone() };
 
-        // content dedup: if the same bytes already exist in this repo (same
-        // format), hard-link instead of storing a second copy (release tags
-        // often point at the branch HEAD we already archived)
+        // content dedup: the same commit always produces the same archive
+        // content, so hard-link instead of storing a second near-identical copy
+        // (release tags often point at the branch HEAD we already archived).
+        // The shared inode keeps the original's embedded .reposilo.json; each
+        // snapshot's external sidecar remains the authority for its own
+        // kind/ref/version.
         if let Some(existing) =
-            find_same_sha(repo_dir, &sha256, &self.cfg.archive.format, &zip_path)
+            find_same_commit(repo_dir, &sidecar.commit, &self.cfg.archive.format, &zip_path)
         {
             let _ = fs::remove_file(&zip_path);
             fs::hard_link(&existing, &zip_path).context("hard link dedup")?;
         }
+
+        // hash the file as it now exists on disk (the original's bytes if linked)
+        let (bytes, sha256) = sha256_file(&zip_path)?;
+        sidecar.zip = ZipInfo { file: zip_name.clone(), bytes, sha256 };
 
         let json_path = zip_path.with_extension("json");
         crate::types::write_json(&json_path, &sidecar)?;

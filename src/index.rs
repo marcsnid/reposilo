@@ -182,3 +182,63 @@ impl Index {
             .sum()
     }
 }
+
+/// Cheap duplicate check used on `add`: is there a repo directory whose folder
+/// name equals `slug` anywhere in the tree? Walks directory names only (no
+/// `repo.json`/sidecar parsing) and never descends into a repo's snapshot dirs,
+/// so it stays cheap even for a large archive. Returns the repo dir if found.
+pub fn find_repo_by_slug(root: &Path, slug: &str) -> Option<PathBuf> {
+    fn walk(dir: &Path, slug: &str) -> Option<PathBuf> {
+        let entries = fs::read_dir(dir).ok()?;
+        for e in entries.flatten() {
+            let p = e.path();
+            if !p.is_dir() {
+                continue;
+            }
+            let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if fname == "shallow.git" || fname.starts_with('.') {
+                continue;
+            }
+            if fname == slug && p.join("repo.json").exists() {
+                return Some(p);
+            }
+            // a *registered* repo dir (any name) with a manifest: don't descend
+            // into its branch/releases trees; just keep looking for our slug
+            if p.join("repo.json").exists() {
+                continue;
+            }
+            if let Some(found) = walk(&p, slug) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    walk(root, slug)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_repo_by_slug_walks_categories_but_not_snapshots() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // a repo nested under a category folder
+        let repo = root.join("category").join("owner-repo");
+        fs::create_dir_all(repo.join("branch").join("master")).unwrap();
+        fs::write(repo.join("repo.json"), "{}").unwrap();
+        // noise: a hidden dir, an internal git store, and a decoy inside snapshots
+        fs::create_dir_all(root.join(".hidden").join("owner-repo")).unwrap();
+        fs::create_dir_all(root.join("category").join("shallow.git")).unwrap();
+        fs::create_dir_all(repo.join("branch").join("master").join("owner-repo")).unwrap();
+
+        assert_eq!(find_repo_by_slug(root, "owner-repo").as_deref(), Some(repo.as_path()));
+        assert!(find_repo_by_slug(root, "does-not-exist").is_none());
+
+        // an unregistered orphan dir (matching slug, no repo.json) must NOT
+        // match, so the repo can be re-added after `delete?files=false`
+        let orphan = root.join("orphan-repo");
+        fs::create_dir_all(orphan.join("branch").join("master")).unwrap();
+        assert!(find_repo_by_slug(root, "orphan-repo").is_none());
+    }
+}

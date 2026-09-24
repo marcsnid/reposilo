@@ -49,7 +49,9 @@ goes away.
 - Imported zips keep their original filenames and are exempt from retention
   pruning (irreplaceable)
 - Content-addressed dedup: when a release tag points at the same commit as
-  the branch HEAD, the two zips share one file on disk (hard link)
+  the branch HEAD, the two archives share one file on disk (hard link). The
+  shared file keeps the original snapshot's embedded `.reposilo.json`; each
+  snapshot's external sidecar records its own kind/ref/version
 
 ## Usage
 
