@@ -166,8 +166,8 @@ impl Default for GitCfg {
 /// Resolve a token that may use the `env:VAR` indirection, so secrets never
 /// have to live in the config file. A missing `env:VAR` resolves to `None`
 /// rather than sending the literal string as a credential.
-pub fn resolve_token(token: &Option<String>) -> Option<String> {
-    let t = token.as_deref()?;
+pub fn resolve_token(token: Option<&str>) -> Option<String> {
+    let t = token?;
     let resolved = if let Some(var) = t.strip_prefix("env:") {
         std::env::var(var).ok()?
     } else {
@@ -186,7 +186,7 @@ pub struct GithubCfg {
 
 impl GithubCfg {
     pub fn resolved_token(&self) -> Option<String> {
-        resolve_token(&self.token)
+        resolve_token(self.token.as_deref())
     }
 }
 
@@ -199,7 +199,7 @@ pub struct ForgeTokenCfg {
 
 impl ForgeTokenCfg {
     pub fn resolved_token(&self) -> Option<String> {
-        resolve_token(&self.token)
+        resolve_token(self.token.as_deref())
     }
 }
 

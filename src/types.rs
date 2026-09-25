@@ -110,6 +110,11 @@ pub struct StoredAsset {
     pub downloaded_at: String,
 }
 
+/// serde helper: omit a numeric field when it is zero.
+fn is_zero(v: &u64) -> bool {
+    *v == 0
+}
+
 /// Metadata recorded at storage time, stored alongside each zip.
 /// Everything here survives even if the remote goes away.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,6 +147,15 @@ pub struct SnapshotSidecar {
     /// Downloaded release binaries/assets (releases only; empty elsewhere).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assets: Vec<StoredAsset>,
+    /// Canonical platform filters the assets were last synced for. Lets the
+    /// scheduler skip the release API entirely when nothing changed (important
+    /// for GitHub's unauthenticated rate limit on large archives).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assets_filters: Vec<String>,
+    /// `max_asset_mb` in effect when the assets were last synced (0 = no
+    /// limit); part of the sync key so changing the cap re-evaluates assets.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub assets_max_mb: u64,
     /// Original path of an imported zip, for provenance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imported_from: Option<String>,

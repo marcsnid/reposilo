@@ -1,15 +1,12 @@
 //! Release-asset platform detection and filtering.
 //!
-//! Release artifacts are named inconsistently across forges and projects:
-//! `foo-linux-x86_64.tar.gz`, `foo_1.2.0_amd64.deb`, `foo-x86_64-apple-darwin.zip`,
-//! `foo-win64.zip`, `foo-x86_64-pc-windows-msvc.zip`, `Bar-1.0-arm64.dmg` …
-//! We classify a filename into an OS + CPU architecture by scanning it for
-//! well-known tokens (including Rust target triples), then match that against
-//! the platform filters configured in Settings.
+//! Asset names are inconsistent: `foo-linux-x86_64.tar.gz`,
+//! `foo_1.2.0_amd64.deb`, `foo-x86_64-pc-windows-msvc.zip`, `Bar-1.0-arm64.dmg`.
+//! We scan the filename for OS and CPU tokens (Rust target triples included)
+//! and match the result against the filters set in Settings.
 //!
-//! Classification deliberately requires *both* an OS and an architecture: an
-//! asset named just `foo-linux.tar.gz` is not unambiguously x64, and we would
-//! rather skip it than download the wrong thing.
+//! Both an OS and an arch are required, so `foo-linux.tar.gz` (any arch) is
+//! skipped rather than guessed at.
 
 use serde::{Deserialize, Serialize};
 
@@ -91,7 +88,7 @@ pub struct Platform {
 }
 
 impl Platform {
-    /// Canonical, stable identifier (`darwin-arm64`, `windows-x64`, …).
+    /// Canonical, stable identifier (`darwin-arm64`, `windows-x64`).
     pub fn slug(self) -> String {
         format!("{}-{}", self.os.as_str(), self.arch.as_str())
     }
@@ -168,11 +165,7 @@ pub fn detect_arch(hay: &str) -> Option<Arch> {
     if has_token(&h, &["universal", "universal2", "fat", "fatbinary"]) {
         return Some(Arch::Universal);
     }
-    if h.contains("aarch64")
-        || h.contains("arm64")
-        || h.contains("armv8")
-        || has_token(&h, &["arm64e"])
-    {
+    if h.contains("aarch64") || h.contains("arm64") || h.contains("armv8") {
         return Some(Arch::Arm64);
     }
     if h.contains("x86_64")
@@ -241,8 +234,8 @@ pub fn parse_filter(s: &str) -> Option<Filter> {
     Some(Filter { os, arch })
 }
 
-/// Normalize a user-entered filter to a canonical string, e.g.
-/// `win64` → `windows-x64`, `Linux X86` → `linux-x86`, `all` → `all`.
+/// Normalize a user-entered filter, e.g. `win64` becomes `windows-x64` and
+/// `Linux X86` becomes `linux-x86` (`all` stays `all`).
 pub fn canonical(s: &str) -> Option<String> {
     let f = parse_filter(s)?;
     Some(match (f.os, f.arch) {
@@ -275,7 +268,7 @@ pub fn describe(slug: &str) -> String {
 }
 
 /// The platforms offered as checkboxes in Settings. Users can still type
-/// arbitrary filters in the "additional" field.
+/// arbitrary filters in the extra field.
 pub struct Choice {
     pub slug: &'static str,
     pub label: &'static str,

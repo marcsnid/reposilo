@@ -138,7 +138,7 @@ pub struct Totals {
 ///
 /// `endpoint` is the collector base URL (e.g. `http://host:4318`); the
 /// `/v1/metrics` path is appended when missing. Failures are returned so the
-/// caller can log them — they must never affect archiving.
+/// caller can log them, and must never affect archiving.
 pub async fn export_otlp(
     endpoint: &str,
     service_name: &str,

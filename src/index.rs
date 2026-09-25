@@ -67,6 +67,14 @@ fn collect_snapshots(dir: &Path, out: &mut Vec<SnapshotEntry>) {
     for e in entries.flatten() {
         let p = e.path();
         if p.is_dir() {
+            // release binaries live in `releases/<tag>/assets/`; never treat
+            // them (or a JSON asset) as snapshot metadata. Only skip there, so
+            // a branch genuinely named `assets` is still indexed.
+            let is_release_assets = p.file_name().and_then(|n| n.to_str()) == Some("assets")
+                && dir.parent().and_then(|d| d.file_name()).and_then(|n| n.to_str()) == Some("releases");
+            if is_release_assets {
+                continue;
+            }
             collect_snapshots(&p, out);
         } else if p.extension().and_then(|x| x.to_str()) == Some("json") {
             if let Ok(sidecar) = read_json::<SnapshotSidecar>(&p) {
@@ -271,5 +279,52 @@ mod tests {
         let index = Index::load(root).unwrap();
         assert_eq!(index.repos.len(), 1);
         assert_eq!(index.repos[0].rel, "owner-good");
+    }
+
+    /// `releases/<tag>/assets/` is binary storage, not snapshot metadata. But a
+    /// branch genuinely named `assets` must still be indexed.
+    #[test]
+    fn release_assets_are_not_snapshots_but_a_branch_named_assets_is() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let repo = root.join("owner-r");
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(
+            repo.join("repo.json"),
+            r#"{"forge":"github","name":"r","added":"2025-01-01T00:00:00Z","default_branch":"assets"}"#,
+        )
+        .unwrap();
+
+        let sidecar = |kind: &str, ref_: &str, file: &str| {
+            serde_json::json!({
+                "kind": kind,
+                "repo": "owner-r",
+                "origin": "x",
+                "ref": ref_,
+                "commit": "abc",
+                "archived_at": "2025-01-01T00:00:00Z",
+                "archiver_version": "t",
+                "zip": { "file": file, "bytes": 1, "sha256": "x" }
+            })
+            .to_string()
+        };
+
+        // a branch literally named `assets` must be indexed
+        let branch_dir = repo.join("branch").join("assets");
+        fs::create_dir_all(&branch_dir).unwrap();
+        fs::write(branch_dir.join("r-assets.json"), sidecar("branch-snapshot", "assets", "r-assets.zip")).unwrap();
+
+        // a release, plus a decoy valid-sidecar JSON inside its assets dir
+        let rel = repo.join("releases").join("v1.0.0");
+        fs::create_dir_all(rel.join("assets")).unwrap();
+        fs::write(rel.join("r-v1.0.0.json"), sidecar("release", "v1.0.0", "r-v1.0.0.zip")).unwrap();
+        fs::write(rel.join("assets").join("decoy.json"), sidecar("release", "v9", "decoy.zip")).unwrap();
+
+        let index = Index::load(root).unwrap();
+        let entry = index.find("owner-r").unwrap();
+        assert_eq!(entry.branch_snapshots.len(), 1, "branch named assets was dropped");
+        assert_eq!(entry.branch_snapshots[0].sidecar.r#ref, "assets");
+        assert_eq!(entry.releases.len(), 1, "a JSON asset was indexed as a release");
+        assert_eq!(entry.releases[0].sidecar.r#ref, "v1.0.0");
     }
 }

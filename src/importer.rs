@@ -582,6 +582,8 @@ pub async fn import_one(
         format: Some("zip".into()),
         changelog: None,
         assets: Vec::new(),
+        assets_filters: Vec::new(),
+        assets_max_mb: 0,
         zip: ZipInfo {
             file: target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
             bytes: bytes.max(zip_meta.map(|m| m.len()).unwrap_or(0)).min(bytes),

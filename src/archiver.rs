@@ -466,6 +466,8 @@ impl Archiver {
             format: Some(self.cfg.archive.format.clone()),
             changelog: changelog.clone(),
             assets: Vec::new(),
+            assets_filters: Vec::new(),
+            assets_max_mb: 0,
             zip: ZipInfo { file: zip_name.clone(), bytes: 0, sha256: String::new() },
         };
         let mut embedded = serde_json::to_value(&sidecar).context("serialize embedded metadata")?;
@@ -548,14 +550,10 @@ impl Archiver {
         Ok(sidecar)
     }
 
-    /// Download the release binaries that match the configured platform
-    /// filters and record them in the release sidecar.
-    ///
-    /// Idempotent: an asset already on disk whose size matches the remote is
-    /// kept as-is, so repeated refreshes (and the platform-change backfill)
-    /// never re-download a large file for nothing. Storage lives next to the
-    /// release snapshot at `releases/<tag>/assets/`, so the archive tree stays
-    /// self-describing without a central database.
+    /// Download release binaries matching the configured platforms and record
+    /// them in the release sidecar. Existing files are kept when the remote
+    /// size is unchanged, so refreshes don't re-download large files. Storage
+    /// is `releases/<tag>/assets/`, next to the release snapshot.
     async fn sync_release_assets(
         &self,
         repo_dir: &Path,
@@ -567,9 +565,25 @@ impl Archiver {
         if sidecar.origin.is_empty() || sidecar.r#ref.is_empty() {
             return Ok(0);
         }
+        // Canonical, order-preserving filter set. Recorded in the sidecar so a
+        // no-op refresh does not hit the release API again (GitHub allows only
+        // 60 unauthenticated requests per hour).
+        let mut filters: Vec<String> = Vec::new();
+        for p in &self.cfg.releases.platforms {
+            if let Some(c) = crate::platform::canonical(p) {
+                if !filters.contains(&c) {
+                    filters.push(c);
+                }
+            }
+        }
+        if sidecar.assets_filters == filters && sidecar.assets_max_mb == self.cfg.releases.max_asset_mb {
+            return Ok(0);
+        }
         let Some(release) =
             crate::releaseapi::fetch_release(&self.cfg, &sidecar.origin, &sidecar.r#ref).await
         else {
+            // transient (rate limit, network): leave assets_filters untouched so
+            // the next poll retries instead of caching the miss
             return Ok(0);
         };
 
@@ -577,8 +591,18 @@ impl Archiver {
         let assets_dir = release_dir.join("assets");
         let max_bytes = self.cfg.releases.max_asset_mb.saturating_mul(1024 * 1024);
 
+        // remove half-written downloads left by a killed process; the next
+        // attempt recreates them from scratch
+        if let Ok(entries) = fs::read_dir(&assets_dir) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.extension().and_then(|x| x.to_str()) == Some("part") {
+                    let _ = fs::remove_file(&p);
+                }
+            }
+        }
+
         let mut stored = 0usize;
-        let mut changed = false;
         for asset in &release.assets {
             let remote_name = asset.effective_name();
             let Some(platform) = crate::platform::classify(&remote_name) else {
@@ -627,7 +651,6 @@ impl Archiver {
                         downloaded_at: now_rfc3339(),
                     });
                     stored += 1;
-                    changed = true;
                     tracing::info!(asset = %remote_name, platform = %platform.slug(), bytes, "stored release asset");
                 }
                 Err(e) => {
@@ -637,16 +660,14 @@ impl Archiver {
         }
 
         // drop metadata for files that are no longer on disk
-        let before = sidecar.assets.len();
         sidecar.assets.retain(|a| assets_dir.join(&a.name).is_file());
-        if sidecar.assets.len() != before {
-            changed = true;
-        }
 
-        if changed {
-            let json_path = release_dir.join(&sidecar.zip.file).with_extension("json");
-            crate::types::write_json(&json_path, sidecar)?;
-        }
+        // Always persist the filter set, so a release with no matching assets
+        // is not re-queried on every poll.
+        sidecar.assets_filters = filters;
+        sidecar.assets_max_mb = self.cfg.releases.max_asset_mb;
+        let json_path = release_dir.join(&sidecar.zip.file).with_extension("json");
+        crate::types::write_json(&json_path, sidecar)?;
         Ok(stored)
     }
 
@@ -741,9 +762,8 @@ impl Archiver {
             false
         };
 
-        // Keep release binaries in sync even when nothing moved: this also
-        // backfills assets for archives created before platform filters were
-        // configured (or after the filters changed).
+        // Keep release binaries in sync even when nothing moved, which also
+        // backfills archives created before platform filters were set.
         if !release_needed && !self.cfg.releases.platforms.is_empty() {
             if let Some(mut sc) = latest_release_sidecar(repo_dir) {
                 if let Err(e) = self.sync_release_assets(repo_dir, &mut sc).await {
@@ -1053,6 +1073,31 @@ mod tests {
             "commit": "abc",
             "archived_at": "2025-01-01T00:00:00Z",
             "archiver_version": "test",
+            "zip": { "file": "r-v1.0.0.zip", "bytes": 1, "sha256": "x" }
+        }))
+        .unwrap();
+        assert_eq!(archiver.sync_release_assets(tmp.path(), &mut sc).await.unwrap(), 0);
+    }
+
+    /// Once a release has been synced for the current filters, a refresh must
+    /// not call the release API again. A real-looking GitHub origin proves the
+    /// short-circuit happens before any network access.
+    #[tokio::test]
+    async fn asset_sync_short_circuits_when_filters_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.archive.root = tmp.path().to_string_lossy().into_owned();
+        cfg.releases.platforms = vec!["linux-x64".into()];
+        let archiver = Archiver::new(cfg);
+        let mut sc: SnapshotSidecar = serde_json::from_value(serde_json::json!({
+            "kind": "release",
+            "repo": "o-r",
+            "origin": "https://github.com/o/r",
+            "ref": "v1.0.0",
+            "commit": "abc",
+            "archived_at": "2025-01-01T00:00:00Z",
+            "archiver_version": "test",
+            "assets_filters": ["linux-x64"],
             "zip": { "file": "r-v1.0.0.zip", "bytes": 1, "sha256": "x" }
         }))
         .unwrap();

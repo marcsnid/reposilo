@@ -1064,7 +1064,7 @@ pub fn stats_ctx_from(
     let sums = metrics.sums();
     let total_ops = sums.refresh_ok + sums.refresh_fail;
     let success_pct = if total_ops == 0 {
-        "—".to_string()
+        "-".to_string()
     } else {
         format!("{:.1}%", (sums.refresh_ok as f64 / total_ops as f64) * 100.0)
     };

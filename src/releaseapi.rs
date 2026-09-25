@@ -1,16 +1,15 @@
 //! Fetch and download release assets from forge APIs.
 //!
-//! Binary assets are NOT stored in git, so the release notes API is the only
-//! way to discover them. Each forge exposes them differently:
+//! Assets are not in git, so the release API is the only way to find them.
+//! Each forge exposes them a little differently:
 //!
-//! * **GitHub**  `GET /repos/{o}/{r}/releases/tags/{tag}` → `assets[]`
-//!   (private downloads need the asset API URL + `Accept: octet-stream`)
-//! * **GitLab**  `GET /api/v4/projects/{id}/releases/{tag}` → `assets.links[]`
-//!   (project id is the URL-encoded full path, subgroups included)
-//! * **Forgejo/Gitea** `GET /api/v1/repos/{o}/{r}/releases/tags/{tag}` → `assets[]`
+//! * GitHub: `GET /repos/{o}/{r}/releases/tags/{tag}` -> `assets[]`
+//! * GitLab: `GET /api/v4/projects/{id}/releases/{tag}` -> `assets.links[]`
+//!   (the id is the URL-encoded full path, subgroups included)
+//! * Forgejo/Gitea: `GET /api/v1/repos/{o}/{r}/releases/tags/{tag}` -> `assets[]`
 //!
-//! Everything here is best-effort: a missing token, a rate limit or a forge
-//! that does not expose releases simply yields no assets.
+//! Lookups are best-effort and retried briefly on transient errors; downloads
+//! verify the forge digest when one is published.
 
 use std::path::Path;
 use std::time::Duration;
@@ -31,13 +30,14 @@ pub struct RemoteAsset {
     pub api_url: Option<String>,
     pub size: Option<u64>,
     pub content_type: Option<String>,
+    /// Forge-provided digest, e.g. `sha256:<hex>` (GitHub). Verified after
+    /// download when present.
+    pub digest: Option<String>,
 }
 
 impl RemoteAsset {
-    /// The filename to store this asset under. GitHub/Forgejo always report a
-    /// filename, but GitLab release links may carry a human label ("Linux
-    /// binary") instead; in that case fall back to the last path segment of
-    /// the direct download URL.
+    /// The filename to store under. GitLab links sometimes carry a human label
+    /// instead of a filename, so fall back to the URL's last path segment.
     pub fn effective_name(&self) -> String {
         let looks_like_filename = |s: &str| {
             !s.is_empty()
@@ -64,6 +64,17 @@ impl RemoteAsset {
             decoded
         }
     }
+
+    /// The expected lowercase-hex sha256, if the forge supplied a usable one.
+    fn expected_sha256(&self) -> Option<String> {
+        let d = self.digest.as_deref()?;
+        let hex = d
+            .strip_prefix("sha256:")
+            .unwrap_or(d)
+            .trim()
+            .to_ascii_lowercase();
+        (hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit())).then_some(hex)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -72,11 +83,15 @@ pub struct RemoteRelease {
     pub assets: Vec<RemoteAsset>,
 }
 
-/// Split an origin URL into its API base and full project path. Keeps GitLab
-/// subgroups (unlike `forge::detect`, which only returns the last two
-/// segments). Returns `(base, host, path)`, e.g.
-/// `("https://gitlab.com", "gitlab.com", "group/subgroup/project")`.
-fn parse_origin(url: &str) -> Option<(String, String, String)> {
+/// A parsed origin: API base plus the full project path (GitLab subgroups
+/// included, unlike `forge::detect` which only returns the last two segments).
+#[derive(Debug, Clone)]
+struct Origin {
+    base: String,
+    path: String,
+}
+
+fn parse_origin(url: &str) -> Option<Origin> {
     let u = url.trim().trim_end_matches(".git");
     let (scheme, rest, scp) = match u {
         _ if u.starts_with("https://") => ("https", &u["https://".len()..], false),
@@ -95,7 +110,7 @@ fn parse_origin(url: &str) -> Option<(String, String, String)> {
     if host.is_empty() || path.is_empty() {
         return None;
     }
-    Some((format!("{scheme}://{host}"), host.to_string(), path))
+    Some(Origin { base: format!("{scheme}://{host}"), path })
 }
 
 /// Percent-encode a path segment set, keeping `/` encoded too (GitLab wants
@@ -134,13 +149,71 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn api_client(timeout_secs: u64) -> Option<reqwest::Client> {
+/// Short-timeout client for metadata lookups.
+fn api_client() -> Option<reqwest::Client> {
     reqwest::Client::builder()
         .user_agent("reposilo")
         .connect_timeout(Duration::from_secs(15))
-        .timeout(Duration::from_secs(timeout_secs))
+        .timeout(Duration::from_secs(20))
         .build()
         .ok()
+}
+
+/// Client for large downloads: a per-read timeout so a stalled socket cannot
+/// hang a scheduler slot, plus a generous overall deadline as a backstop so a
+/// malicious/slow endpoint cannot hold a repo lock forever.
+fn download_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .user_agent("reposilo")
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(Duration::from_secs(120))
+        .timeout(Duration::from_secs(6 * 3600))
+        .build()
+        .context("build download http client")
+}
+
+/// Send a request, retrying transient failures (network errors, 429, 5xx) a
+/// couple of times with a short backoff. `Retry-After` is honored up to a cap
+/// so a background job cannot stall for minutes.
+async fn send_retry<F>(mut build: F) -> Option<reqwest::Response>
+where
+    F: FnMut() -> reqwest::RequestBuilder,
+{
+    const ATTEMPTS: u32 = 3;
+    let mut backoff = Duration::from_millis(500);
+    for attempt in 0..ATTEMPTS {
+        let resp = match build().send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::debug!(error = %e, "release API request failed");
+                if attempt + 1 == ATTEMPTS {
+                    return None;
+                }
+                tokio::time::sleep(backoff).await;
+                backoff *= 2;
+                continue;
+            }
+        };
+        let status = resp.status();
+        if status.is_success() {
+            return Some(resp);
+        }
+        let retryable = status.is_server_error() || status.as_u16() == 429;
+        if !retryable || attempt + 1 == ATTEMPTS {
+            tracing::debug!(%status, "release API request not successful");
+            return None;
+        }
+        let wait = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .map(|s| Duration::from_secs(s.min(5)))
+            .unwrap_or(backoff);
+        tokio::time::sleep(wait).await;
+        backoff *= 2;
+    }
+    None
 }
 
 /// Look up one release by tag and return its downloadable assets. `None` when
@@ -157,23 +230,22 @@ pub async fn fetch_release(cfg: &Config, origin: &str, tag: &str) -> Option<Remo
 
 async fn github(cfg: &Config, info: &forge::ForgeInfo, tag: &str) -> Option<RemoteRelease> {
     use reqwest::header::ACCEPT;
-    let client = api_client(20)?;
-    let mut req = client
-        .get(format!(
-            "https://api.github.com/repos/{}/{}/releases/tags/{}",
-            info.owner,
-            info.name,
-            percent_encode(tag)
-        ))
-        .header(ACCEPT, "application/vnd.github+json");
-    if let Some(tok) = cfg.github.resolved_token() {
-        req = req.bearer_auth(tok);
-    }
-    let resp = req.send().await.ok()?;
-    if !resp.status().is_success() {
-        tracing::debug!(status = %resp.status(), tag, "github release lookup failed");
-        return None;
-    }
+    let client = api_client()?;
+    let token = cfg.github.resolved_token();
+    let url = format!(
+        "https://api.github.com/repos/{}/{}/releases/tags/{}",
+        info.owner,
+        info.name,
+        percent_encode(tag)
+    );
+    let resp = send_retry(|| {
+        let mut req = client.get(&url).header(ACCEPT, "application/vnd.github+json");
+        if let Some(tok) = token.as_deref() {
+            req = req.bearer_auth(tok);
+        }
+        req
+    })
+    .await?;
     let v: Value = resp.json().await.ok()?;
     let assets = v["assets"]
         .as_array()?
@@ -191,6 +263,7 @@ async fn github(cfg: &Config, info: &forge::ForgeInfo, tag: &str) -> Option<Remo
                 api_url: api,
                 size: a["size"].as_u64(),
                 content_type: a["content_type"].as_str().map(str::to_string),
+                digest: a["digest"].as_str().map(str::to_string),
             })
         })
         .collect();
@@ -198,21 +271,23 @@ async fn github(cfg: &Config, info: &forge::ForgeInfo, tag: &str) -> Option<Remo
 }
 
 async fn gitlab(cfg: &Config, origin: &str, tag: &str) -> Option<RemoteRelease> {
-    let (base, _host, path) = parse_origin(origin)?;
-    let client = api_client(20)?;
-    let mut req = client.get(format!(
-        "{base}/api/v4/projects/{}/releases/{}",
-        percent_encode(&path),
+    let origin = parse_origin(origin)?;
+    let client = api_client()?;
+    let token = cfg.gitlab.resolved_token();
+    let url = format!(
+        "{}/api/v4/projects/{}/releases/{}",
+        origin.base,
+        percent_encode(&origin.path),
         percent_encode(tag)
-    ));
-    if let Some(tok) = cfg.gitlab.resolved_token() {
-        req = req.header("PRIVATE-TOKEN", tok);
-    }
-    let resp = req.send().await.ok()?;
-    if !resp.status().is_success() {
-        tracing::debug!(status = %resp.status(), tag, "gitlab release lookup failed");
-        return None;
-    }
+    );
+    let resp = send_retry(|| {
+        let mut req = client.get(&url);
+        if let Some(tok) = token.as_deref() {
+            req = req.header("PRIVATE-TOKEN", tok);
+        }
+        req
+    })
+    .await?;
     let v: Value = resp.json().await.ok()?;
     let assets = v["assets"]["links"]
         .as_array()?
@@ -225,29 +300,31 @@ async fn gitlab(cfg: &Config, origin: &str, tag: &str) -> Option<RemoteRelease> 
                 .as_str()
                 .or_else(|| a["url"].as_str())?
                 .to_string();
-            Some(RemoteAsset { name, url, api_url: None, size: None, content_type: None })
+            Some(RemoteAsset { name, url, api_url: None, size: None, content_type: None, digest: None })
         })
         .collect();
     Some(RemoteRelease { tag: tag.to_string(), assets })
 }
 
 async fn forgejo(cfg: &Config, origin: &str, info: &forge::ForgeInfo, tag: &str) -> Option<RemoteRelease> {
-    let (base, _host, _path) = parse_origin(origin)?;
-    let client = api_client(20)?;
-    let mut req = client.get(format!(
-        "{base}/api/v1/repos/{}/{}/releases/tags/{}",
+    let origin = parse_origin(origin)?;
+    let client = api_client()?;
+    let token = cfg.forgejo.resolved_token();
+    let url = format!(
+        "{}/api/v1/repos/{}/{}/releases/tags/{}",
+        origin.base,
         info.owner,
         info.name,
         percent_encode(tag)
-    ));
-    if let Some(tok) = cfg.forgejo.resolved_token() {
-        req = req.header(reqwest::header::AUTHORIZATION, format!("token {tok}"));
-    }
-    let resp = req.send().await.ok()?;
-    if !resp.status().is_success() {
-        tracing::debug!(status = %resp.status(), tag, "forgejo release lookup failed");
-        return None;
-    }
+    );
+    let resp = send_retry(|| {
+        let mut req = client.get(&url);
+        if let Some(tok) = token.as_deref() {
+            req = req.header(reqwest::header::AUTHORIZATION, format!("token {tok}"));
+        }
+        req
+    })
+    .await?;
     let v: Value = resp.json().await.ok()?;
     let assets = v["assets"]
         .as_array()?
@@ -261,14 +338,23 @@ async fn forgejo(cfg: &Config, origin: &str, info: &forge::ForgeInfo, tag: &str)
                 api_url: None,
                 size: a["size"].as_u64(),
                 content_type: None,
+                digest: None,
             })
         })
         .collect();
     Some(RemoteRelease { tag: tag.to_string(), assets })
 }
 
-/// Stream one asset to `dest` atomically, returning `(bytes, sha256)`.
-/// A partial download is written to `dest.part` and removed on any failure.
+/// Whether a failed attempt is worth retrying. Once bytes are streaming we
+/// stop retrying, so a large file is not re-downloaded on every hiccup.
+enum DownloadError {
+    Transient(anyhow::Error),
+    Permanent(anyhow::Error),
+}
+
+/// Stream one asset to `dest` atomically, returning `(bytes, sha256)`. The
+/// partial file is written to a unique `.part` and removed on failure; the
+/// forge sha256 is checked before the rename.
 pub async fn download_asset(
     cfg: &Config,
     origin: &str,
@@ -276,22 +362,42 @@ pub async fn download_asset(
     dest: &Path,
     max_bytes: u64,
 ) -> Result<(u64, String)> {
+    let client = download_client()?;
+    let kind = forge::detect(origin).map(|i| i.kind).unwrap_or(ForgeKind::Generic);
+    const ATTEMPTS: u32 = 3;
+    let mut last: Option<anyhow::Error> = None;
+    for attempt in 0..ATTEMPTS {
+        match try_download(&client, cfg, kind, asset, dest, max_bytes).await {
+            Ok(v) => return Ok(v),
+            Err(DownloadError::Permanent(e)) => return Err(e),
+            Err(DownloadError::Transient(e)) => {
+                tracing::debug!(attempt, asset = %asset.name, error = %format!("{e:#}"), "download attempt failed");
+                last = Some(e);
+                if attempt + 1 < ATTEMPTS {
+                    tokio::time::sleep(Duration::from_millis(500 * (1 << attempt))).await;
+                }
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| anyhow::anyhow!("download failed")))
+}
+
+async fn try_download(
+    client: &reqwest::Client,
+    cfg: &Config,
+    kind: ForgeKind,
+    asset: &RemoteAsset,
+    dest: &Path,
+    max_bytes: u64,
+) -> Result<(u64, String), DownloadError> {
     use reqwest::header::{HeaderMap, HeaderValue, ACCEPT};
     use tokio::io::AsyncWriteExt;
 
-    let kind = forge::detect(origin).map(|i| i.kind).unwrap_or(ForgeKind::Generic);
-    let client = api_client(6 * 3600).context("build http client")?;
+    let transient = |e: anyhow::Error| DownloadError::Transient(e);
+    let permanent = |e: anyhow::Error| DownloadError::Permanent(e);
+
     let mut req = client.get(&asset.url);
     match kind {
-        ForgeKind::GitHub => {
-            // Private repos: the API asset URL with an octet-stream Accept
-            // header streams the file. browser_download_url is public-only.
-            if let (Some(api), Some(tok)) = (&asset.api_url, cfg.github.resolved_token()) {
-                let mut headers = HeaderMap::new();
-                headers.insert(ACCEPT, HeaderValue::from_static("application/octet-stream"));
-                req = client.get(api).headers(headers).bearer_auth(tok);
-            }
-        }
         ForgeKind::GitLab => {
             if let Some(tok) = cfg.gitlab.resolved_token() {
                 req = req.header("PRIVATE-TOKEN", tok);
@@ -302,24 +408,59 @@ pub async fn download_asset(
                 req = req.header(reqwest::header::AUTHORIZATION, format!("token {tok}"));
             }
         }
-        ForgeKind::Generic => {}
+        ForgeKind::GitHub | ForgeKind::Generic => {}
     }
+    let mut resp = req
+        .send()
+        .await
+        .map_err(|e| transient(e.into()))?;
 
-    let mut resp = req.send().await.with_context(|| format!("GET {}", asset.url))?;
-    if !resp.status().is_success() {
-        bail!("download failed: HTTP {}", resp.status());
-    }
-    if let Some(len) = resp.content_length() {
-        if max_bytes > 0 && len > max_bytes {
-            bail!("asset is {len} bytes, over the {max_bytes} byte limit");
+    // GitHub: the public browser URL is preferred (it redirects to the CDN and
+    // does not consume API rate limit). For private repos it 404s, so fall back
+    // to the asset API with a token and an octet-stream Accept header.
+    if !resp.status().is_success() && kind == ForgeKind::GitHub {
+        if let (Some(api), Some(tok)) = (&asset.api_url, cfg.github.resolved_token()) {
+            let mut headers = HeaderMap::new();
+            headers.insert(ACCEPT, HeaderValue::from_static("application/octet-stream"));
+            resp = client
+                .get(api)
+                .headers(headers)
+                .bearer_auth(tok)
+                .send()
+                .await
+                .map_err(|e| transient(e.into()))?;
         }
     }
 
-    let tmp = dest.with_extension("part");
-    if let Some(parent) = dest.parent() {
-        tokio::fs::create_dir_all(parent).await?;
+    let status = resp.status();
+    if !status.is_success() {
+        let e = anyhow::anyhow!("download failed: HTTP {status}");
+        return Err(if status.is_server_error() || status.as_u16() == 429 {
+            transient(e)
+        } else {
+            permanent(e)
+        });
     }
-    let write = async {
+    if let Some(len) = resp.content_length() {
+        if max_bytes > 0 && len > max_bytes {
+            return Err(permanent(anyhow::anyhow!(
+                "asset is {len} bytes, over the {max_bytes} byte limit"
+            )));
+        }
+    }
+
+    // unique temp name (keep the full original name so foo.tar.gz and
+    // foo.tar.bz2 cannot collide on foo.tar.part)
+    let mut tmp_name = dest.file_name().unwrap_or_default().to_os_string();
+    tmp_name.push(".part");
+    let tmp = dest.with_file_name(tmp_name);
+    if let Some(parent) = dest.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| permanent(e.into()))?;
+    }
+
+    let streamed = async {
         let mut file = tokio::fs::File::create(&tmp).await?;
         let mut hasher = Sha256::new();
         let mut total: u64 = 0;
@@ -336,19 +477,30 @@ pub async fn download_asset(
         Ok::<_, anyhow::Error>((total, hex::encode(hasher.finalize())))
     }
     .await;
-
-    match write {
-        Ok((bytes, sha)) => {
-            tokio::fs::rename(&tmp, dest)
-                .await
-                .with_context(|| format!("cannot move {} into place", dest.display()))?;
-            Ok((bytes, sha))
-        }
+    let (bytes, sha256) = match streamed {
+        Ok(v) => v,
         Err(e) => {
             let _ = tokio::fs::remove_file(&tmp).await;
-            Err(e)
+            return Err(permanent(e));
+        }
+    };
+
+    if let Some(expected) = asset.expected_sha256() {
+        if !sha256.eq_ignore_ascii_case(&expected) {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            // integrity failure, not a transient network blip: do not spend
+            // bandwidth re-downloading; the next scheduled refresh retries.
+            return Err(permanent(anyhow::anyhow!(
+                "sha256 mismatch for {}: expected {expected}, got {sha256}",
+                asset.name
+            )));
         }
     }
+
+    tokio::fs::rename(&tmp, dest)
+        .await
+        .map_err(|e| permanent(anyhow::Error::new(e).context("cannot move download into place")))?;
+    Ok((bytes, sha256))
 }
 
 #[cfg(test)]
@@ -357,23 +509,24 @@ mod tests {
 
     #[test]
     fn parse_origin_keeps_gitlab_subgroups() {
-        let (base, host, path) =
-            parse_origin("https://gitlab.com/group/subgroup/project.git").unwrap();
-        assert_eq!(base, "https://gitlab.com");
-        assert_eq!(host, "gitlab.com");
-        assert_eq!(path, "group/subgroup/project");
+        let o = parse_origin("https://gitlab.com/group/subgroup/project.git").unwrap();
+        assert_eq!(o.base, "https://gitlab.com");
+        assert_eq!(o.path, "group/subgroup/project");
     }
 
     #[test]
     fn parse_origin_handles_https_and_ssh() {
-        let (_, _, p) = parse_origin("https://github.com/owner/repo").unwrap();
-        assert_eq!(p, "owner/repo");
-        let (base, _, p) = parse_origin("git@codeberg.org:dnkl/foot.git").unwrap();
-        assert_eq!(base, "https://codeberg.org");
-        assert_eq!(p, "dnkl/foot");
+        assert_eq!(parse_origin("https://github.com/owner/repo").unwrap().path, "owner/repo");
+        let o = parse_origin("git@codeberg.org:dnkl/foot.git").unwrap();
+        assert_eq!(o.base, "https://codeberg.org");
+        assert_eq!(o.path, "dnkl/foot");
         // http is preserved (self-hosted instances)
-        let (base, _, _) = parse_origin("http://git.internal/team/app").unwrap();
-        assert_eq!(base, "http://git.internal");
+        assert_eq!(parse_origin("http://git.internal/team/app").unwrap().base, "http://git.internal");
+        // a host with a port
+        assert_eq!(
+            parse_origin("http://git.internal:8080/team/app").unwrap().base,
+            "http://git.internal:8080"
+        );
     }
 
     #[test]
@@ -405,6 +558,7 @@ mod tests {
             api_url: None,
             size: None,
             content_type: None,
+            digest: None,
         }
     }
 
@@ -425,5 +579,76 @@ mod tests {
             "https://gitlab.com/x/-/releases/v1/downloads/app_1%2E2_amd64.deb?foo=1",
         );
         assert_eq!(a.effective_name(), "app_1.2_amd64.deb");
+    }
+
+    /// Serve a fixed body once over a real TCP socket and run the full
+    /// download path against it (no forge, Generic kind).
+    async fn serve_once(body: Vec<u8>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 2048];
+                let _ = sock.read(&mut buf).await;
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(&body).await;
+                let _ = sock.flush().await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn download_streams_and_verifies_digest() {
+        let body = b"hello world".to_vec();
+        let base = serve_once(body.clone()).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("f-linux-x64.bin");
+        let sha = hex::encode(Sha256::digest(&body));
+        let mut a = asset("f-linux-x64.bin", &format!("{base}/f.bin"));
+        a.size = Some(body.len() as u64);
+        a.digest = Some(format!("sha256:{sha}"));
+        let cfg = Config::default();
+        let (n, got) = download_asset(&cfg, &format!("{base}/o/r"), &a, &dest, 0)
+            .await
+            .unwrap();
+        assert_eq!(n, body.len() as u64);
+        assert_eq!(got, sha);
+        assert_eq!(std::fs::read(&dest).unwrap(), body);
+        // no leftover .part file
+        assert!(!dest.with_file_name("f-linux-x64.bin.part").exists());
+    }
+
+    #[tokio::test]
+    async fn download_rejects_a_digest_mismatch_and_leaves_nothing() {
+        let body = b"hello world".to_vec();
+        let base = serve_once(body.clone()).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("f-linux-x64.bin");
+        let mut a = asset("f-linux-x64.bin", &format!("{base}/f.bin"));
+        a.digest = Some(format!("sha256:{}", "0".repeat(64)));
+        let cfg = Config::default();
+        let err = download_asset(&cfg, &format!("{base}/o/r"), &a, &dest, 0)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("sha256 mismatch"));
+        assert!(!dest.exists());
+        assert!(!dest.with_file_name("f-linux-x64.bin.part").exists());
+    }
+
+    #[test]
+    fn digest_is_validated_before_use() {
+        let mut a = asset("x", "https://example/x");
+        a.digest = Some("sha256:ABCDEF".into());
+        assert!(a.expected_sha256().is_none(), "short digest must be ignored");
+        a.digest = Some(format!("sha256:{}", "a".repeat(64)));
+        assert_eq!(a.expected_sha256().unwrap(), "a".repeat(64));
+        a.digest = Some("not-a-digest".into());
+        assert!(a.expected_sha256().is_none());
     }
 }

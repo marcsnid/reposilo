@@ -6,7 +6,7 @@
 //! now; everything durable already lives on disk in sidecars/manifests.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -577,11 +577,21 @@ async fn download_archive(
             "only zip and tar.zst downloads are supported",
         ));
     };
-    let file = tokio::fs::File::open(&path)
+    stream_attachment(&path, &filename, content_type).await
+}
+
+/// Stream a file from disk as an attachment. Shared by snapshot and release
+/// asset downloads; the Content-Disposition filename is sanitized so a hostile
+/// name cannot inject headers (`HeaderValue::from_str` also rejects controls).
+async fn stream_attachment(
+    path: &Path,
+    filename: &str,
+    content_type: &str,
+) -> Result<Response, ApiError> {
+    let file = tokio::fs::File::open(path)
         .await
-        .map_err(|_| ApiError::not_found("no such snapshot"))?;
-    let stream = tokio_util::io::ReaderStream::new(file);
-    let body = Body::from_stream(stream);
+        .map_err(|_| ApiError::not_found("no such file"))?;
+    let body = Body::from_stream(tokio_util::io::ReaderStream::new(file));
     let mut headers = HeaderMap::new();
     if let Ok(v) = header::HeaderValue::from_str(content_type) {
         headers.insert(header::CONTENT_TYPE, v);
@@ -666,19 +676,7 @@ async fn download_asset(
         .and_then(|n| n.to_str())
         .unwrap_or("asset")
         .to_string();
-    let file = tokio::fs::File::open(&path)
-        .await
-        .map_err(|_| ApiError::not_found("no such asset"))?;
-    let body = Body::from_stream(tokio_util::io::ReaderStream::new(file));
-    let mut headers = HeaderMap::new();
-    if let Ok(v) = header::HeaderValue::from_str(asset_content_type(&filename)) {
-        headers.insert(header::CONTENT_TYPE, v);
-    }
-    let disposition = format!("attachment; filename=\"{}\"", filename.replace('"', ""));
-    if let Ok(v) = header::HeaderValue::from_str(&disposition) {
-        headers.insert(header::CONTENT_DISPOSITION, v);
-    }
-    Ok((headers, body).into_response())
+    stream_attachment(&path, &filename, asset_content_type(&filename)).await
 }
 
 async fn repo_notifications(st: &Arc<AppState>, rel: &str) -> Result<Response, ApiError> {
@@ -691,14 +689,31 @@ async fn repo_get(
     State(st): State<Arc<AppState>>,
     AxPath(rest): AxPath<String>,
 ) -> Result<Response, ApiError> {
-    if let Some((rel, zip_rel)) = rest.split_once("/archive/") {
-        download_archive(&st, rel, zip_rel).await
-    } else if let Some((rel, asset_rel)) = rest.split_once("/asset/") {
-        download_asset(&st, rel, asset_rel).await
-    } else if let Some(rel) = rest.strip_suffix("/notifications") {
-        repo_notifications(&st, rel).await
-    } else {
-        get_repo_detail(&st, &rest).await
+    if let Some(rel) = rest.strip_suffix("/notifications") {
+        return repo_notifications(&st, rel).await;
+    }
+    // A repo path may itself contain segments named `archive`/`asset` (a
+    // category folder, or a branch named `archive`), so match against the
+    // known repo paths and take the longest prefix instead of splitting
+    // blindly on the first `/archive/`.
+    let sub = {
+        let index = st.index.read().await;
+        let mut best: Option<(usize, &'static str, String, String)> = None;
+        for r in &index.repos {
+            for (marker, kind) in [("/archive/", "archive"), ("/asset/", "asset")] {
+                if let Some(tail) = rest.strip_prefix(&format!("{}{marker}", r.rel)) {
+                    if best.as_ref().is_none_or(|(len, ..)| r.rel.len() > *len) {
+                        best = Some((r.rel.len(), kind, r.rel.clone(), tail.to_string()));
+                    }
+                }
+            }
+        }
+        best
+    };
+    match sub {
+        Some((_, "archive", rel, tail)) => download_archive(&st, &rel, &tail).await,
+        Some((_, "asset", rel, tail)) => download_asset(&st, &rel, &tail).await,
+        _ => get_repo_detail(&st, &rest).await,
     }
 }
 
@@ -988,9 +1003,6 @@ async fn repo_patch(
     AxPath(rest): AxPath<String>,
     Json(body): Json<Value>,
 ) -> Result<Response, ApiError> {
-    if rest.contains("/archive/") || rest.contains("/asset/") || rest.ends_with("/notifications") || rest.ends_with("/refresh") {
-        return Err(ApiError::bad_request("cannot PATCH a sub-resource"));
-    }
     let repo = st
         .find_repo(&rest)
         .await

@@ -696,3 +696,53 @@ async fn stored_release_assets_are_listed_and_downloadable() -> Result<()> {
     assert_eq!(blocked.status(), 404);
     Ok(())
 }
+
+/// A repo nested under a folder named `archive` (or `asset`) must still be
+/// routable: the download handlers must not blindly split on the first marker.
+#[tokio::test]
+async fn repos_under_an_archive_folder_still_route() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    let repo = root.join("cat").join("archive").join("owner-demo");
+    let rel = repo.join("releases").join("v1.0.0");
+    fs::create_dir_all(rel.join("assets"))?;
+    fs::write(
+        repo.join("repo.json"),
+        r#"{"forge":"github","name":"demo","added":"2025-01-01T00:00:00Z","default_branch":"main"}"#,
+    )?;
+    fs::write(
+        rel.join("demo-v1.0.0.json"),
+        r#"{"kind":"release","repo":"cat/archive/owner-demo","origin":"https://github.com/owner/demo","ref":"v1.0.0","version":"1.0.0","commit":"abc","archived_at":"2025-01-02T00:00:00Z","archiver_version":"test","format":"zip","zip":{"file":"demo-v1.0.0.zip","bytes":2,"sha256":"bb"}}"#,
+    )?;
+    fs::write(rel.join("demo-v1.0.0.zip"), b"PK")?;
+    fs::write(rel.join("assets").join("demo-linux-x64.tar.gz"), b"hello")?;
+
+    let (base, _st) = spawn_server(test_cfg(&root)).await;
+    let client = reqwest::Client::new();
+    let repo_rel = "cat/archive/owner-demo";
+
+    let detail = client
+        .get(format!("{base}/api/repos/{repo_rel}"))
+        .send()
+        .await?;
+    assert_eq!(detail.status(), 200, "detail route mis-split the repo path");
+
+    let asset = client
+        .get(format!(
+            "{base}/api/repos/{repo_rel}/asset/releases/v1.0.0/assets/demo-linux-x64.tar.gz"
+        ))
+        .send()
+        .await?;
+    assert_eq!(asset.status(), 200);
+    assert_eq!(asset.bytes().await?.as_ref(), b"hello");
+
+    let archive = client
+        .get(format!(
+            "{base}/api/repos/{repo_rel}/archive/releases/v1.0.0/demo-v1.0.0.zip"
+        ))
+        .send()
+        .await?;
+    assert_eq!(archive.status(), 200);
+    assert_eq!(archive.bytes().await?.as_ref(), b"PK");
+    Ok(())
+}

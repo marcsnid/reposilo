@@ -26,8 +26,9 @@ goes away.
 - **Notify** on new releases with readable changelogs (GitHub release notes
   or `CHANGELOG.md` at the tag); optional webhook for external alerts
 - **Collect release binaries**: download the platform-specific assets attached
-  to a release, filtered to the OS/arch you
-  care about.
+  to a release, filtered to the OS/arch you care about. Names like
+  `foo-win64.zip`, `foo-x86_64-unknown-linux-gnu.tar.gz` and `Bar-1.0-arm64.dmg`
+  all resolve correctly.
 
 [![repo detail page](screenshots/reposilo-repo.png)](screenshots/reposilo-repo.png)
 
@@ -138,10 +139,10 @@ dead_after_days = 21       # stop checking after N days unreachable
 # Also download the binary assets attached to releases, for these platforms.
 # Filters match the asset filename loosely: an OS ("linux"), an arch
 # ("arm64"), a full slug ("darwin-arm64") or "all". "win64" == "windows-x64".
-# Empty = no binaries are downloaded (the safe default).
+# Empty = no binaries are downloaded (the safe default). Downloads are
+# size-capped and verified against the forge's sha256 when one is published.
 platforms = ["darwin-arm64", "linux-x64"]
 # max_asset_mb = 0            # 0 = no per-file size limit
-
 [llm]
 enabled = false
 url = "http://192.168.0.1:11434/v1"  # any OpenAI-compatible endpoint

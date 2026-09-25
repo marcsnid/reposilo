@@ -18,7 +18,7 @@
 
     <section class="panel">
       <h2>Release binaries</h2>
-      <p class="note">Also download the binary assets attached to releases (not just the source snapshot), for the platforms you select. Assets are classified from their filenames, so <code>foo-win64.zip</code>, <code>foo-x86_64-unknown-linux-gnu.tar.gz</code> and <code>foo_1.2_amd64.deb</code> all match. Source tarballs and assets that don’t name an OS and architecture are skipped. Leave everything unchecked to disable.</p>
+      <p class="note">Also download the binary files attached to releases, not just the source snapshot. Assets are matched by filename, so <code>foo-win64.zip</code>, <code>foo-x86_64-unknown-linux-gnu.tar.gz</code> and <code>foo_1.2_amd64.deb</code> all work. Source tarballs and files without an OS and arch in the name are skipped. Leave everything unchecked to disable.</p>
       <div class="settings-row"><label>Download all platforms</label>
         <input type="checkbox" name="release_all" value="1" {% if ctx.release_all %}checked{% endif %}></div>
       <div class="platform-grid">

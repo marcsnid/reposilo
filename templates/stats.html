@@ -34,7 +34,7 @@
     <h3>Last 7 days</h3>
     <div class="chart">
       {% for d in ctx.week %}
-      <div class="chart-col" title="{{ d.full_date }} — {{ d.ok }} ok, {{ d.fail }} failed">
+      <div class="chart-col" title="{{ d.full_date }}: {{ d.ok }} ok, {{ d.fail }} failed">
         <div class="chart-bars">
           <div class="bar bar-ok" style="height: {{ d.ok_h }}%"></div>
           <div class="bar bar-fail" style="height: {{ d.fail_h }}%"></div>
