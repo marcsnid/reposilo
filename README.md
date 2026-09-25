@@ -188,6 +188,33 @@ Auth **fails closed**: if `users.json` exists but is unreadable or corrupt,
 the server stays locked (logins are rejected) instead of silently opening up.
 Fix the file to restore access. Deleting it entirely disables auth again.
 
+## Docker
+
+A two-stage `Dockerfile` builds a static musl binary and drops it into a
+minimal Alpine runtime. The runtime is Alpine rather than `scratch` because
+the archiver shells out to `git`, which is not statically linked.
+
+```sh
+docker build -t reposilo .
+```
+
+Or use the example stack:
+
+```sh
+cp docker/config.example.toml docker/config.toml   # edit archive, platforms, tokens
+docker compose up -d
+```
+
+The app speaks plain HTTP on port 8765; run a reverse proxy in front and keep
+the published port on `127.0.0.1`. Prebuilt images live on GHCR at
+`ghcr.io/marcsnid/reposilo`: `latest` plus a `YYYYMMDD` snapshot on every
+`main` push, and the version tags on `v*` tags. The compose file runs the
+container read-only with all capabilities dropped and only `/config`,
+`/archive` and `/tmp` writable.
+
+If you clone over SSH instead of HTTPS, add `openssh-client` to the runtime
+stage and mount your keys.
+
 ## Roadmap
 
 - **git bundle archives**: a full-history bundle saved alongside the
@@ -200,8 +227,6 @@ Fix the file to restore access. Deleting it entirely disables auth again.
   GitLab and Forgejo
 - **Archive export/sync**: a guided way to move an archive tree between
   machines (verify integrity, rebuild the index on the far end)
-- **Dockerfile**: add Dockerfile support and container pushing. This is vital
-  for the selfhosted claims as it enables most normal workflows.
 
 ## Development
 

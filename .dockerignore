@@ -1,0 +1,8 @@
+# Deny everything, then allow only what the build needs (Cargo files, sources
+# and askama templates). Keeps the context tiny and avoids leaking .git.
+*
+!Cargo.toml
+!Cargo.lock
+!src
+!templates
+!Dockerfile

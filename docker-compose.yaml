@@ -1,0 +1,52 @@
+# Example single-node stack.
+#
+#   1. cp docker/config.example.toml docker/config.toml   (then edit it)
+#   2. docker compose up -d
+#   3. point your reverse proxy at 127.0.0.1:8765
+#
+# The app speaks plain HTTP; it expects a reverse proxy to terminate TLS.
+
+services:
+  reposilo:
+    # Pin a version tag for reproducible upgrades, or use :latest.
+    image: ghcr.io/marcsnid/reposilo:latest
+    # Build locally instead of pulling:
+    # build: .
+    container_name: reposilo
+    restart: unless-stopped
+
+    ports:
+      # Host loopback only. Never expose this port directly.
+      - "127.0.0.1:8765:8765"
+
+    volumes:
+      # Contains config.toml. Mounted as a directory so settings can be saved.
+      - ./docker:/config
+      # The archive tree. Use a bind mount instead if you want it visible on
+      # the host (see the `user:` note below).
+      - reposilo-archive:/archive
+
+    environment:
+      TZ: Etc/UTC
+      # Optional forge tokens, read from the host environment or a .env file.
+      # Enable "env:GITHUB_TOKEN" in config.toml to actually use them.
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITLAB_TOKEN: ${GITLAB_TOKEN:-}
+      FORGEJO_TOKEN: ${FORGEJO_TOKEN:-}
+
+    # Hardening. The app only needs to write to /config, /archive and /tmp.
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 512
+
+    # On Linux, if ./docker or a bind-mounted archive is not writable by UID
+    # 1000 (the image's user), uncomment this to run as your own user:
+    # user: "1000:1000"
+
+volumes:
+  reposilo-archive:

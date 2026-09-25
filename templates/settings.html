@@ -51,7 +51,7 @@
 
     <section class="panel">
       <h2>llama.cpp</h2>
-      <p class="note">Any OpenAI-compatible endpoint (llama-server, ollama, LM Studio, a LAN box). Used for two things: <b>auto-tagging</b> (batch tags repos from their READMEs) and the <b>llama.cpp button</b> on the import review form, which reads a mystery zip’s fingerprint (filename, file list, README excerpt) and proposes a project name plus GitHub search queries to track down zips the offline detection couldn’t identify.</p>
+      <p class="note">Any OpenAI-compatible endpoint. Used for <b>auto-tagging</b> and <b>import review</b>.</p>
       <div class="settings-row"><label>Enabled</label>
         <input type="checkbox" name="llm_enabled" value="1" {% if ctx.llm_enabled %}checked{% endif %}></div>
       <div class="settings-row"><label>Endpoint URL</label>

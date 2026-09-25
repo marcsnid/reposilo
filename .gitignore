@@ -23,3 +23,6 @@ target
 # internal design/scratch notes (kept out of the repo)
 DESIGN.md
 .DS_Store
+
+# local docker runtime config (copy docker/config.example.toml)
+docker/config.toml

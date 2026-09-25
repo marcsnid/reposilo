@@ -1,0 +1,46 @@
+# Copy to docker/config.toml before `docker compose up`.
+# The app does not terminate TLS; run a reverse proxy in front and publish
+# this port on the host loopback only.
+
+[server]
+# Must be 0.0.0.0 inside a container, otherwise the published port is dead.
+bind = "0.0.0.0:8765"
+
+[archive]
+root = "/archive"
+format = "zip"
+
+[retention]
+keep_branch_snapshots = 1
+keep_releases = 1
+
+[scheduler]
+enabled = true
+default_interval_days = 7
+release_poll_hours = 24
+dead_after_days = 21
+
+[git]
+depth = 1
+timeout_secs = 600
+
+# Download release binaries for the platforms you want. Empty = none.
+[releases]
+platforms = ["darwin-arm64", "linux-x64"]
+# max_asset_mb = 0
+
+[github]
+# token = "env:GITHUB_TOKEN"
+
+[gitlab]
+# token = "env:GITLAB_TOKEN"
+
+[forgejo]
+# token = "env:FORGEJO_TOKEN"
+
+[llm]
+enabled = false
+# url = "http://192.168.0.1:11434/v1"
+
+[otel]
+enabled = false

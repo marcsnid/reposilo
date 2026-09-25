@@ -11,7 +11,7 @@
     {% endif %}
   {% endif %}
   {% if ctx.items.is_empty() %}
-  <p class="dim">no notifications yet: they appear when new releases are archived or remotes go dead</p>
+  <p class="dim">no notifications</p>
   {% else %}
   {% for n in ctx.items %}
   <div class="panel notification {% if n.kind == "new_release" %}new-release{% endif %}">
