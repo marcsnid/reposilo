@@ -113,6 +113,9 @@ enum Command {
         /// Disable the background scheduler
         #[arg(long)]
         no_scheduler: bool,
+        /// Listen address, e.g. 0.0.0.0:8765 (overrides config and REPOSILO_BIND)
+        #[arg(long)]
+        bind: Option<String>,
     },
     /// Tag repos with a local llama.cpp server
     Autotag {
@@ -417,8 +420,16 @@ async fn main() -> Result<()> {
             Ok(())
         }
 
-        Command::Serve { no_scheduler } => {
-            let (cfg, config_path) = load_config(cli.config.as_ref())?;
+        Command::Serve { no_scheduler, bind } => {
+            let (mut cfg, config_path) = load_config(cli.config.as_ref())?;
+            // precedence: --bind > REPOSILO_BIND > config
+            let bind = bind
+                .or_else(|| std::env::var("REPOSILO_BIND").ok())
+                .map(|b| b.trim().to_string())
+                .filter(|b| !b.is_empty());
+            if let Some(b) = bind {
+                cfg.server.bind = b;
+            }
             reposilo::server::serve(cfg, Some(config_path), no_scheduler).await
         }
 

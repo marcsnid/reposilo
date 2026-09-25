@@ -58,6 +58,18 @@ goes away.
   shared file keeps the original snapshot's embedded `.reposilo.json`; each
   snapshot's external sidecar records its own kind/ref/version
 
+## Install
+
+Grab a prebuilt binary from the
+[releases page](https://github.com/marcsnid/reposilo/releases) (linux, macOS and
+windows; x64 and arm64), or build from source:
+
+```sh
+cargo build --release
+```
+
+The only runtime dependency is `git`.
+
 ## Usage
 
 ```sh
@@ -80,7 +92,9 @@ reposilo migrate-folders                     # owner/repo → owner-repo folders
 reposilo prune-shallow                       # remove old git stores (zip-only)
 
 # start the web UI + API + scheduler
-reposilo serve
+reposilo serve                               # 127.0.0.1:8765 by default
+reposilo serve --bind 0.0.0.0:8765           # or REPOSILO_BIND=0.0.0.0:8765
+# GET /healthz is an unauthenticated liveness probe (200 while the server is up)
 # open http://127.0.0.1:8765:
 #   - search, tag-filter, browse repos with rendered READMEs
 #   - create and manage folders (any nesting depth, emoji icons or colored dots);
@@ -213,7 +227,8 @@ container read-only with all capabilities dropped and only `/config`,
 `/archive` and `/tmp` writable.
 
 If you clone over SSH instead of HTTPS, add `openssh-client` to the runtime
-stage and mount your keys.
+stage and mount your keys. The container sets `REPOSILO_BIND=0.0.0.0:8765`
+(override with `-e REPOSILO_BIND=...`).
 
 ## Roadmap
 
@@ -238,3 +253,7 @@ cargo clippy
 
 Single binary (templates + CSS + htmx compiled in). No external services
 required except git and optionally a llama.cpp endpoint for AI tagging.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

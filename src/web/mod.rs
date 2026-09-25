@@ -24,6 +24,7 @@ use views::{
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(index_page))
+        .route("/healthz", get(healthz))
         .route("/notifications", get(notifications_page).post(notifications_mark_read))
         .route("/stats", get(stats_page))
         .route("/import", get(import_page))
@@ -84,6 +85,15 @@ async fn htmx_js() -> Response {
     (
         [(header::CONTENT_TYPE, "application/javascript; charset=utf-8")],
         Body::from(include_str!("../assets/htmx.min.js")),
+    )
+        .into_response()
+}
+
+/// GET /healthz: unauthenticated liveness probe for containers and monitoring.
+async fn healthz() -> Response {
+    (
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        Body::from("ok"),
     )
         .into_response()
 }

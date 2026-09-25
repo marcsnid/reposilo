@@ -359,7 +359,7 @@ pub async fn logout(st: State<Arc<AppState>>, headers: HeaderMap) -> Response {
 // ---------- middleware ----------
 
 fn is_open_path(path: &str) -> bool {
-    path == "/login" || path.starts_with("/assets/") || path == "/logout"
+    path == "/login" || path == "/logout" || path == "/healthz" || path.starts_with("/assets/")
 }
 
 pub async fn mw(st: State<Arc<AppState>>, req: Request, next: Next) -> Response {

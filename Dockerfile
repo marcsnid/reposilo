@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM rust:1.98-alpine AS builder
+FROM rust:1.98.1-alpine AS builder
 
 RUN apk add --no-cache build-base perl
 
@@ -34,13 +34,14 @@ COPY --from=builder /build/target/release/reposilo /usr/local/bin/reposilo
 
 USER reposilo
 WORKDIR /home/reposilo
-ENV HOME=/home/reposilo
+ENV HOME=/home/reposilo \
+    REPOSILO_BIND=0.0.0.0:8765
 
 EXPOSE 8765
 VOLUME ["/config", "/archive"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD wget -q -O /dev/null http://127.0.0.1:8765/login || exit 1
+    CMD wget -q -O /dev/null "http://127.0.0.1:${REPOSILO_BIND##*:}/healthz" || exit 1
 
 ENTRYPOINT ["reposilo"]
 CMD ["--config", "/config/config.toml", "serve"]

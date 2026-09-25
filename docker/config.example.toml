@@ -3,7 +3,8 @@
 # this port on the host loopback only.
 
 [server]
-# Must be 0.0.0.0 inside a container, otherwise the published port is dead.
+# The container sets REPOSILO_BIND=0.0.0.0:8765, which overrides this.
+# Change it with `-e REPOSILO_BIND=...` or `serve --bind ...`.
 bind = "0.0.0.0:8765"
 
 [archive]
