@@ -105,8 +105,19 @@
         <ul class="snaps">
           {% for s in ctx.releases %}
           <li>
-            <a class="dl" href="{{ s.download_url }}" download>{{ s.version }}</a>
+            <a class="dl" href="{{ s.download_url }}" download>{{ s.version }} <span class="dim" style="font-weight:400">source</span></a>
             <span class="snap-meta">{{ s.commit_short }} · {{ s.date }} · {{ s.size_human }}</span>
+            {% if !s.assets.is_empty() %}
+            <ul class="asset-list">
+              {% for a in s.assets %}
+              <li>
+                <a class="asset-name" href="{{ a.download_url }}" download>{{ a.name }}</a>
+                <span class="asset-plat">{{ a.platform }}</span>
+                <span class="asset-size">{{ a.size_human }}</span>
+              </li>
+              {% endfor %}
+            </ul>
+            {% endif %}
             {% if !s.changelog_html.is_empty() %}
             <details><summary class="dim" style="font-size:0.8rem;cursor:pointer">changelog</summary>
               <div class="readme">{{ s.changelog_html|safe }}</div>

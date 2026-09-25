@@ -598,3 +598,101 @@ async fn blob_viewer_escapes_untrusted_html() -> Result<()> {
     assert!(html.contains("alert("), "file text should still be shown: {html}");
     Ok(())
 }
+
+#[tokio::test]
+async fn settings_platform_filters_roundtrip() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let (base, st) = spawn_server(test_cfg(&tmp.path().join("archive"))).await;
+    let client = reqwest::Client::new();
+
+    let html = client.get(format!("{base}/settings")).send().await?.text().await?;
+    assert!(html.contains("Release binaries"), "settings should have the panel");
+    assert!(
+        html.contains("name=\"plat_linux-x64\""),
+        "settings should offer the linux-x64 checkbox"
+    );
+
+    // select via checkboxes plus free-text; "win64" must canonicalize
+    let resp = client
+        .post(format!("{base}/settings"))
+        .form(&[
+            ("plat_darwin-arm64", "1"),
+            ("plat_linux-x64", "1"),
+            ("release_platforms_extra", "win64, riscv64"),
+        ])
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+
+    let platforms = st.cfg().await.releases.platforms.clone();
+    assert_eq!(platforms, vec!["darwin-arm64", "linux-x64", "windows-x64", "riscv64"]);
+
+    // and the page reflects the saved selection
+    let html2 = client.get(format!("{base}/settings")).send().await?.text().await?;
+    assert!(
+        html2.contains("name=\"plat_darwin-arm64\" value=\"1\" checked"),
+        "saved checkboxes should render checked: {html2}"
+    );
+    Ok(())
+}
+
+/// A release sidecar that already records a downloaded asset must show up on
+/// the repo page, in the API, and be downloadable straight from disk.
+#[tokio::test]
+async fn stored_release_assets_are_listed_and_downloadable() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    let repo = root.join("owner-demo");
+    let rel = repo.join("releases").join("v1.0.0");
+    fs::create_dir_all(rel.join("assets"))?;
+
+    fs::write(
+        repo.join("repo.json"),
+        r#"{"forge":"github","name":"demo","added":"2025-01-01T00:00:00Z","default_branch":"main"}"#,
+    )?;
+    fs::write(
+        rel.join("demo-v1.0.0.json"),
+        r#"{
+          "kind":"release","repo":"owner-demo","origin":"https://github.com/owner/demo",
+          "ref":"v1.0.0","version":"1.0.0","commit":"0123456789abcdef0123456789abcdef01234567",
+          "archived_at":"2025-01-02T00:00:00Z","archiver_version":"test","format":"zip",
+          "assets":[{"name":"demo-linux-x64.tar.gz","platform":"linux-x64","url":"https://example/x","bytes":5,"sha256":"aa","downloaded_at":"2025-01-02T00:00:00Z"}],
+          "zip":{"file":"demo-v1.0.0.zip","bytes":0,"sha256":"bb"}
+        }"#,
+    )?;
+    fs::write(rel.join("assets").join("demo-linux-x64.tar.gz"), b"hello")?;
+
+    let (base, _st) = spawn_server(test_cfg(&root)).await;
+    let client = reqwest::Client::new();
+
+    let page = client.get(format!("{base}/repos/owner-demo")).send().await?;
+    assert_eq!(page.status(), 200);
+    let html = page.text().await?;
+    assert!(html.contains("demo-linux-x64.tar.gz"), "asset not listed: {html}");
+    assert!(html.contains("Linux · x86_64"), "platform label missing: {html}");
+
+    let detail: serde_json::Value = client
+        .get(format!("{base}/api/repos/owner-demo"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(detail["releases"][0]["assets"][0]["platform"], "linux-x64");
+
+    let asset = client
+        .get(format!(
+            "{base}/api/repos/owner-demo/asset/releases/v1.0.0/assets/demo-linux-x64.tar.gz"
+        ))
+        .send()
+        .await?;
+    assert_eq!(asset.status(), 200);
+    assert_eq!(asset.bytes().await?.as_ref(), b"hello");
+
+    // the asset route refuses files outside releases/<tag>/assets/
+    let blocked = client
+        .get(format!("{base}/api/repos/owner-demo/asset/repo.json"))
+        .send()
+        .await?;
+    assert_eq!(blocked.status(), 404);
+    Ok(())
+}

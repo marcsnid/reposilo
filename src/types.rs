@@ -92,6 +92,24 @@ pub struct ZipInfo {
     pub sha256: String,
 }
 
+/// A release binary/asset downloaded next to a release snapshot. Stored on
+/// disk under `releases/<tag>/assets/<name>` and recorded in the release
+/// sidecar so the whole set is browsable without a central database.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredAsset {
+    /// Safe filename on disk (the remote name with unsafe characters folded).
+    pub name: String,
+    /// Canonical platform slug, e.g. "linux-x64".
+    pub platform: String,
+    /// Where it came from (forge download URL at capture time).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub url: String,
+    pub bytes: u64,
+    pub sha256: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub downloaded_at: String,
+}
+
 /// Metadata recorded at storage time, stored alongside each zip.
 /// Everything here survives even if the remote goes away.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +139,9 @@ pub struct SnapshotSidecar {
     /// forge's release notes or extracted from CHANGELOG.md at the tag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changelog: Option<String>,
+    /// Downloaded release binaries/assets (releases only; empty elsewhere).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assets: Vec<StoredAsset>,
     /// Original path of an imported zip, for provenance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imported_from: Option<String>,

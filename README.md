@@ -25,6 +25,9 @@ goes away.
   all read from the zip on demand (no unzip needed)
 - **Notify** on new releases with readable changelogs (GitHub release notes
   or `CHANGELOG.md` at the tag); optional webhook for external alerts
+- **Collect release binaries**: download the platform-specific assets attached
+  to a release, filtered to the OS/arch you
+  care about.
 
 [![repo detail page](screenshots/reposilo-repo.png)](screenshots/reposilo-repo.png)
 
@@ -36,6 +39,7 @@ goes away.
 ├── README.md        # plain README of the default branch (few KB)
 ├── branch/<branch>/ # snapshots: repo-branch@date_sha.zip + .json sidecar
 └── releases/<tag>/  # releases: repo-tag.zip + .json sidecar
+    └── assets/       # release binaries for the platforms you enabled
 ```
 
 - **The zip is the only persistent artifact**: git clones are ephemeral
@@ -124,6 +128,20 @@ dead_after_days = 21       # stop checking after N days unreachable
 [github]
 # token = "env:GITHUB_TOKEN"  # better rate limits for enrichment
 
+[gitlab]
+# token = "env:GITLAB_TOKEN"   # private GitLab release assets
+
+[forgejo]
+# token = "env:FORGEJO_TOKEN"  # private Forgejo/Codeberg release assets
+
+[releases]
+# Also download the binary assets attached to releases, for these platforms.
+# Filters match the asset filename loosely: an OS ("linux"), an arch
+# ("arm64"), a full slug ("darwin-arm64") or "all". "win64" == "windows-x64".
+# Empty = no binaries are downloaded (the safe default).
+platforms = ["darwin-arm64", "linux-x64"]
+# max_asset_mb = 0            # 0 = no per-file size limit
+
 [llm]
 enabled = false
 url = "http://192.168.0.1:11434/v1"  # any OpenAI-compatible endpoint
@@ -171,8 +189,6 @@ Fix the file to restore access. Deleting it entirely disables auth again.
 
 ## Roadmap
 
-- **Release binaries/assets**: downloading the files attached to a release,
-  not just the source snapshot
 - **git bundle archives**: a full-history bundle saved alongside the
   snapshot, so a dead repo can be re-established (re-cloned, re-pushed),
   not just browsed

@@ -17,6 +17,23 @@
     </section>
 
     <section class="panel">
+      <h2>Release binaries</h2>
+      <p class="note">Also download the binary assets attached to releases (not just the source snapshot), for the platforms you select. Assets are classified from their filenames, so <code>foo-win64.zip</code>, <code>foo-x86_64-unknown-linux-gnu.tar.gz</code> and <code>foo_1.2_amd64.deb</code> all match. Source tarballs and assets that don’t name an OS and architecture are skipped. Leave everything unchecked to disable.</p>
+      <div class="settings-row"><label>Download all platforms</label>
+        <input type="checkbox" name="release_all" value="1" {% if ctx.release_all %}checked{% endif %}></div>
+      <div class="platform-grid">
+        {% for p in ctx.release_platforms %}
+        <label class="platform-choice"><input type="checkbox" name="plat_{{ p.key }}" value="1" {% if p.checked %}checked{% endif %}> {{ p.label }}</label>
+        {% endfor %}
+      </div>
+      <div class="settings-row"><label>Additional filters</label>
+        <input type="text" name="release_platforms_extra" value="{{ ctx.release_platforms_extra }}" placeholder="e.g. linux-arm64, riscv64, ppc64le"></div>
+      <p class="note">Each filter is a full slug (<code>linux-x64</code>), an OS (<code>linux</code>), an arch (<code>arm64</code>) or <code>all</code>; comma or space separated.</p>
+      <div class="settings-row"><label>Max size per asset (MiB, 0 = no limit)</label>
+        <input type="number" name="release_max_asset_mb" value="{{ ctx.release_max_asset_mb }}" min="0"></div>
+    </section>
+
+    <section class="panel">
       <h2>Scheduler</h2>
       <p class="note">How often the background loop checks remotes. Unchanged repos cost a single ls-remote; nothing is cloned unless something moved.</p>
       <div class="settings-row"><label>Enabled</label>

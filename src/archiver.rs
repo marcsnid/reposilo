@@ -319,9 +319,13 @@ impl Archiver {
                 match self.fetch_tag(git_dir, url, &tag).await {
                     Ok(_) => {
                         let version = tag.trim_start_matches(['v', 'V']);
-                        self.snapshot_ref(repo_dir, git_dir, rel, &info.name, url, &tag, SnapshotKind::Release, Some(version), None)
+                        let mut sc = self
+                            .snapshot_ref(repo_dir, git_dir, rel, &info.name, url, &tag, SnapshotKind::Release, Some(version), None)
                             .await
                             .context("failed to archive release")?;
+                        if let Err(e) = self.sync_release_assets(repo_dir, &mut sc).await {
+                            tracing::warn!(repo = %rel, error = %format!("{e:#}"), "release asset sync failed");
+                        }
                     }
                     Err(e) => {
                         tracing::warn!(repo = %rel, tag = %tag, error = %e, "could not fetch release tag");
@@ -461,6 +465,7 @@ impl Archiver {
             imported_from: None,
             format: Some(self.cfg.archive.format.clone()),
             changelog: changelog.clone(),
+            assets: Vec::new(),
             zip: ZipInfo { file: zip_name.clone(), bytes: 0, sha256: String::new() },
         };
         let mut embedded = serde_json::to_value(&sidecar).context("serialize embedded metadata")?;
@@ -541,6 +546,108 @@ impl Archiver {
             }
         }
         Ok(sidecar)
+    }
+
+    /// Download the release binaries that match the configured platform
+    /// filters and record them in the release sidecar.
+    ///
+    /// Idempotent: an asset already on disk whose size matches the remote is
+    /// kept as-is, so repeated refreshes (and the platform-change backfill)
+    /// never re-download a large file for nothing. Storage lives next to the
+    /// release snapshot at `releases/<tag>/assets/`, so the archive tree stays
+    /// self-describing without a central database.
+    async fn sync_release_assets(
+        &self,
+        repo_dir: &Path,
+        sidecar: &mut SnapshotSidecar,
+    ) -> Result<usize> {
+        if self.cfg.releases.platforms.is_empty() {
+            return Ok(0);
+        }
+        if sidecar.origin.is_empty() || sidecar.r#ref.is_empty() {
+            return Ok(0);
+        }
+        let Some(release) =
+            crate::releaseapi::fetch_release(&self.cfg, &sidecar.origin, &sidecar.r#ref).await
+        else {
+            return Ok(0);
+        };
+
+        let release_dir = repo_dir.join("releases").join(sanitize(&sidecar.r#ref));
+        let assets_dir = release_dir.join("assets");
+        let max_bytes = self.cfg.releases.max_asset_mb.saturating_mul(1024 * 1024);
+
+        let mut stored = 0usize;
+        let mut changed = false;
+        for asset in &release.assets {
+            let remote_name = asset.effective_name();
+            let Some(platform) = crate::platform::classify(&remote_name) else {
+                continue;
+            };
+            if !crate::platform::matches_any(&self.cfg.releases.platforms, platform) {
+                continue;
+            }
+            let file_name = sanitize(&remote_name);
+            if file_name.is_empty() || file_name == "." || file_name == ".." {
+                continue;
+            }
+            let dest = assets_dir.join(&file_name);
+
+            // keep an existing download when the remote size is unchanged
+            if let Some(existing) = sidecar.assets.iter().find(|a| a.name == file_name) {
+                if dest.is_file() && asset.size.is_none_or(|sz| sz == existing.bytes) {
+                    stored += 1;
+                    continue;
+                }
+            }
+            if let Some(sz) = asset.size {
+                if max_bytes > 0 && sz > max_bytes {
+                    tracing::debug!(asset = %remote_name, bytes = sz, "skipping oversized release asset");
+                    continue;
+                }
+            }
+
+            match crate::releaseapi::download_asset(
+                &self.cfg,
+                &sidecar.origin,
+                asset,
+                &dest,
+                max_bytes,
+            )
+            .await
+            {
+                Ok((bytes, sha256)) => {
+                    sidecar.assets.retain(|a| a.name != file_name);
+                    sidecar.assets.push(crate::types::StoredAsset {
+                        name: file_name.clone(),
+                        platform: platform.slug(),
+                        url: asset.url.clone(),
+                        bytes,
+                        sha256,
+                        downloaded_at: now_rfc3339(),
+                    });
+                    stored += 1;
+                    changed = true;
+                    tracing::info!(asset = %remote_name, platform = %platform.slug(), bytes, "stored release asset");
+                }
+                Err(e) => {
+                    tracing::warn!(asset = %remote_name, error = %format!("{e:#}"), "release asset download failed");
+                }
+            }
+        }
+
+        // drop metadata for files that are no longer on disk
+        let before = sidecar.assets.len();
+        sidecar.assets.retain(|a| assets_dir.join(&a.name).is_file());
+        if sidecar.assets.len() != before {
+            changed = true;
+        }
+
+        if changed {
+            let json_path = release_dir.join(&sidecar.zip.file).with_extension("json");
+            crate::types::write_json(&json_path, sidecar)?;
+        }
+        Ok(stored)
     }
 
     /// Refresh one repo against its remote: re-snapshot the default branch if
@@ -634,6 +741,17 @@ impl Archiver {
             false
         };
 
+        // Keep release binaries in sync even when nothing moved: this also
+        // backfills assets for archives created before platform filters were
+        // configured (or after the filters changed).
+        if !release_needed && !self.cfg.releases.platforms.is_empty() {
+            if let Some(mut sc) = latest_release_sidecar(repo_dir) {
+                if let Err(e) = self.sync_release_assets(repo_dir, &mut sc).await {
+                    tracing::warn!(repo = %rel, error = %format!("{e:#}"), "release asset sync failed");
+                }
+            }
+        }
+
         // nothing to do? no clone at all: refresh costs one ls-remote
         let need_work = branch_changed
             || release_needed
@@ -679,8 +797,12 @@ impl Archiver {
             if let Some(tag) = new_release_tag {
                 if self.fetch_tag(git_dir, &origin, &tag).await.is_ok() {
                     let version = tag.trim_start_matches(['v', 'V']);
-                    self.snapshot_ref(repo_dir, git_dir, &rel, &name, &origin, &tag, SnapshotKind::Release, Some(version), None)
+                    let mut sc = self
+                        .snapshot_ref(repo_dir, git_dir, &rel, &name, &origin, &tag, SnapshotKind::Release, Some(version), None)
                         .await?;
+                    if let Err(e) = self.sync_release_assets(repo_dir, &mut sc).await {
+                        tracing::warn!(repo = %rel, error = %format!("{e:#}"), "release asset sync failed");
+                    }
                     summary.new_release = Some(version.to_string());
                 }
             }
@@ -811,6 +933,23 @@ fn find_sidecar(dir: &Path) -> Option<SnapshotSidecar> {
     None
 }
 
+/// The most recently archived release sidecar (its assets, changelog, tag).
+fn latest_release_sidecar(repo_dir: &Path) -> Option<SnapshotSidecar> {
+    let entries = fs::read_dir(repo_dir.join("releases")).ok()?;
+    let mut best: Option<SnapshotSidecar> = None;
+    for e in entries.flatten() {
+        let p = e.path();
+        if !p.is_dir() {
+            continue;
+        }
+        let Some(sc) = find_sidecar(&p) else { continue };
+        if best.as_ref().is_none_or(|b| sc.archived_at > b.archived_at) {
+            best = Some(sc);
+        }
+    }
+    best
+}
+
 /// The newest semver version archived under releases/, if any.
 /// Newest archived commit of a branch, straight from the snapshot sidecars.
 fn latest_branch_commit(repo_dir: &Path, branch: &str) -> Option<String> {
@@ -872,5 +1011,51 @@ mod tests {
     fn sanitize_keeps_safe_chars() {
         assert_eq!(sanitize("feature/abc-def"), "feature_abc-def");
         assert_eq!(sanitize("sm64"), "sm64");
+    }
+
+    /// With no configured platforms, asset syncing must not touch the network
+    /// or the sidecar at all.
+    #[tokio::test]
+    async fn asset_sync_is_a_noop_without_platforms() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.archive.root = tmp.path().to_string_lossy().into_owned();
+        let archiver = Archiver::new(cfg);
+        let mut sc: SnapshotSidecar = serde_json::from_value(serde_json::json!({
+            "kind": "release",
+            "repo": "o-r",
+            "origin": "https://github.com/o/r",
+            "ref": "v1.0.0",
+            "commit": "abc",
+            "archived_at": "2025-01-01T00:00:00Z",
+            "archiver_version": "test",
+            "zip": { "file": "r-v1.0.0.zip", "bytes": 1, "sha256": "x" }
+        }))
+        .unwrap();
+        assert_eq!(archiver.sync_release_assets(tmp.path(), &mut sc).await.unwrap(), 0);
+        assert!(sc.assets.is_empty());
+    }
+
+    /// A configured filter plus an unsupported origin is still a clean no-op
+    /// (no error, no downloads) rather than a network call.
+    #[tokio::test]
+    async fn asset_sync_skips_unsupported_forges() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.archive.root = tmp.path().to_string_lossy().into_owned();
+        cfg.releases.platforms = vec!["linux-x64".into()];
+        let archiver = Archiver::new(cfg);
+        let mut sc: SnapshotSidecar = serde_json::from_value(serde_json::json!({
+            "kind": "release",
+            "repo": "o-r",
+            "origin": "file:///tmp/fixture/remote",
+            "ref": "v1.0.0",
+            "commit": "abc",
+            "archived_at": "2025-01-01T00:00:00Z",
+            "archiver_version": "test",
+            "zip": { "file": "r-v1.0.0.zip", "bytes": 1, "sha256": "x" }
+        }))
+        .unwrap();
+        assert_eq!(archiver.sync_release_assets(tmp.path(), &mut sc).await.unwrap(), 0);
     }
 }

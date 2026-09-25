@@ -15,6 +15,9 @@ pub struct Config {
     pub notifications: NotificationsCfg,
     pub git: GitCfg,
     pub github: GithubCfg,
+    pub gitlab: ForgeTokenCfg,
+    pub forgejo: ForgeTokenCfg,
+    pub releases: ReleasesCfg,
     pub llm: LlmCfg,
     pub otel: OtelCfg,
 }
@@ -160,6 +163,19 @@ impl Default for GitCfg {
     }
 }
 
+/// Resolve a token that may use the `env:VAR` indirection, so secrets never
+/// have to live in the config file. A missing `env:VAR` resolves to `None`
+/// rather than sending the literal string as a credential.
+pub fn resolve_token(token: &Option<String>) -> Option<String> {
+    let t = token.as_deref()?;
+    let resolved = if let Some(var) = t.strip_prefix("env:") {
+        std::env::var(var).ok()?
+    } else {
+        t.to_string()
+    };
+    (!resolved.is_empty()).then_some(resolved)
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GithubCfg {
@@ -170,15 +186,35 @@ pub struct GithubCfg {
 
 impl GithubCfg {
     pub fn resolved_token(&self) -> Option<String> {
-        self.token
-            .as_ref()
-            .map(|t| {
-                t.strip_prefix("env:")
-                    .and_then(|var| std::env::var(var).ok())
-                    .unwrap_or_else(|| t.clone())
-            })
-            .filter(|t| !t.is_empty())
+        resolve_token(&self.token)
     }
+}
+
+/// Token for one forge's API, with the same `env:VAR` indirection as GitHub.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ForgeTokenCfg {
+    pub token: Option<String>,
+}
+
+impl ForgeTokenCfg {
+    pub fn resolved_token(&self) -> Option<String> {
+        resolve_token(&self.token)
+    }
+}
+
+/// Release binary/asset downloading.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReleasesCfg {
+    /// Which platform assets to keep. Each entry is a platform slug or a loose
+    /// token ("linux-x64", "arm64", "win64", "darwin", "all"). Empty means
+    /// no binaries are downloaded. Filters are ANDed per asset: an asset is
+    /// downloaded when its filename names both an OS and an arch and that
+    /// platform matches at least one entry.
+    pub platforms: Vec<String>,
+    /// Skip any single asset larger than this many MiB (0 = no limit).
+    pub max_asset_mb: u64,
 }
 
 /// Local llama.cpp auto-tagger configuration
@@ -252,4 +288,38 @@ impl Config {
 pub fn default_config_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     PathBuf::from(home).join(".config/reposilo/config.toml")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn releases_cfg_roundtrips_toml() {
+        let mut cfg = Config::default();
+        cfg.releases.platforms = vec!["darwin-arm64".into(), "linux-x64".into()];
+        cfg.releases.max_asset_mb = 250;
+        let s = toml::to_string_pretty(&cfg).unwrap();
+        let back: Config = toml::from_str(&s).unwrap();
+        assert_eq!(back.releases.platforms, cfg.releases.platforms);
+        assert_eq!(back.releases.max_asset_mb, 250);
+    }
+
+    #[test]
+    fn config_without_release_sections_loads_defaults() {
+        let cfg: Config = toml::from_str("[archive]\nroot = \".\"\n").unwrap();
+        assert!(cfg.releases.platforms.is_empty());
+        assert_eq!(cfg.releases.max_asset_mb, 0);
+        assert!(cfg.gitlab.token.is_none());
+        assert!(cfg.forgejo.token.is_none());
+    }
+
+    #[test]
+    fn env_token_indirection() {
+        std::env::set_var("REPOSILO_TEST_TOKEN", "s3cret");
+        let cfg: GithubCfg = GithubCfg { token: Some("env:REPOSILO_TEST_TOKEN".into()) };
+        assert_eq!(cfg.resolved_token().as_deref(), Some("s3cret"));
+        let missing = GithubCfg { token: Some("env:REPOSILO_TEST_TOKEN_MISSING".into()) };
+        assert!(missing.resolved_token().is_none());
+    }
 }

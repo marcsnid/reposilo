@@ -815,6 +815,29 @@ async fn settings_save(
     }
     cfg.otel.interval_secs = num(&f, "otel_interval", cfg.otel.interval_secs).max(10);
 
+    // release binaries: checkboxes for the common platforms + a free-text field.
+    // Canonicalize so "win64" is stored as "windows-x64" and duplicates merge.
+    let mut platforms: Vec<String> = Vec::new();
+    if f.0.get("release_all").map(|v| v == "1").unwrap_or(false) {
+        platforms.push("all".to_string());
+    }
+    for choice in crate::platform::CHOICES {
+        if f.0.get(&format!("plat_{}", choice.slug)).map(|v| v == "1").unwrap_or(false) {
+            platforms.push(choice.slug.to_string());
+        }
+    }
+    if let Some(extra) = f.0.get("release_platforms_extra") {
+        for token in extra.split([',', ' ', ';', '\n', '\t']).filter(|t| !t.trim().is_empty()) {
+            if let Some(c) = crate::platform::canonical(token) {
+                platforms.push(c);
+            }
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    platforms.retain(|p| seen.insert(p.clone()));
+    cfg.releases.platforms = platforms;
+    cfg.releases.max_asset_mb = num(&f, "release_max_asset_mb", cfg.releases.max_asset_mb);
+
     // apply live
     *st.cfg.write().await = cfg.clone();
     // persist (if we know where the config lives)

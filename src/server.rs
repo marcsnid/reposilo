@@ -440,6 +440,26 @@ fn snapshot_rel_path(repo: &RepoEntry, e: &SnapshotEntry) -> String {
 }
 
 fn snapshot_json(repo: &RepoEntry, e: &SnapshotEntry) -> Value {
+    let subdir = e
+        .dir
+        .strip_prefix(&repo.dir)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let assets: Vec<Value> = e
+        .sidecar
+        .assets
+        .iter()
+        .map(|a| {
+            json!({
+                "name": a.name,
+                "platform": a.platform,
+                "platform_label": crate::platform::describe(&a.platform),
+                "bytes": a.bytes,
+                "sha256": a.sha256,
+                "download": format!("/api/repos/{}/asset/{subdir}/assets/{}", repo.rel, a.name),
+            })
+        })
+        .collect();
     json!({
         "kind": e.sidecar.kind,
         "ref": e.sidecar.r#ref,
@@ -450,6 +470,7 @@ fn snapshot_json(repo: &RepoEntry, e: &SnapshotEntry) -> Value {
         "bytes": e.sidecar.zip.bytes,
         "file": e.sidecar.zip.file,
         "download": format!("/api/repos/{}/archive/{}", repo.rel, snapshot_rel_path(repo, e)),
+        "assets": assets,
     })
 }
 
@@ -572,6 +593,94 @@ async fn download_archive(
     Ok((headers, body).into_response())
 }
 
+/// Content type for a downloaded release asset, by filename. Everything
+/// unknown is served as an opaque attachment.
+fn asset_content_type(name: &str) -> &'static str {
+    let n = name.to_ascii_lowercase();
+    if n.ends_with(".zip") {
+        "application/zip"
+    } else if n.ends_with(".tar.gz") || n.ends_with(".tgz") {
+        "application/gzip"
+    } else if n.ends_with(".tar.zst") || n.ends_with(".zst") {
+        "application/zstd"
+    } else if n.ends_with(".tar.xz") || n.ends_with(".xz") {
+        "application/x-xz"
+    } else if n.ends_with(".tar.bz2") || n.ends_with(".tbz2") {
+        "application/x-bzip2"
+    } else if n.ends_with(".dmg") {
+        "application/x-apple-diskimage"
+    } else if n.ends_with(".deb") {
+        "application/vnd.debian.binary-package"
+    } else if n.ends_with(".rpm") {
+        "application/x-rpm"
+    } else if n.ends_with(".txt")
+        || n.ends_with(".sha256")
+        || n.ends_with(".sha512")
+        || n.ends_with(".asc")
+        || n.ends_with(".sig")
+    {
+        "text/plain; charset=utf-8"
+    } else {
+        "application/octet-stream"
+    }
+}
+
+/// Stream a downloaded release asset from `<repo>/releases/<tag>/assets/`.
+/// Paths are confined to the repo directory (traversal guard), exactly like
+/// archive downloads.
+async fn download_asset(
+    st: &Arc<AppState>,
+    rel: &str,
+    asset_rel: &str,
+) -> Result<Response, ApiError> {
+    if asset_rel.is_empty() || asset_rel.split('/').any(|s| s == "..") {
+        return Err(ApiError::bad_request("bad asset path"));
+    }
+    let repo = st
+        .find_repo(rel)
+        .await
+        .ok_or_else(|| ApiError::not_found(format!("no such repo: {rel}")))?;
+    let path = repo
+        .dir
+        .join(asset_rel)
+        .canonicalize()
+        .map_err(|_| ApiError::not_found("no such asset"))?;
+    let repo_dir = repo
+        .dir
+        .canonicalize()
+        .map_err(|e| ApiError::internal(anyhow::anyhow!("canonicalize failed: {e}")))?;
+    if !path.starts_with(&repo_dir) || !path.is_file() {
+        return Err(ApiError::not_found("no such asset"));
+    }
+    // only serve files that actually sit in a release's assets/ directory
+    let in_assets = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        == Some("assets");
+    if !in_assets {
+        return Err(ApiError::not_found("no such asset"));
+    }
+    let filename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("asset")
+        .to_string();
+    let file = tokio::fs::File::open(&path)
+        .await
+        .map_err(|_| ApiError::not_found("no such asset"))?;
+    let body = Body::from_stream(tokio_util::io::ReaderStream::new(file));
+    let mut headers = HeaderMap::new();
+    if let Ok(v) = header::HeaderValue::from_str(asset_content_type(&filename)) {
+        headers.insert(header::CONTENT_TYPE, v);
+    }
+    let disposition = format!("attachment; filename=\"{}\"", filename.replace('"', ""));
+    if let Ok(v) = header::HeaderValue::from_str(&disposition) {
+        headers.insert(header::CONTENT_DISPOSITION, v);
+    }
+    Ok((headers, body).into_response())
+}
+
 async fn repo_notifications(st: &Arc<AppState>, rel: &str) -> Result<Response, ApiError> {
     let ns = st.notifications.lock().await;
     let mine: Vec<&Notification> = ns.iter().filter(|n| n.repo == rel).collect();
@@ -584,6 +693,8 @@ async fn repo_get(
 ) -> Result<Response, ApiError> {
     if let Some((rel, zip_rel)) = rest.split_once("/archive/") {
         download_archive(&st, rel, zip_rel).await
+    } else if let Some((rel, asset_rel)) = rest.split_once("/asset/") {
+        download_asset(&st, rel, asset_rel).await
     } else if let Some(rel) = rest.strip_suffix("/notifications") {
         repo_notifications(&st, rel).await
     } else {
@@ -877,7 +988,7 @@ async fn repo_patch(
     AxPath(rest): AxPath<String>,
     Json(body): Json<Value>,
 ) -> Result<Response, ApiError> {
-    if rest.contains("/archive/") || rest.ends_with("/notifications") || rest.ends_with("/refresh") {
+    if rest.contains("/archive/") || rest.contains("/asset/") || rest.ends_with("/notifications") || rest.ends_with("/refresh") {
         return Err(ApiError::bad_request("cannot PATCH a sub-resource"));
     }
     let repo = st

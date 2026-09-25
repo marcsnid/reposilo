@@ -13,6 +13,8 @@ pub mod importer;
 pub mod index;
 pub mod llm;
 pub mod metrics;
+pub mod platform;
+pub mod releaseapi;
 pub mod server;
 pub mod tagging;
 pub mod types;

@@ -224,6 +224,11 @@ button:hover, button[type="submit"]:hover { background: var(--chip-hover); }
 .snaps li:last-child { border-bottom: none; }
 .snap-meta { display: block; color: var(--text-muted); font-size: 0.78rem; }
 .dl { font-weight: 600; }
+.asset-list { list-style: none; margin: 0.35rem 0 0.1rem; padding: 0 0 0 0.9rem; border-left: 2px solid var(--border); }
+.asset-list li { display: flex; align-items: baseline; gap: 0.5rem; padding: 0.15rem 0; font-size: 0.82rem; }
+.asset-list .asset-name { font-weight: 500; word-break: break-all; }
+.asset-list .asset-plat { color: var(--text-muted); font-size: 0.74rem; background: var(--bg-inset); border-radius: 4px; padding: 0.05rem 0.35rem; white-space: nowrap; flex-shrink: 0; }
+.asset-list .asset-size { color: var(--text-muted); font-size: 0.74rem; margin-left: auto; white-space: nowrap; }
 
 /* readme / markdown */
 .readme { font-size: 0.92rem; overflow-wrap: break-word; }
@@ -340,6 +345,9 @@ table.files tr:last-child td { border-bottom: none; }
 }
 .settings-row input[type="number"] { width: 7rem; text-align: right; }
 .settings-row input[type="checkbox"] { width: 1rem; height: 1rem; justify-self: start; padding: 0; margin: 0; }
+.platform-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 0.35rem 1rem; margin: 0.6rem 0; }
+.platform-choice { display: flex; align-items: center; gap: 0.45rem; font-size: 0.88rem; cursor: pointer; }
+.platform-choice input[type="checkbox"] { width: 1rem; height: 1rem; margin: 0; }
 
 .origin-form { display: flex; gap: 0.4rem; margin: 0.6rem 0; }
 .origin-form input[type="url"] { flex: 1; }

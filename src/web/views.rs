@@ -393,6 +393,15 @@ pub async fn build_list_ctx(st: &Arc<AppState>, tags: &[String], q: &str, folder
 // ---------- detail view ----------
 
 #[derive(Debug, Clone)]
+pub struct AssetView {
+    pub name: String,
+    /// Human-readable platform label ("Linux · x86_64").
+    pub platform: String,
+    pub size_human: String,
+    pub download_url: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct SnapView {
     pub label: String,
     pub commit: String,
@@ -402,6 +411,8 @@ pub struct SnapView {
     pub download_url: String,
     pub version: String, // empty = not a versioned release
     pub changelog_html: String, // rendered markdown release notes
+    /// Release binaries bundled with this release (empty for branch snapshots).
+    pub assets: Vec<AssetView>,
 }
 
 #[derive(Debug, Clone)]
@@ -564,6 +575,27 @@ pub async fn build_detail_ctx(st: &Arc<AppState>, repo: &crate::index::RepoEntry
             .as_deref()
             .map(crate::files::markdown_to_html)
             .unwrap_or_default(),
+        assets: {
+            let subdir = e
+                .dir
+                .strip_prefix(&repo.dir)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            e.sidecar
+                .assets
+                .iter()
+                .map(|a| AssetView {
+                    name: a.name.clone(),
+                    platform: crate::platform::describe(&a.platform),
+                    size_human: human_bytes(a.bytes),
+                    download_url: format!(
+                        "/api/repos/{}/asset/{}",
+                        repo.rel,
+                        path_encode(&format!("{subdir}/assets/{}", a.name))
+                    ),
+                })
+                .collect()
+        },
     };
 
     let branch_snapshots = repo.branch_snapshots.iter().map(snap_view).collect();
@@ -572,7 +604,9 @@ pub async fn build_detail_ctx(st: &Arc<AppState>, repo: &crate::index::RepoEntry
         .branch_snapshots
         .iter()
         .chain(repo.releases.iter())
-        .map(|e| e.sidecar.zip.bytes)
+        .map(|e| {
+            e.sidecar.zip.bytes + e.sidecar.assets.iter().map(|a| a.bytes).sum::<u64>()
+        })
         .sum();
 
     // README + root file listing, read from the newest snapshot's archive
@@ -810,7 +844,20 @@ pub struct SettingsCtx {
     pub otel_endpoint: String,
     pub otel_service: String,
     pub otel_interval: String,
+    // release binaries
+    pub release_platforms: Vec<PlatformChoiceView>,
+    pub release_all: bool,
+    pub release_platforms_extra: String,
+    pub release_max_asset_mb: String,
     pub saved: bool,
+}
+
+/// One platform checkbox in Settings.
+#[derive(Debug, Clone)]
+pub struct PlatformChoiceView {
+    pub key: String,
+    pub label: String,
+    pub checked: bool,
 }
 
 #[derive(askama::Template)]
@@ -820,6 +867,29 @@ pub struct SettingsT {
 }
 
 pub fn settings_ctx_from(cfg: &crate::config::Config, saved: bool) -> SettingsCtx {
+    // canonicalize the configured release filters so the checkboxes reflect
+    // whatever the user typed ("win64" shows up as Windows · x64)
+    let canonical: Vec<String> = cfg
+        .releases
+        .platforms
+        .iter()
+        .filter_map(|p| crate::platform::canonical(p))
+        .collect();
+    let all = canonical.iter().any(|p| p == "all");
+    let release_platforms = crate::platform::CHOICES
+        .iter()
+        .map(|c| PlatformChoiceView {
+            key: c.slug.to_string(),
+            label: c.label.to_string(),
+            checked: all || canonical.iter().any(|p| p == c.slug),
+        })
+        .collect();
+    let release_platforms_extra = canonical
+        .iter()
+        .filter(|p| p.as_str() != "all" && !crate::platform::CHOICES.iter().any(|c| c.slug == p.as_str()))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
     SettingsCtx {
         keep_branch: cfg.retention.keep_branch_snapshots.to_string(),
         keep_releases: cfg.retention.keep_releases.to_string(),
@@ -839,6 +909,10 @@ pub fn settings_ctx_from(cfg: &crate::config::Config, saved: bool) -> SettingsCt
         otel_endpoint: cfg.otel.endpoint.clone(),
         otel_service: cfg.otel.service_name.clone(),
         otel_interval: cfg.otel.interval_secs.to_string(),
+        release_platforms,
+        release_all: all,
+        release_platforms_extra,
+        release_max_asset_mb: cfg.releases.max_asset_mb.to_string(),
         saved,
     }
 }
