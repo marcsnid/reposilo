@@ -18,4 +18,5 @@ pub mod releaseapi;
 pub mod server;
 pub mod tagging;
 pub mod types;
+pub mod verify;
 pub mod web;

@@ -84,6 +84,8 @@ pub struct AppState {
     pub sessions: crate::auth::SessionStore,
     /// Optional summary strings shown by the job-status endpoint.
     pub job_notes: Mutex<HashMap<u64, String>>,
+    /// Verify runs keyed by job id: live progress while hashing, then the report.
+    pub verify_jobs: Mutex<HashMap<u64, crate::verify::VerifyJob>>,
     /// Short-lived parsed-archive-listing cache. Building a listing is free for
     /// zip (central directory) but a full decompress for tar.zst, so the UI
     /// loads it once per repo page and reuses it; entries expire on their own.
@@ -117,6 +119,7 @@ impl AppState {
             notifications: Mutex::new(notifications),
             scans: Mutex::new(HashMap::new()),
             job_notes: Mutex::new(HashMap::new()),
+            verify_jobs: Mutex::new(HashMap::new()),
             listing_cache: Mutex::new(HashMap::new()),
             metrics: Mutex::new(crate::metrics::Metrics::load(&root)),
             users: std::sync::Mutex::new(crate::auth::Users::load(&root)),
@@ -227,6 +230,27 @@ impl AppState {
     /// Recorded summary for a finished job, if any (used by job-status UI).
     pub async fn job_note(&self, id: u64) -> Option<String> {
         self.job_notes.lock().await.get(&id).cloned()
+    }
+
+    pub async fn set_verify_progress(&self, id: u64, progress: crate::verify::VerifyProgress) {
+        let mut jobs = self.verify_jobs.lock().await;
+        jobs.entry(id).or_default().progress = progress;
+        if jobs.len() > MAX_TRACKED_JOBS {
+            let mut ids: Vec<u64> = jobs.keys().copied().collect();
+            ids.sort_unstable();
+            let excess = jobs.len() - MAX_TRACKED_JOBS;
+            for old in ids.into_iter().take(excess) {
+                jobs.remove(&old);
+            }
+        }
+    }
+
+    pub async fn set_verify_report(&self, id: u64, report: crate::verify::VerifyReport) {
+        self.verify_jobs.lock().await.entry(id).or_default().report = Some(report);
+    }
+
+    pub async fn verify_job(&self, id: u64) -> Option<crate::verify::VerifyJob> {
+        self.verify_jobs.lock().await.get(&id).cloned()
     }
 
     pub async fn unlock_repo(&self, rel: &str) {
@@ -941,6 +965,46 @@ pub async fn spawn_refresh_job(
                 tracing::error!(repo = %rel, "refresh failed: {e:#}");
                 st.finish_job(id, Some(format!("{e:#}"))).await;
                 st.record(&["refresh_fail"]).await;
+            }
+        }
+    });
+    id
+}
+
+/// Spawn a full-archive verify job. Progress and the final report live in
+/// `AppState::verify_jobs`; the Settings page polls `/settings/verify/{id}`.
+pub async fn spawn_verify_job(st: &Arc<AppState>) -> u64 {
+    let id = st.create_job("verify", None).await;
+    let root = st.root().await;
+    let st2 = st.clone();
+    tokio::spawn(async move {
+        let progress = Arc::new(std::sync::Mutex::new(crate::verify::VerifyProgress::default()));
+        let progress_cb = progress.clone();
+        let mut handle = tokio::task::spawn_blocking(move || {
+            crate::verify::verify_archive(&root, None, |p| {
+                if let Ok(mut g) = progress_cb.lock() {
+                    *g = p.clone();
+                }
+            })
+        });
+        loop {
+            tokio::select! {
+                res = &mut handle => {
+                    match res {
+                        Ok(Ok(report)) => {
+                            st2.set_job_note(id, report.summary()).await;
+                            st2.set_verify_report(id, report).await;
+                            st2.finish_job(id, None).await;
+                        }
+                        Ok(Err(e)) => st2.finish_job(id, Some(format!("{e:#}"))).await,
+                        Err(e) => st2.finish_job(id, Some(format!("verify task panicked: {e}"))).await,
+                    }
+                    break;
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
+                    let p = progress.lock().map(|g| g.clone()).unwrap_or_default();
+                    st2.set_verify_progress(id, p).await;
+                }
             }
         }
     });

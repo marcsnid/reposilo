@@ -29,6 +29,8 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/stats", get(stats_page))
         .route("/import", get(import_page))
         .route("/settings", get(settings_page).post(settings_save))
+        .route("/settings/verify", post(settings_verify))
+        .route("/settings/verify/{id}", get(settings_verify_status))
         .route("/import/scan", post(import_scan))
         .route("/import/suggest", get(import_suggest))
         .route("/import/llm", post(import_llm))
@@ -779,6 +781,20 @@ async fn stats_page(State(st): State<Arc<AppState>>) -> Response {
     let (m, t) = st.stats_snapshot().await;
     let cfg = st.cfg().await;
     render(&views::StatsT { ctx: views::stats_ctx_from(&m, &t, &cfg) })
+}
+
+/// POST /settings/verify: kick off a full archive verify as a background job.
+async fn settings_verify(State(st): State<Arc<AppState>>) -> Response {
+    let id = crate::server::spawn_verify_job(&st).await;
+    render(&views::VerifyT { ctx: views::verify_ctx_running(id) })
+}
+
+/// GET /settings/verify/{id}: polling fragment (progress, then the report).
+async fn settings_verify_status(
+    State(st): State<Arc<AppState>>,
+    AxPath(id): AxPath<u64>,
+) -> Response {
+    render(&views::VerifyT { ctx: views::verify_ctx_from(&st, id).await })
 }
 
 #[derive(Default)]

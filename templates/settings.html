@@ -98,6 +98,13 @@
   </section>
 
   <section class="panel">
+    <h2>Archive integrity</h2>
+    <button class="refresh-btn"
+      hx-post="/settings/verify" hx-target="#verify-area" hx-swap="innerHTML">Verify archive</button>
+    <div id="verify-area"></div>
+  </section>
+
+  <section class="panel">
     <h2>Import a zip collection</h2>
     <p class="note">Point reposilo at a folder of zipped repositories; detection, GitHub suggestions and llama.cpp identification take it from there.</p>
     <div id="import-area">

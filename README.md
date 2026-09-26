@@ -25,6 +25,9 @@ goes away.
   all read from the zip on demand (no unzip needed)
 - **Notify** on new releases with readable changelogs (GitHub release notes
   or `CHANGELOG.md` at the tag); optional webhook for external alerts
+- **Verify** the archive on demand: hash every stored zip against the sha256
+  in its sidecar, from `reposilo verify` or a Settings button, to catch missing
+  or corrupt files
 - **Collect release binaries**: download the platform-specific assets attached
   to a release, filtered to the OS/arch you care about. Names like
   `foo-win64.zip`, `foo-x86_64-unknown-linux-gnu.tar.gz` and `Bar-1.0-arm64.dmg`
@@ -82,6 +85,7 @@ reposilo add https://github.com/n64decomp/sm64.git --tag decomps --tag n64
 reposilo list --tag decomps --tag n64
 reposilo refresh all                         # pull new snapshots/releases
 reposilo reindex --catalog                    # stats + catalog.json
+reposilo verify                               # hash every zip against its sidecar
 
 # import a zip collection
 reposilo import /path/to/zips --dry-run       # preview (touches nothing)
@@ -102,6 +106,7 @@ reposilo serve --bind 0.0.0.0:8765           # or REPOSILO_BIND=0.0.0.0:8765
 #   - edit metadata (name, description, notes, origin, folder, tags) per repo
 #   - import zips from Settings; assign origins to _unknown repos
 #   - notifications with readable release changelogs
+#   - verify the whole archive from Settings (hashes every zip)
 #   - dark/light theme, settings (retention, scheduler, llama.cpp)
 #   - a REST API; downloads stream straight from disk
 ```

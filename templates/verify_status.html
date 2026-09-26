@@ -1,0 +1,20 @@
+{% if !ctx.done %}
+<div class="job-status" hx-get="/settings/verify/{{ ctx.id }}" hx-trigger="every 1s" hx-swap="outerHTML">
+  verifying {{ ctx.done_count }}/{{ ctx.total }}
+</div>
+{% else if ctx.failed %}
+<div class="job-status failed">&#10007; {{ ctx.error }}</div>
+{% else if ctx.problems.is_empty() %}
+<div class="job-status ok">&#10003; verified {{ ctx.snapshots }}</div>
+{% else %}
+<div class="job-status failed">&#10007; {{ ctx.problems.len() }} problem(s)</div>
+<table class="files"><tbody>
+  {% for p in ctx.problems %}
+  <tr>
+    <td><span class="file">{{ p.repo }} · {{ p.file }}</span></td>
+    <td><span class="badge danger">{{ p.kind }}</span></td>
+    <td class="right dim">{{ p.detail }}</td>
+  </tr>
+  {% endfor %}
+</tbody></table>
+{% endif %}

@@ -103,6 +103,12 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Verify archived zips against their sidecars (sha256 + size)
+    Verify {
+        /// Repo path relative to archive root, or "all"
+        #[arg(default_value = "all")]
+        repo: String,
+    },
     /// Manage user accounts for the web UI
     User {
         #[command(subcommand)]
@@ -389,6 +395,30 @@ async fn main() -> Result<()> {
                     count,
                     human_size(total)
                 );
+            }
+            Ok(())
+        }
+
+        Command::Verify { repo } => {
+            let (cfg, _) = load_config(cli.config.as_ref())?;
+            let root = archive_root(&cfg);
+            let only = if repo == "all" { None } else { Some(repo.as_str()) };
+            let mut last = 0usize;
+            let report = reposilo::verify::verify_archive(&root, only, |p| {
+                if p.total > 0 && p.done != last && (p.done == p.total || p.done % 25 == 0) {
+                    eprint!("\rverifying {}/{}", p.done, p.total);
+                    last = p.done;
+                }
+            })?;
+            if last > 0 {
+                eprintln!("\r{:40}", "");
+            }
+            println!("{}", report.summary());
+            for p in &report.problems {
+                println!("  {} {} [{}] {}", p.repo, p.file, p.kind, p.detail);
+            }
+            if !report.is_clean() {
+                std::process::exit(1);
             }
             Ok(())
         }
