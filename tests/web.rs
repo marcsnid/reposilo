@@ -47,6 +47,7 @@ fn templates_render_balanced_divs() {
         ("tags", include_str!("../templates/tags_edit.html")),
         ("folder_form", include_str!("../templates/folder_form.html")),
         ("job", include_str!("../templates/job_status.html")),
+        ("verify", include_str!("../templates/verify_status.html")),
         ("settings", include_str!("../templates/settings.html")),
         ("stats", include_str!("../templates/stats.html")),
         ("base", include_str!("../templates/base.html")),
@@ -744,5 +745,86 @@ async fn repos_under_an_archive_folder_still_route() -> Result<()> {
         .await?;
     assert_eq!(archive.status(), 200);
     assert_eq!(archive.bytes().await?.as_ref(), b"PK");
+    Ok(())
+}
+
+fn extract_verify_id(html: &str) -> u64 {
+    let marker = "hx-get=\"/settings/verify/";
+    let start = html.find(marker).expect("verify fragment carries a job id") + marker.len();
+    let rest = &html[start..];
+    let end = rest.find('"').expect("closing quote after job id");
+    rest[..end].parse().expect("numeric job id")
+}
+
+async fn wait_verify_done(base: &str, id: u64) -> String {
+    let client = reqwest::Client::new();
+    for _ in 0..100 {
+        let html = client
+            .get(format!("{base}/settings/verify/{id}"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        if !html.contains("hx-trigger=\"every 1s\"") {
+            return html;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("verify job {id} never finished");
+}
+
+/// The Settings button runs a full verify and reports the result.
+#[tokio::test]
+async fn settings_verify_button_reports_integrity() -> Result<()> {
+    // sha256("hello")
+    const HELLO_SHA: &str = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    let repo = root.join("owner-demo");
+    let rel = repo.join("releases").join("v1.0.0");
+    fs::create_dir_all(&rel)?;
+    fs::write(
+        repo.join("repo.json"),
+        r#"{"forge":"github","name":"demo","added":"2025-01-01T00:00:00Z","default_branch":"main"}"#,
+    )?;
+    fs::write(
+        rel.join("demo-v1.0.0.json"),
+        format!(
+            r#"{{"kind":"release","repo":"owner-demo","origin":"https://github.com/owner/demo","ref":"v1.0.0","version":"1.0.0","commit":"abc","archived_at":"2025-01-02T00:00:00Z","archiver_version":"test","format":"zip","zip":{{"file":"demo-v1.0.0.zip","bytes":5,"sha256":"{HELLO_SHA}"}}}}"#
+        ),
+    )?;
+    fs::write(rel.join("demo-v1.0.0.zip"), b"hello")?;
+
+    let (base, _st) = spawn_server(test_cfg(&root)).await;
+    let client = reqwest::Client::new();
+
+    let settings = client.get(format!("{base}/settings")).send().await?.text().await?;
+    assert!(settings.contains("Archive integrity"), "settings should offer verify");
+    assert!(settings.contains("hx-post=\"/settings/verify\""));
+
+    // clean archive -> all good
+    let first = client
+        .post(format!("{base}/settings/verify"))
+        .send()
+        .await?
+        .text()
+        .await?;
+    let report = wait_verify_done(&base, extract_verify_id(&first)).await;
+    assert!(report.contains("verified 1"), "expected a clean report: {report}");
+    assert!(!report.contains("problem"), "clean report should have no problems: {report}");
+
+    // corrupt the zip -> the next verify flags it
+    fs::write(rel.join("demo-v1.0.0.zip"), b"tampered!")?;
+    let second = client
+        .post(format!("{base}/settings/verify"))
+        .send()
+        .await?
+        .text()
+        .await?;
+    let report = wait_verify_done(&base, extract_verify_id(&second)).await;
+    assert!(report.contains("problem"), "expected problems: {report}");
+    assert!(report.contains("sha256") || report.contains("size"), "expected a hash/size flag: {report}");
     Ok(())
 }

@@ -917,6 +917,75 @@ pub fn settings_ctx_from(cfg: &crate::config::Config, saved: bool) -> SettingsCt
     }
 }
 
+// ---------- verify view ----------
+
+#[derive(Debug, Clone, Default)]
+pub struct VerifyCtx {
+    pub id: u64,
+    pub done: bool,
+    pub failed: bool,
+    pub error: String,
+    pub done_count: usize,
+    pub total: usize,
+    pub current: String,
+    pub snapshots: usize,
+    pub problems: Vec<VerifyProblemView>,
+}
+
+#[derive(Debug, Clone)]
+pub struct VerifyProblemView {
+    pub repo: String,
+    pub file: String,
+    pub kind: String,
+    pub detail: String,
+}
+
+#[derive(askama::Template)]
+#[template(path = "verify_status.html")]
+pub struct VerifyT {
+    pub ctx: VerifyCtx,
+}
+
+pub fn verify_ctx_running(id: u64) -> VerifyCtx {
+    VerifyCtx { id, ..Default::default() }
+}
+
+pub async fn verify_ctx_from(st: &Arc<AppState>, id: u64) -> VerifyCtx {
+    let (done, failed, error) = match st.job(id).await {
+        Some(j) => (
+            j.status != "running",
+            j.status == "failed",
+            j.error.unwrap_or_default(),
+        ),
+        None => (true, true, "unknown verify job".to_string()),
+    };
+    let state = st.verify_job(id).await.unwrap_or_default();
+    let mut ctx = VerifyCtx {
+        id,
+        done,
+        failed,
+        error,
+        done_count: state.progress.done,
+        total: state.progress.total,
+        current: state.progress.current,
+        ..Default::default()
+    };
+    if let Some(report) = state.report {
+        ctx.snapshots = report.snapshots;
+        ctx.problems = report
+            .problems
+            .iter()
+            .map(|p| VerifyProblemView {
+                repo: p.repo.clone(),
+                file: p.file.clone(),
+                kind: p.kind.clone(),
+                detail: p.detail.clone(),
+            })
+            .collect();
+    }
+    ctx
+}
+
 // ---------- login view ----------
 
 #[derive(Debug, Clone)]
