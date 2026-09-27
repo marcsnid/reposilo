@@ -1432,7 +1432,7 @@ pub async fn serve(
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
         .with_context(|| format!("cannot bind {bind}"))?;
-    println!("reposilo serving http://{bind} (API: /api/repos, /api/tags, /api/tree, /api/jobs)");
+    tracing::info!("reposilo serving http://{bind} (API: /api/repos, /api/tags, /api/tree, /api/jobs)");
     axum::serve(listener, app).await.context("server crashed")?;
     Ok(())
 }
