@@ -45,3 +45,7 @@ enabled = false
 
 [otel]
 enabled = false
+# endpoint = "http://localhost:4318"
+# service_name = "reposilo"
+# logs = true
+# metrics = true

@@ -172,9 +172,11 @@ url = "http://192.168.0.1:11434/v1"  # any OpenAI-compatible endpoint
 
 [otel]
 # enabled = true
-# endpoint = "http://localhost:4318"  # OTLP/HTTP collector base URL; /v1/metrics is appended
+# endpoint = "http://localhost:4318"  # OTLP/HTTP collector base URL; signal paths are appended
 # service_name = "reposilo"
-# interval_secs = 60
+# interval_secs = 60                   # metrics export interval
+# logs = true                          # bridge tracing logs to OTLP
+# metrics = true                       # export archive metrics
 ```
 
 ### Stats and monitoring
@@ -185,9 +187,12 @@ releases, dead/unavailable remotes, untagged) plus a per-day 7-day bar chart
 of refresh successes vs failures and a table of recent days. Counters are
 persisted to `<archive>/metrics.json` for 90 days, so they survive restarts.
 
-Setting `[otel] enabled = true` additionally pushes the same numbers to an
-OpenTelemetry collector over OTLP/HTTP (JSON). It is optional and best-effort:
-a failing collector only logs a warning and never affects archiving.
+Setting `[otel] enabled = true` additionally exports over OTLP/HTTP to a
+collector: **metrics** (the same totals and counters) and **logs** (everything
+`tracing` emits, bridged through the OpenTelemetry log appender). Logs and
+metrics can be toggled independently. Both are optional and best-effort, and
+log records from the exporter's own HTTP stack are filtered out to avoid a
+feedback loop.
 
 ### Users and auth
 

@@ -22,8 +22,12 @@ hex = "0.4"
 semver = "1"
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+opentelemetry = "0.33"
+opentelemetry_sdk = { version = "0.33", features = ["logs", "metrics"] }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["logs", "metrics", "http-proto", "reqwest-blocking-client", "tls-ring", "tls-webpki-roots"] }
+opentelemetry-appender-tracing = "0.33"
 askama = "0.14"
 pulldown-cmark = "0.13"
 zip = "4"
