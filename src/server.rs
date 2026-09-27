@@ -375,6 +375,11 @@ impl AppState {
         }
         m.prune();
         m.save(&root);
+        // OTel counters increment at the event, independent of the persisted
+        // per-day store (which resets at midnight).
+        if let Some(telemetry) = self.telemetry.get() {
+            telemetry.record_events(fields);
+        }
     }
 
     /// Current index-derived gauges (repos, snapshots, dead/unavailable...).
@@ -1369,9 +1374,9 @@ async fn otel_loop(st: Arc<AppState>) {
     loop {
         let cfg = st.cfg().await;
         if cfg.otel.enabled {
-            let (metrics, totals) = st.stats_snapshot().await;
+            let totals = st.totals().await;
             if let Some(telemetry) = st.telemetry.get() {
-                telemetry.record_snapshot(&metrics, &totals);
+                telemetry.record_snapshot(&totals);
             }
         }
         let secs = if cfg.otel.enabled {

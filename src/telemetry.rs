@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use opentelemetry::metrics::{Meter, MeterProvider};
+use opentelemetry::metrics::{Counter, Meter, MeterProvider};
 use opentelemetry::KeyValue;
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::{LogExporter, MetricExporter, WithExportConfig};
@@ -16,7 +16,52 @@ use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider, Temporality};
 use opentelemetry_sdk::Resource;
 
 use crate::config::Config;
-use crate::metrics::{Metrics, Totals};
+use crate::metrics::Totals;
+
+/// Event counters, incremented where the event happens rather than read from
+/// the persisted per-day store. The SDK exports a cumulative sum, so a TSDB
+/// can `rate()`/`increase()` over any window (a process restart is just a
+/// counter reset, which backends handle).
+#[derive(Clone)]
+struct Counters {
+    refresh_ok: Counter<u64>,
+    refresh_fail: Counter<u64>,
+    add_ok: Counter<u64>,
+    add_fail: Counter<u64>,
+    new_releases: Counter<u64>,
+    new_snapshots: Counter<u64>,
+    remote_gone: Counter<u64>,
+}
+
+impl Counters {
+    fn new(meter: &Meter) -> Self {
+        let counter = |name: &'static str, desc: &'static str| {
+            meter.u64_counter(name).with_description(desc).build()
+        };
+        Self {
+            refresh_ok: counter("reposilo.refresh.success", "Successful refreshes"),
+            refresh_fail: counter("reposilo.refresh.failure", "Failed refreshes"),
+            add_ok: counter("reposilo.add.success", "Successful adds"),
+            add_fail: counter("reposilo.add.failure", "Failed adds"),
+            new_releases: counter("reposilo.releases.new", "New releases archived"),
+            new_snapshots: counter("reposilo.snapshots.new", "New branch snapshots"),
+            remote_gone: counter("reposilo.remote.gone", "Remotes observed unreachable"),
+        }
+    }
+
+    fn bump(&self, field: &str) {
+        match field {
+            "refresh_ok" => self.refresh_ok.add(1, &[]),
+            "refresh_fail" => self.refresh_fail.add(1, &[]),
+            "add_ok" => self.add_ok.add(1, &[]),
+            "add_fail" => self.add_fail.add(1, &[]),
+            "new_releases" => self.new_releases.add(1, &[]),
+            "new_snapshots" => self.new_snapshots.add(1, &[]),
+            "remote_gone" => self.remote_gone.add(1, &[]),
+            _ => {}
+        }
+    }
+}
 
 /// Live OpenTelemetry providers (or nothing when `[otel] enabled = false`).
 #[derive(Clone)]
@@ -24,11 +69,12 @@ pub struct Telemetry {
     logger: Option<SdkLoggerProvider>,
     meter_provider: Option<SdkMeterProvider>,
     meter: Option<Meter>,
+    counters: Option<Counters>,
 }
 
 impl Telemetry {
     pub fn disabled() -> Self {
-        Self { logger: None, meter_provider: None, meter: None }
+        Self { logger: None, meter_provider: None, meter: None, counters: None }
     }
 
     pub fn logger(&self) -> Option<&SdkLoggerProvider> {
@@ -49,13 +95,23 @@ impl Telemetry {
         }
     }
 
-    /// Record the current archive values. Called on a timer by the server;
-    /// the meter provider's periodic reader does the actual export.
-    pub fn record_snapshot(&self, metrics: &Metrics, totals: &Totals) {
+    /// Bump the counters for the events a job reported (same field names the
+    /// persisted stats use). Called from `AppState::record`.
+    pub fn record_events(&self, fields: &[&str]) {
+        let Some(counters) = &self.counters else {
+            return;
+        };
+        for f in fields {
+            counters.bump(f);
+        }
+    }
+
+    /// Record the current index-derived gauges. Called on a timer by the
+    /// server; the meter provider's periodic reader does the actual export.
+    pub fn record_snapshot(&self, totals: &Totals) {
         let Some(meter) = &self.meter else {
             return;
         };
-        let sums = metrics.sums();
         let gauge = |name: &'static str, desc: &'static str, v: u64| {
             meter
                 .u64_gauge(name)
@@ -69,13 +125,6 @@ impl Telemetry {
         gauge("reposilo.repos.dead", "Repositories with a dead remote", totals.dead);
         gauge("reposilo.repos.unavailable", "Repositories temporarily unreachable", totals.unavailable);
         gauge("reposilo.repos.untagged", "Repositories with no tags", totals.untagged);
-        gauge("reposilo.refresh.success", "Successful refreshes", sums.refresh_ok);
-        gauge("reposilo.refresh.failure", "Failed refreshes", sums.refresh_fail);
-        gauge("reposilo.add.success", "Successful adds", sums.add_ok);
-        gauge("reposilo.add.failure", "Failed adds", sums.add_fail);
-        gauge("reposilo.releases.new", "New releases archived", sums.new_releases);
-        gauge("reposilo.snapshots.new", "New branch snapshots", sums.new_snapshots);
-        gauge("reposilo.remote.gone", "Remotes observed unreachable", sums.remote_gone);
     }
 }
 
@@ -124,7 +173,7 @@ fn build(cfg: &Config) -> Result<Telemetry> {
         None
     };
 
-    let (meter_provider, meter) = if cfg.otel.metrics {
+    let (meter_provider, meter, counters) = if cfg.otel.metrics {
         let exporter = MetricExporter::builder()
             .with_http()
             .with_endpoint(format!("{base}/v1/metrics"))
@@ -139,12 +188,13 @@ fn build(cfg: &Config) -> Result<Telemetry> {
             .with_reader(reader)
             .build();
         let meter = provider.meter("reposilo");
-        (Some(provider), Some(meter))
+        let counters = Counters::new(&meter);
+        (Some(provider), Some(meter), Some(counters))
     } else {
-        (None, None)
+        (None, None, None)
     };
 
-    Ok(Telemetry { logger, meter_provider, meter })
+    Ok(Telemetry { logger, meter_provider, meter, counters })
 }
 
 /// Install the global tracing subscriber, bridging records into the logger
