@@ -86,6 +86,9 @@ pub struct AppState {
     pub job_notes: Mutex<HashMap<u64, String>>,
     /// Verify runs keyed by job id: live progress while hashing, then the report.
     pub verify_jobs: Mutex<HashMap<u64, crate::verify::VerifyJob>>,
+    /// OpenTelemetry providers, set once by `serve`. Kept here so they stay
+    /// alive for the process lifetime and can be flushed on exit.
+    pub telemetry: std::sync::OnceLock<crate::telemetry::Telemetry>,
     /// Short-lived parsed-archive-listing cache. Building a listing is free for
     /// zip (central directory) but a full decompress for tar.zst, so the UI
     /// loads it once per repo page and reuses it; entries expire on their own.
@@ -120,6 +123,7 @@ impl AppState {
             scans: Mutex::new(HashMap::new()),
             job_notes: Mutex::new(HashMap::new()),
             verify_jobs: Mutex::new(HashMap::new()),
+            telemetry: std::sync::OnceLock::new(),
             listing_cache: Mutex::new(HashMap::new()),
             metrics: Mutex::new(crate::metrics::Metrics::load(&root)),
             users: std::sync::Mutex::new(crate::auth::Users::load(&root)),
@@ -1358,22 +1362,16 @@ async fn scheduler_loop(st: Arc<AppState>) {
     }
 }
 
-/// Periodically push a metrics snapshot to OTLP when enabled. Always running
-/// so the setting can be toggled live; a no-op (just a timer) when disabled.
+/// Periodically record a metrics snapshot for the OTel meter provider. The
+/// provider's periodic reader does the export. Always running so the setting
+/// can be toggled live; a no-op timer when telemetry is disabled.
 async fn otel_loop(st: Arc<AppState>) {
     loop {
         let cfg = st.cfg().await;
         if cfg.otel.enabled {
             let (metrics, totals) = st.stats_snapshot().await;
-            if let Err(e) = crate::metrics::export_otlp(
-                &cfg.otel.endpoint,
-                &cfg.otel.service_name,
-                &metrics,
-                &totals,
-            )
-            .await
-            {
-                tracing::warn!(error = %e, "OTLP export failed");
+            if let Some(telemetry) = st.telemetry.get() {
+                telemetry.record_snapshot(&metrics, &totals);
             }
         }
         let secs = if cfg.otel.enabled {
@@ -1415,8 +1413,14 @@ pub fn router(st: Arc<AppState>) -> Router {
         .with_state(st)
 }
 
-pub async fn serve(cfg: Config, config_path: Option<PathBuf>, no_scheduler: bool) -> Result<()> {
+pub async fn serve(
+    cfg: Config,
+    config_path: Option<PathBuf>,
+    no_scheduler: bool,
+    telemetry: crate::telemetry::Telemetry,
+) -> Result<()> {
     let st = Arc::new(AppState::new(cfg, config_path).await?);
+    let _ = st.telemetry.set(telemetry);
     if !no_scheduler && st.cfg().await.scheduler.enabled {
         tokio::spawn(scheduler_loop(st.clone()));
     } else {

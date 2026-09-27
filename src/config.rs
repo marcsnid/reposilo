@@ -121,17 +121,21 @@ pub struct NotificationsCfg {
     pub webhook_url: Option<String>,
 }
 
-/// Optional OpenTelemetry OTLP/HTTP metrics export.
+/// Optional OpenTelemetry OTLP export (logs + metrics).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OtelCfg {
     pub enabled: bool,
-    /// Collector base URL, e.g. http://localhost:4318 (the /v1/metrics path is
-    /// appended automatically).
+    /// Collector base URL, e.g. http://localhost:4318 (the signal path,
+    /// /v1/logs or /v1/metrics, is appended automatically).
     pub endpoint: String,
     pub service_name: String,
-    /// How often to push a snapshot, in seconds.
+    /// Export interval for metrics, in seconds.
     pub interval_secs: u64,
+    /// Export logs (via the tracing bridge).
+    pub logs: bool,
+    /// Export metrics.
+    pub metrics: bool,
 }
 
 impl Default for OtelCfg {
@@ -141,6 +145,8 @@ impl Default for OtelCfg {
             endpoint: "http://localhost:4318".into(),
             service_name: "reposilo".into(),
             interval_secs: 60,
+            logs: true,
+            metrics: true,
         }
     }
 }

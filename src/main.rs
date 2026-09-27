@@ -150,11 +150,18 @@ fn archive_root(cfg: &Config) -> PathBuf {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse()?))
-        .init();
-
     let cli = Cli::parse();
+    // Telemetry needs [otel], so load config before installing the subscriber.
+    // Fall back to defaults when there is no config yet (e.g. `init`).
+    let early = load_config(cli.config.as_ref()).map(|(c, _)| c).unwrap_or_default();
+    let telemetry = reposilo::telemetry::init(&early);
+    reposilo::telemetry::install_subscriber(&telemetry);
+    let result = run(cli, telemetry.clone()).await;
+    telemetry.shutdown();
+    result
+}
+
+async fn run(cli: Cli, telemetry: reposilo::telemetry::Telemetry) -> Result<()> {
     match cli.command {
         Command::Init { root } => {
             let path = cli.config.clone().unwrap_or_else(default_config_path);
@@ -460,7 +467,7 @@ async fn main() -> Result<()> {
             if let Some(b) = bind {
                 cfg.server.bind = b;
             }
-            reposilo::server::serve(cfg, Some(config_path), no_scheduler).await
+            reposilo::server::serve(cfg, Some(config_path), no_scheduler, telemetry).await
         }
 
         Command::Autotag { all, dry_run, limit } => {
