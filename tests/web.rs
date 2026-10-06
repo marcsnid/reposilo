@@ -960,3 +960,41 @@ async fn index_offers_grid_and_list_view_toggles() -> Result<()> {
     assert!(frag.contains("class=\"view-toggle\""), "{frag}");
     Ok(())
 }
+
+/// Gallery cards expose hover quick actions: force-refresh and open-origin.
+#[tokio::test]
+async fn gallery_card_has_quick_actions() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    let repo = root.join("owner-demo");
+    fs::create_dir_all(&repo)?;
+    fs::write(
+        repo.join("repo.json"),
+        r#"{"forge":"github","name":"demo","added":"2025-01-01T00:00:00Z","default_branch":"main","origin":"https://github.com/owner/demo.git"}"#,
+    )?;
+
+    let (base, _st) = spawn_server(test_cfg(&root)).await;
+    let client = reqwest::Client::new();
+    let html = client.get(format!("{base}/")).send().await?.text().await?;
+
+    assert!(html.contains("card-actions"), "card actions missing: {html}");
+    assert!(html.contains(r#"hx-post="/repos/owner-demo/refresh""#), "{html}");
+    assert!(html.contains(r#"href="https://github.com/owner/demo.git""#), "{html}");
+
+    // unidentified repos (no origin) only get the refresh action
+    let mystery = root.join("_unknown/mystery");
+    fs::create_dir_all(&mystery)?;
+    fs::write(
+        mystery.join("repo.json"),
+        r#"{"forge":"generic","name":"mystery","added":"2025-01-01T00:00:00Z","default_branch":"main","unidentified":true}"#,
+    )?;
+    let (base2, _st2) = spawn_server(test_cfg(&root)).await;
+    let page = reqwest::get(format!("{base2}/")).await?.text().await?;
+    assert!(page.contains(r#"hx-post="/repos/_unknown/mystery/refresh""#), "{page}");
+    assert_eq!(
+        page.matches(r#"title="Open origin""#).count(),
+        1,
+        "only the repo with an origin gets the action: {page}"
+    );
+    Ok(())
+}

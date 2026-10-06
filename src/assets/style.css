@@ -198,8 +198,21 @@ button:hover, button[type="submit"]:hover { background: var(--chip-hover); }
 .card {
   background: var(--bg-panel); border: 1px solid var(--border); border-radius: 8px;
   padding: 0.9rem 1rem; display: flex; flex-direction: column; gap: 0.35rem;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
 }
-.card-title { font-size: 1.05rem; font-weight: 600; }
+.card:hover { transform: translateY(-2px); box-shadow: 0 0 0 1px var(--accent), 0 10px 26px #00000040; }
+.card-head { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
+.card-title { flex: 0 1 auto; font-size: 1.05rem; font-weight: 600; }
+/* quick actions: revealed on hover / keyboard focus */
+.card-actions { display: inline-flex; gap: 0.25rem; margin-left: auto; opacity: 0; transition: opacity 0.12s ease; }
+.card:hover .card-actions, .card:focus-within .card-actions { opacity: 1; }
+.card-action {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 1.7rem; height: 1.7rem; padding: 0; border-radius: 6px;
+  background: var(--chip-bg); border: 1px solid var(--border); color: var(--text-muted); cursor: pointer;
+}
+.card-action:hover { background: var(--chip-hover); color: var(--text); text-decoration: none; }
+.card-action .icon { margin: 0; width: 0.9em; height: 0.9em; }
 .card-sub { color: var(--text-muted); font-size: 0.8rem; }
 .card-desc {
   margin: 0.2rem 0; color: var(--text); font-size: 0.87rem;
@@ -213,6 +226,7 @@ html[data-view="list"] .grid { grid-template-columns: 1fr; gap: 0.35rem; }
 html[data-view="list"] .card {
   flex-direction: row; align-items: center; gap: 1rem; padding: 0.5rem 0.9rem;
 }
+html[data-view="list"] .card:hover { transform: none; }
 html[data-view="list"] .card-head { flex: 0 0 15rem; min-width: 0; }
 html[data-view="list"] .card-sub { display: none; }
 html[data-view="list"] .card-desc {

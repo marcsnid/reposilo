@@ -111,6 +111,9 @@ pub struct RepoCard {
     pub rel: String,
     pub name: String,
     pub forge: String,
+    /// Origin URL (empty for unidentified imports) — used by the card's
+    /// "open origin" quick action.
+    pub origin: String,
     pub description: String,
     pub tags: Vec<TagUrl>,
     pub remote_gone: bool,
@@ -300,6 +303,7 @@ pub async fn build_list_ctx(st: &Arc<AppState>, tags: &[String], q: &str, folder
                 rel: r.rel.clone(),
                 name: r.manifest.name.clone(),
                 forge: r.manifest.forge.clone(),
+                origin: r.manifest.origin.clone().unwrap_or_default(),
                 description: r.manifest.description.clone().unwrap_or_default(),
                 tags: r
                     .manifest

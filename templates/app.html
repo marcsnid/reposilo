@@ -65,6 +65,19 @@
           <a class="card-title" href="/repos/{{ r.rel }}">{{ r.name }}</a>
           <span class="badge forge-{{ r.forge }}">{{ r.forge }}</span>
           {% if r.remote_dead %}<span class="badge danger">remote dead</span>{% else if r.remote_gone %}<span class="badge danger">remote gone</span>{% endif %}
+          <div class="card-actions">
+            <button type="button" class="card-action" title="Force refresh"
+                    hx-post="/repos/{{ r.rel }}/refresh" hx-target="#toast" hx-swap="innerHTML"
+                    hx-indicator="find .spinner" onclick="event.stopPropagation()">
+              <span class="spinner htmx-indicator"></span>
+              <svg class="icon" viewBox="0 0 16 16"><path d="M2.5 8a5.5 5.5 0 0 1 9.4-3.9L14 6.2"/><path d="M14 2.5v3.7h-3.7"/><path d="M13.5 8a5.5 5.5 0 0 1-9.4 3.9L2 9.8"/><path d="M2 13.5V9.8h3.7"/></svg>
+            </button>
+            {% if !r.origin.is_empty() %}
+            <a class="card-action" href="{{ r.origin }}" target="_blank" rel="noopener" title="Open origin" onclick="event.stopPropagation()">
+              <svg class="icon" viewBox="0 0 16 16"><path d="M6 3.5H3.5v9h9V10"/><path d="M9 2.5h4.5V7"/><path d="M13.5 2.5 7.5 8.5"/></svg>
+            </a>
+            {% endif %}
+          </div>
         </div>
         <div class="card-sub">{{ r.rel }} · archived {{ r.last_archived }}</div>
         {% if !r.description.is_empty() %}<p class="card-desc">{{ r.description }}</p>{% endif %}
