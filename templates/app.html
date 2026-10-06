@@ -59,11 +59,11 @@
     {% else %}
     <div class="grid">
       {% for r in ctx.repos %}
-      <div class="card" draggable="true" data-rel="{{ r.rel }}" ondragstart="dragRepo(event)">
+      <div class="card{% if !r.color.is_empty() %} tinted{% endif %}"{% if !r.color.is_empty() %} data-color="{{ r.color }}"{% endif %} draggable="true" data-rel="{{ r.rel }}" ondragstart="dragRepo(event)">
         <div class="card-head">
           <a class="card-title" href="/repos/{{ r.rel }}">{{ r.name }}</a>
           <span class="badge forge-{{ r.forge }}">{{ r.forge }}</span>
-          {% if r.remote_dead %}<span class="badge danger">remote dead</span>{% else if r.remote_gone %}<span class="badge danger">remote gone</span>{% endif %}
+          {% if r.remote_dead %}<span class="badge">remote dead</span>{% else if r.remote_gone %}<span class="badge">remote gone</span>{% endif %}
           <div class="card-actions">
             <button type="button" class="card-action" title="Force refresh"
                     hx-post="/repos/{{ r.rel }}/refresh" hx-target="#toast" hx-swap="innerHTML"

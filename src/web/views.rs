@@ -52,6 +52,38 @@ fn lang_class(name: &str) -> &'static str {
     }
 }
 
+/// User-selectable badge colors: (manifest key, label, CSS dot modifier).
+pub const COLOR_CHOICES: &[(&str, &str, &str)] = &[
+    ("red", "Red", "dot-0"),
+    ("orange", "Orange", "dot-1"),
+    ("yellow", "Yellow", "dot-2"),
+    ("green", "Green", "dot-3"),
+    ("blue", "Blue", "dot-4"),
+    ("purple", "Purple", "dot-5"),
+    ("pink", "Pink", "dot-6"),
+    ("gray", "Gray", "dot-7"),
+];
+
+/// Map a palette key to its CSS dot class (None for empty/unknown).
+pub fn color_class(key: &str) -> Option<&'static str> {
+    COLOR_CHOICES.iter().find(|(k, _, _)| *k == key).map(|(_, _, c)| *c)
+}
+
+/// One swatch in the metadata color picker.
+#[derive(Debug, Clone)]
+pub struct ColorChoiceView {
+    pub key: String,
+    pub name: String,
+    pub class: String,
+}
+
+pub fn color_choices() -> Vec<ColorChoiceView> {
+    COLOR_CHOICES
+        .iter()
+        .map(|(k, n, c)| ColorChoiceView { key: k.to_string(), name: n.to_string(), class: c.to_string() })
+        .collect()
+}
+
 pub fn human_bytes(b: u64) -> String {
     let units = ["B", "KB", "MB", "GB", "TB"];
     let mut v = b as f64;
@@ -156,6 +188,8 @@ pub struct RepoCard {
     pub last_archived: String,  // exact date (tooltip), "-" = never
     pub last_archived_ago: String, // "3d ago" / "never"
     pub size_human: String,
+    pub color: String,       // palette key or empty = no tint
+    pub color_class: String, // "dot-N" or empty (detail header)
 }
 
 #[derive(Debug, Clone)]
@@ -361,6 +395,14 @@ pub async fn build_list_ctx(st: &Arc<AppState>, tags: &[String], q: &str, folder
                     .map(|(h, _)| h)
                     .unwrap_or_else(|| "never".into()),
                 size_human: human_bytes(total_bytes),
+                color: r.manifest.color.clone().unwrap_or_default(),
+                color_class: r
+                    .manifest
+                    .color
+                    .as_deref()
+                    .and_then(color_class)
+                    .unwrap_or_default()
+                    .to_string(),
             }
         })
         .collect();
@@ -518,6 +560,9 @@ pub struct DetailCtx {
     pub added_exact: String,     // exact date (tooltip)
     pub last_checked: String,    // "2h ago" / "Never"
     pub last_checked_exact: String, // exact timestamp (tooltip)
+    pub color: String,           // palette key or empty
+    pub color_class: String,     // "dot-N" or empty
+    pub color_choices: Vec<ColorChoiceView>,
     pub remote_state: String,
     pub schedule_days: u32,
     pub keep_branch: i64,
@@ -748,6 +793,9 @@ pub async fn build_detail_ctx(st: &Arc<AppState>, repo: &crate::index::RepoEntry
         added_exact,
         last_checked,
         last_checked_exact,
+        color: m.color.clone().unwrap_or_default(),
+        color_class: m.color.as_deref().and_then(color_class).unwrap_or_default().to_string(),
+        color_choices: color_choices(),
         remote_state: m.remote_state.clone().unwrap_or_default(),
         schedule_days: m.schedule.interval_days,
         keep_branch: m

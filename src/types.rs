@@ -79,6 +79,9 @@ pub struct RepoManifest {
     /// GitHub stars, when known (fetched at add time).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stars: Option<u64>,
+    /// User-chosen color label (a palette key like "blue"), shown as a badge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
     /// True for imported zips whose origin could not be determined.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unidentified: bool,

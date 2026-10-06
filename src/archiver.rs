@@ -335,6 +335,7 @@ impl Archiver {
             notes,
             remote_state: None,
             unavailable_since: None,
+            color: None,
             unidentified: false,
         };
         crate::types::write_json(&manifest_path, &manifest)?;

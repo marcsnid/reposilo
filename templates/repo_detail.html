@@ -8,7 +8,7 @@
       <div class="detail-sub">
         <span class="badge forge-{{ ctx.forge }}">{{ ctx.forge }}</span>
         {% if ctx.unidentified %}<span class="badge danger">unidentified</span>{% endif %}
-        {% if ctx.remote_state == "dead" %}<span class="badge danger">remote dead (archived copy only)</span>{% else if ctx.remote_state == "unavailable" %}<span class="badge danger">remote gone</span>{% endif %}
+        {% if ctx.remote_state == "dead" %}<span class="badge">remote dead (archived copy only)</span>{% else if ctx.remote_state == "unavailable" %}<span class="badge">remote gone</span>{% endif %}
         {% if !ctx.origin.is_empty() %}<a class="origin" href="{{ ctx.origin }}">{{ ctx.origin }}</a>{% endif %}
       </div>
     </div>
@@ -53,7 +53,7 @@
         {% include "tags_edit.html" %}
       </section>
 
-      <section class="panel">
+      <section class="panel{% if !ctx.color.is_empty() %} tinted{% endif %}"{% if !ctx.color.is_empty() %} data-color="{{ ctx.color }}"{% endif %}>
         <h2>About</h2>
         <details class="metadata-editor">
           <summary>&#9998; Edit metadata</summary>
@@ -66,6 +66,16 @@
               <textarea name="notes" rows="2" placeholder="private notes">{{ ctx.notes }}</textarea></div>
             <div class="settings-row"><label>Origin</label>
               <input type="url" name="origin" value="{{ ctx.origin }}" placeholder="https://github.com/owner/repo.git"></div>
+            <div class="settings-row"><label>Color</label>
+              <div class="color-swatch-row">
+                <label class="color-swatch color-swatch-none" title="No color">
+                  <input type="radio" name="color" value="" {% if ctx.color.is_empty() %}checked{% endif %}>None</label>
+                {% for c in ctx.color_choices %}
+                <label class="color-swatch" title="{{ c.name }}">
+                  <input type="radio" name="color" value="{{ c.key }}" {% if ctx.color == c.key %}checked{% endif %}>
+                  <span class="dot {{ c.class }}"></span></label>
+                {% endfor %}
+              </div></div>
             <div class="settings-row"><label>Folder</label>
               <input type="text" name="folder" value="{{ ctx.folder }}" list="folder-list" placeholder="e.g. tools/go/tui, blank = root">
               <datalist id="folder-list">

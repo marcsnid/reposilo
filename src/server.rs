@@ -1483,6 +1483,7 @@ mod tests {
             unavailable_since: None,
             suggested_tags: vec![],
             stars: None,
+            color: None,
             unidentified: false,
         }
     }

@@ -998,3 +998,48 @@ async fn gallery_card_has_quick_actions() -> Result<()> {
     );
     Ok(())
 }
+
+/// User-chosen color labels round-trip through the manifest and render as a
+/// colored dot badge on the card and detail header.
+#[tokio::test]
+async fn metadata_color_badge_roundtrips() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    let repo = root.join("owner-demo");
+    fs::create_dir_all(&repo)?;
+    fs::write(
+        repo.join("repo.json"),
+        r#"{"forge":"github","name":"demo","added":"2025-01-01T00:00:00Z","default_branch":"main"}"#,
+    )?;
+
+    let (base, _st) = spawn_server(test_cfg(&root)).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{base}/repos/owner-demo/metadata"))
+        .form(&[("name", "demo"), ("description", ""), ("notes", ""), ("color", "blue")])
+        .send()
+        .await?;
+    assert_eq!(resp.status(), 200);
+
+    let m: serde_json::Value = serde_json::from_str(&fs::read_to_string(repo.join("repo.json"))?)?;
+    assert_eq!(m["color"], "blue");
+
+    let page = client.get(format!("{base}/")).send().await?.text().await?;
+    assert!(page.contains("card tinted"), "card should be tinted: {page}");
+    assert!(page.contains("data-color=\"blue\""), "card should carry the color: {page}");
+    let detail = client.get(format!("{base}/repos/owner-demo")).send().await?.text().await?;
+    assert!(detail.contains("panel tinted"), "About panel should be tinted: {detail}");
+    assert!(detail.contains("data-color=\"blue\""), "About panel should carry the color: {detail}");
+    assert!(detail.contains("name=\"color\""), "metadata should offer color swatches: {detail}");
+
+    // clearing the color removes the badge
+    client
+        .post(format!("{base}/repos/owner-demo/metadata"))
+        .form(&[("name", "demo"), ("description", ""), ("notes", ""), ("color", "")])
+        .send()
+        .await?;
+    let m2: serde_json::Value = serde_json::from_str(&fs::read_to_string(repo.join("repo.json"))?)?;
+    assert!(m2["color"].is_null(), "empty color should clear the badge: {m2}");
+    Ok(())
+}

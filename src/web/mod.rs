@@ -499,6 +499,10 @@ async fn save_metadata_ui(st: &Arc<AppState>, rel: &str, form: HashMap<String, S
         }
         manifest.description = form.get("description").map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
         manifest.notes = form.get("notes").map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        // color radio always submits (empty = no color); a missing field leaves it alone
+        if let Some(c) = form.get("color") {
+            manifest.color = Some(c.trim().to_string()).filter(|s| !s.is_empty());
+        }
         if let Err(e) = crate::types::write_json(&manifest_path, &manifest) {
             st.unlock_repo(rel).await;
             return html(format!(r#"<div class="import-error">cannot save manifest: {e:#}</div>"#));
