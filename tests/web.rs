@@ -901,3 +901,31 @@ async fn add_all_suggested_tags_merges_them() -> Result<()> {
     assert_eq!(tags, vec!["cli", "manual", "rust", "tooling"]);
     Ok(())
 }
+
+/// The gallery offers grid/list view toggles (rendered server-side; the
+/// choice itself is client-side via localStorage).
+#[tokio::test]
+async fn index_offers_grid_and_list_view_toggles() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let archive = tmp.path().join("archive");
+    fs::create_dir_all(&archive)?;
+    let (base, _st) = spawn_server(test_cfg(&archive)).await;
+    let client = reqwest::Client::new();
+
+    let html = client.get(format!("{base}/")).send().await?.text().await?;
+    assert!(html.contains("class=\"view-toggle\""), "{html}");
+    assert!(html.contains("data-view=\"grid\""), "{html}");
+    assert!(html.contains("data-view=\"list\""), "{html}");
+    assert!(html.contains("setView('list')"), "{html}");
+
+    // the swapped fragment carries the toggles too
+    let frag = client
+        .get(format!("{base}/"))
+        .header("HX-Request", "true")
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert!(frag.contains("class=\"view-toggle\""), "{frag}");
+    Ok(())
+}

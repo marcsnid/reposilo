@@ -1,11 +1,21 @@
-<form class="toolbar" hx-get="/" hx-target="#app" hx-trigger="submit" hx-push-url="true">
-  <input id="search-input" class="search" type="search" name="q" value="{{ ctx.q }}" placeholder="Search repositories…"
-         hx-preserve
-         hx-get="/" hx-target="#app" hx-trigger="input changed delay:300ms, search"
-         hx-include="closest form" hx-push-url="true">
-  <input type="hidden" name="tags" value="{{ ctx.active_tags_csv }}">
-  <input type="hidden" name="folder" value="{{ ctx.folder }}">
-</form>
+<div class="toolbar">
+  <form class="toolbar-search" hx-get="/" hx-target="#app" hx-trigger="submit" hx-push-url="true">
+    <input id="search-input" class="search" type="search" name="q" value="{{ ctx.q }}" placeholder="Search repositories…"
+           hx-preserve
+           hx-get="/" hx-target="#app" hx-trigger="input changed delay:300ms, search"
+           hx-include="closest form" hx-push-url="true">
+    <input type="hidden" name="tags" value="{{ ctx.active_tags_csv }}">
+    <input type="hidden" name="folder" value="{{ ctx.folder }}">
+  </form>
+  <div class="view-toggle" role="group" aria-label="View mode">
+    <button type="button" class="view-btn" data-view="grid" title="Grid view" aria-label="Grid view" onclick="setView('grid')">
+      <svg class="icon" viewBox="0 0 16 16"><rect x="1.5" y="1.5" width="5.5" height="5.5" rx="1"/><rect x="9" y="1.5" width="5.5" height="5.5" rx="1"/><rect x="1.5" y="9" width="5.5" height="5.5" rx="1"/><rect x="9" y="9" width="5.5" height="5.5" rx="1"/></svg>
+    </button>
+    <button type="button" class="view-btn" data-view="list" title="List view" aria-label="List view" onclick="setView('list')">
+      <svg class="icon" viewBox="0 0 16 16"><rect x="1.5" y="2" width="13" height="2.6" rx="1"/><rect x="1.5" y="6.7" width="13" height="2.6" rx="1"/><rect x="1.5" y="11.4" width="13" height="2.6" rx="1"/></svg>
+    </button>
+  </div>
+</div>
 
 {% if !ctx.chips.is_empty() %}
 <div class="chips active-chips">

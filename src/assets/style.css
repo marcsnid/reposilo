@@ -112,8 +112,22 @@ button { cursor: pointer; }
 button:hover, button[type="submit"]:hover { background: var(--chip-hover); }
 
 /* ---------- layout ---------- */
-.toolbar { padding: 0.9rem 1.2rem 0.3rem; }
+.toolbar { padding: 0.9rem 1.2rem 0.3rem; display: flex; gap: 0.6rem; align-items: center; }
+.toolbar-search { flex: 1; min-width: 0; }
 .search { width: 100%; padding: 0.55rem 0.8rem; font-size: 0.95rem; }
+/* grid / list view toggle */
+.view-toggle {
+  display: inline-flex; border: 1px solid var(--border); border-radius: 7px;
+  overflow: hidden; background: var(--chip-bg); flex: 0 0 auto;
+}
+.view-btn {
+  background: none; border: none; color: var(--text-muted); cursor: pointer;
+  width: 2.1rem; height: 2.1rem; display: inline-flex; align-items: center; justify-content: center;
+}
+.view-btn + .view-btn { border-left: 1px solid var(--border); }
+.view-btn:hover { background: var(--chip-hover); color: var(--text); }
+.view-btn.active { background: var(--accent); color: var(--accent-text); }
+.view-btn .icon { margin-right: 0; }
 
 .layout { display: flex; gap: 1.2rem; padding: 0.6rem 1.2rem 2rem; align-items: flex-start; }
 .sidebar { flex: 0 0 240px; position: sticky; top: 3.6rem; }
@@ -197,6 +211,19 @@ button:hover, button[type="submit"]:hover { background: var(--chip-hover); }
 }
 .card-meta { display: flex; gap: 0.9rem; color: var(--text-muted); font-size: 0.8rem; flex-wrap: wrap; }
 .card .chips { padding: 0.2rem 0 0 0; }
+
+/* list view: same cards, laid out as dense rows */
+html[data-view="list"] .grid { grid-template-columns: 1fr; gap: 0.35rem; }
+html[data-view="list"] .card {
+  flex-direction: row; align-items: center; gap: 1rem; padding: 0.5rem 0.9rem;
+}
+html[data-view="list"] .card-head { flex: 0 0 15rem; min-width: 0; }
+html[data-view="list"] .card-sub { display: none; }
+html[data-view="list"] .card-desc {
+  flex: 1 1 auto; min-width: 0; margin: 0; -webkit-line-clamp: 1; font-size: 0.82rem;
+}
+html[data-view="list"] .card-meta { flex: 0 0 auto; }
+html[data-view="list"] .card .chips { padding: 0; flex: 0 0 auto; max-width: 22rem; overflow: hidden; }
 
 .badge {
   display: inline-block; background: var(--badge-bg); color: #fff; border-radius: 999px;

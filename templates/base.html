@@ -10,6 +10,8 @@
         var t = localStorage.getItem('rs-theme');
         if (!t) { t = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'; }
         document.documentElement.dataset.theme = t;
+        var v = localStorage.getItem('rs-view');
+        document.documentElement.dataset.view = v === 'list' ? 'list' : 'grid';
       } catch (e) {}
     })();
     function toggleTheme() {
@@ -17,6 +19,19 @@
       var n = d.dataset.theme === 'dark' ? 'light' : 'dark';
       d.dataset.theme = n;
       try { localStorage.setItem('rs-theme', n); } catch (e) {}
+    }
+    function setView(v) {
+      v = v === 'list' ? 'list' : 'grid';
+      document.documentElement.dataset.view = v;
+      try { localStorage.setItem('rs-view', v); } catch (e) {}
+      syncViewButtons();
+    }
+    function syncViewButtons() {
+      var v = document.documentElement.dataset.view === 'list' ? 'list' : 'grid';
+      var btns = document.querySelectorAll('.view-btn');
+      for (var i = 0; i < btns.length; i++) {
+        btns[i].classList.toggle('active', btns[i].dataset.view === v);
+      }
     }
     // drag-and-drop: repo cards onto sidebar folders
     function dragRepo(ev) {
@@ -110,7 +125,9 @@
       }
       document.body.addEventListener('htmx:afterSwap', schedule);
       document.body.addEventListener('htmx:oobAfterSwap', schedule);
+      document.body.addEventListener('htmx:afterSwap', syncViewButtons);
       schedule();
+      syncViewButtons();
     })();
   </script>
   {% block content %}{% endblock %}
