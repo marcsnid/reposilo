@@ -33,6 +33,21 @@
         btns[i].classList.toggle('active', btns[i].dataset.view === v);
       }
     }
+    // Keep an icon field to a single visible character (emoji are graphemes
+    // made of several code points, so this uses Intl.Segmenter when present).
+    function oneGrapheme(s) {
+      try {
+        if (window.Intl && Intl.Segmenter) {
+          var seg = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+          var first = seg.segment(s)[Symbol.iterator]().next().value;
+          return first ? first.segment : '';
+        }
+      } catch (e) {}
+      var chars = Array.from(s);
+      var out = chars[0] || '';
+      if (chars[1] && /[\uFE0E\uFE0F\u20E3]/.test(chars[1])) { out += chars[1]; }
+      return out;
+    }
     // drag-and-drop: repo cards onto sidebar folders
     function dragRepo(ev) {
       ev.dataTransfer.setData('text/reposilo-rel', ev.currentTarget.dataset.rel);

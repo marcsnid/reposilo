@@ -423,6 +423,13 @@ pub struct FileView {
     pub url: String, // empty = not viewable
 }
 
+/// One entry in the new-folder parent dropdown.
+#[derive(Debug, Clone)]
+pub struct FolderParentOption {
+    pub path: String,
+    pub selected: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct FolderFormCtx {
     /// "new" or "edit"
@@ -435,8 +442,8 @@ pub struct FolderFormCtx {
     pub name: String,
     /// Parent folder path (empty = archive root).
     pub parent: String,
-    /// Existing folders, for the parent dropdown.
-    pub parents: Vec<String>,
+    /// Existing folders, for the parent dropdown (with the current one marked).
+    pub parents: Vec<FolderParentOption>,
     /// Current icon (empty = colored dot).
     pub icon: String,
     /// Repo count inside (edit mode); 0 allows delete.

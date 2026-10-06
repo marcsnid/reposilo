@@ -73,6 +73,38 @@ fn oob_toast(msg: &str) -> String {
     )
 }
 
+/// Out-of-band close for a modal (e.g. after a successful form submit).
+fn oob_close_modal(id: &str) -> String {
+    format!(r#"<div id="{id}" hx-swap-oob="delete"></div>"#)
+}
+
+/// Keep only the first visible character of an icon so a pasted word cannot
+/// break the sidebar layout. Emoji are grapheme clusters of several code
+/// points, so variation selectors, ZWJ sequences, keycaps and skin-tone
+/// modifiers that belong to the first character are kept with it.
+fn icon_first_char(icon: &str) -> String {
+    let mut chars = icon.chars();
+    let Some(first) = chars.next() else { return String::new() };
+    let mut out = String::new();
+    out.push(first);
+    let mut rest = chars.peekable();
+    while let Some(&c) = rest.peek() {
+        let joins = matches!(c, '\u{FE0E}' | '\u{FE0F}' | '\u{20E3}' | '\u{200D}')
+            || ('\u{1F3FB}'..='\u{1F3FF}').contains(&c)
+            || matches!(c as u32, 0x0300..=0x036F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0xFE20..=0xFE2F);
+        if !joins {
+            break;
+        }
+        out.push(rest.next().unwrap());
+        if c == '\u{200D}' {
+            if let Some(next) = rest.next() {
+                out.push(next);
+            }
+        }
+    }
+    out
+}
+
 fn render<T: Template>(t: &T) -> Response {
     match t.render() {
         Ok(s) => html(s),
@@ -647,16 +679,31 @@ async fn repo_move(State(st): State<Arc<AppState>>, Form(form): Form<MoveForm>) 
 }
 
 /// GET /folders/new: the create form (parent dropdown from the index).
-async fn folders_new(State(st): State<Arc<AppState>>) -> Response {
+/// `?parent=…` preselects the folder that is currently open in the sidebar.
+async fn folders_new(
+    State(st): State<Arc<AppState>>,
+    Query(map): Query<HashMap<String, String>>,
+) -> Response {
+    let requested = map.get("parent").cloned().unwrap_or_default();
     let ctx = {
         let index = st.index.read().await;
+        let requested = requested.trim().trim_matches('/').to_string();
+        let parent = if !requested.is_empty() && views::valid_folder_path(&requested, &index) {
+            requested
+        } else {
+            String::new()
+        };
+        let parents = views::all_folder_paths(&index)
+            .into_iter()
+            .map(|path| views::FolderParentOption { selected: path == parent, path })
+            .collect();
         FolderFormCtx {
             mode: "new".into(),
             rel: String::new(),
             update_url: "/folders/create".into(),
             name: String::new(),
-            parent: String::new(),
-            parents: views::all_folder_paths(&index),
+            parent,
+            parents,
             icon: String::new(),
             count: 0,
         }
@@ -742,12 +789,18 @@ async fn folders_create(
     if let Err(e) = tokio::fs::create_dir_all(&dir).await {
         return err(format!("cannot create folder: {e}"));
     }
-    let manifest = crate::types::FolderManifest { icon: Some(form.icon.trim().to_string()).filter(|s| !s.is_empty()) };
+    let icon = icon_first_char(form.icon.trim());
+    let manifest = crate::types::FolderManifest { icon: Some(icon).filter(|s| !s.is_empty()) };
     if let Err(e) = crate::types::write_json(&dir.join("folder.json"), &manifest) {
         return err(format!("cannot write folder.json: {e}"));
     }
     st.reindex().await.ok();
-    html(format!("{}{}", oob_toast("Folder created"), oob_app_refresh(&st).await))
+    html(format!(
+        "{}{}{}",
+        oob_close_modal("folder-modal"),
+        oob_toast("Folder created"),
+        oob_app_refresh(&st).await
+    ))
 }
 
 #[derive(Deserialize, Default)]
@@ -786,7 +839,12 @@ async fn folders_update(
             return err(format!("cannot delete folder: {e}"));
         }
         st.reindex().await.ok();
-        return html(format!("{}{}", oob_toast("Folder deleted"), oob_app_refresh(&st).await));
+        return html(format!(
+            "{}{}{}",
+            oob_close_modal("folder-modal"),
+            oob_toast("Folder deleted"),
+            oob_app_refresh(&st).await
+        ));
     }
 
     // save: rename when the name changed
@@ -806,12 +864,18 @@ async fn folders_update(
         }
     }
     let dir = root.join(&new_rel);
-    let manifest = crate::types::FolderManifest { icon: Some(form.icon.trim().to_string()).filter(|s| !s.is_empty()) };
+    let icon = icon_first_char(form.icon.trim());
+    let manifest = crate::types::FolderManifest { icon: Some(icon).filter(|s| !s.is_empty()) };
     if let Err(e) = crate::types::write_json(&dir.join("folder.json"), &manifest) {
         return err(format!("cannot write folder.json: {e}"));
     }
     st.reindex().await.ok();
-    html(format!("{}{}", oob_toast("Folder saved"), oob_app_refresh(&st).await))
+    html(format!(
+        "{}{}{}",
+        oob_close_modal("folder-modal"),
+        oob_toast("Folder saved"),
+        oob_app_refresh(&st).await
+    ))
 }
 
 // ---------- settings ----------
@@ -1238,4 +1302,23 @@ async fn notifications_mark_read(State(st): State<Arc<AppState>>, headers: Heade
         .header("location", "/notifications")
         .body(Body::empty())
         .unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::icon_first_char;
+
+    #[test]
+    fn icon_keeps_only_the_first_character() {
+        assert_eq!(icon_first_char(""), "");
+        assert_eq!(icon_first_char("a"), "a");
+        assert_eq!(icon_first_char("hello"), "h");
+        assert_eq!(icon_first_char("🎮"), "🎮");
+        // variation selector stays with its base
+        assert_eq!(icon_first_char("🕹️"), "🕹️");
+        // ZWJ sequence is preserved as one visible character
+        assert_eq!(icon_first_char("👨‍👩‍👧‍👦"), "👨‍👩‍👧‍👦");
+        // leading whitespace is dropped by the caller's trim; here it is kept
+        assert_eq!(icon_first_char("1abc"), "1");
+    }
 }

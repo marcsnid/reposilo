@@ -317,6 +317,11 @@ async fn folder_management_flow() -> Result<()> {
         .send()
         .await?;
     assert_eq!(resp.status(), 200);
+    let created = resp.text().await?;
+    assert!(
+        created.contains("hx-swap-oob=\"delete\""),
+        "a successful create must close the modal: {created}"
+    );
     // folder.json on disk carries the icon
     let fm: serde_json::Value = serde_json::from_str(&fs::read_to_string(
         tmp.path().join("archive/games/folder.json"),
@@ -336,6 +341,32 @@ async fn folder_management_flow() -> Result<()> {
         .text()
         .await?;
     assert!(form.contains(r#"name="rel" value="games""#), "edit form must resubmit rel: {form}");
+    assert!(form.contains("modal-backdrop"), "folder edit should be a modal: {form}");
+    assert!(form.contains("id=\"folder-modal\""), "{form}");
+    assert!(form.contains("id=\"folder-form-error\""), "errors stay inside the modal: {form}");
+
+    // a new folder defaults its parent to the folder currently open
+    let new_form = client
+        .get(format!("{base}/folders/new?parent=games"))
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert!(
+        new_form.contains(r#"<option value="games" selected>"#),
+        "the open folder should be preselected as parent: {new_form}"
+    );
+
+    // an icon longer than one character is trimmed to a single grapheme
+    let resp = client
+        .post(format!("{base}/folders/create"))
+        .form(&[("parent", ""), ("name", "wordy"), ("icon", "hello")])
+        .send()
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let wm: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(tmp.path().join("archive/wordy/folder.json"))?)?;
+    assert_eq!(wm["icon"], "h");
 
     // nested folder: decomp under games
     let resp = client
