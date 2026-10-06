@@ -79,7 +79,7 @@
             {% endif %}
           </div>
         </div>
-        <div class="card-sub">{{ r.rel }} · archived {{ r.last_archived }}</div>
+        <div class="card-sub">{{ r.rel }} · archived <span title="{{ r.last_archived }}">{{ r.last_archived_ago }}</span></div>
         {% if !r.description.is_empty() %}<p class="card-desc">{{ r.description }}</p>{% endif %}
         <div class="card-meta">
           {% if !r.language.is_empty() %}<span class="lang" title="primary language"><i class="dot {{ r.lang_class }}"></i> {{ r.language }}</span>{% endif %}

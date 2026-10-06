@@ -85,8 +85,8 @@
             {% if ctx.keep_branch == -1 %}Keep all snapshots{% else %}Keep newest {{ ctx.keep_branch }} snapshot(s){% endif %},
             {% if ctx.keep_releases == -1 %}keep all releases{% else %}keep newest {{ ctx.keep_releases }} release(s){% endif %}
           </dd>
-          <dt>Added</dt><dd>{{ ctx.added }}</dd>
-          <dt>Last refreshed</dt><dd>{{ ctx.last_checked }}</dd>
+          <dt>Added</dt><dd title="{{ ctx.added_exact }}">{{ ctx.added }}</dd>
+          <dt>Last refreshed</dt><dd title="{{ ctx.last_checked_exact }}">{{ ctx.last_checked }}</dd>
         </dl>
         {% if !ctx.notes.is_empty() %}
         <h2>Notes</h2>
@@ -101,7 +101,7 @@
           {% for s in ctx.releases %}
           <li>
             <a class="dl" href="{{ s.download_url }}" download>{{ s.version }} <span class="dim" style="font-weight:400">source</span></a>
-            <span class="snap-meta">{{ s.commit_short }} · {{ s.date }} · {{ s.size_human }}</span>
+            <span class="snap-meta">{{ s.commit_short }} · <span title="{{ s.date_exact }}">{{ s.date }}</span> · {{ s.size_human }}</span>
             {% if !s.assets.is_empty() %}
             <ul class="asset-list">
               {% for a in s.assets %}
@@ -131,7 +131,7 @@
           {% for s in ctx.branch_snapshots %}
           <li>
             <a class="dl" href="{{ s.download_url }}" download>{{ s.label }}@{{ s.commit_short }}</a>
-            <span class="snap-meta">{{ s.date }} · {{ s.size_human }}</span>
+            <span class="snap-meta"><span title="{{ s.date_exact }}">{{ s.date }}</span> · {{ s.size_human }}</span>
             {% if !s.changelog_html.is_empty() %}
             <details><summary class="dim" style="font-size:0.8rem;cursor:pointer">Changes</summary>
               <div class="readme">{{ s.changelog_html|safe }}</div>

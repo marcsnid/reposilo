@@ -1277,16 +1277,23 @@ async fn notifications_page(State(st): State<Arc<AppState>>, headers: HeaderMap)
     let can_mark_read = user.is_some();
     let views: Vec<views::NotifView> = items
         .iter()
-        .map(|n| views::NotifView {
-            kind: n.kind.clone(),
-            repo: n.repo.clone(),
-            title: n.title.clone(),
-            at: n.at.chars().take(16).collect(),
-            changelog_html: n
-                .body
-                .as_deref()
-                .map(crate::files::markdown_to_html)
-                .unwrap_or_default(),
+        .map(|n| {
+            let (at, at_exact) = views::humanize_ago(&n.at).unwrap_or_else(|| {
+                let t: String = n.at.chars().take(16).collect();
+                (t.clone(), t)
+            });
+            views::NotifView {
+                kind: n.kind.clone(),
+                repo: n.repo.clone(),
+                title: n.title.clone(),
+                at,
+                at_exact,
+                changelog_html: n
+                    .body
+                    .as_deref()
+                    .map(crate::files::markdown_to_html)
+                    .unwrap_or_default(),
+            }
         })
         .collect();
     let ctx = views::NotificationsCtx { items: views, can_mark_read };
