@@ -37,6 +37,8 @@ take_suggested = false
 
 [github]
 # token = "env:GITHUB_TOKEN"
+# Download the repo owner's avatar as the repo icon (default true).
+# fetch_avatars = true
 
 [gitlab]
 # token = "env:GITLAB_TOKEN"

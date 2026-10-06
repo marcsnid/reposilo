@@ -51,7 +51,7 @@ pub async fn github_repo_meta(cfg: &Config, origin: &str) -> Option<RepoMeta> {
 }
 
 /// Download a small avatar image (best-effort, capped at 2 MB). GitHub
-/// avatars accept a size hint, so we ask for 64px — plenty for a 20–34px UI
+/// avatars accept a size hint, so we ask for 64px, plenty for a 20-34px UI
 /// at 2x and a fraction of the full-size image.
 pub async fn fetch_avatar(url: &str) -> Option<Vec<u8>> {
     let url = if url.contains("avatars.githubusercontent.com") {

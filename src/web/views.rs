@@ -172,7 +172,7 @@ pub struct RepoCard {
     pub rel: String,
     pub name: String,
     pub forge: String,
-    /// Origin URL (empty for unidentified imports) — used by the card's
+    /// Origin URL (empty for unidentified imports), used by the card's
     /// "open origin" quick action.
     pub origin: String,
     pub description: String,
@@ -972,6 +972,8 @@ pub struct SettingsCtx {
     pub release_max_asset_mb: String,
     // tags
     pub take_suggested_tags: bool,
+    // icons
+    pub fetch_avatars: bool,
     pub saved: bool,
 }
 
@@ -1037,6 +1039,7 @@ pub fn settings_ctx_from(cfg: &crate::config::Config, saved: bool) -> SettingsCt
         release_platforms_extra,
         release_max_asset_mb: cfg.releases.max_asset_mb.to_string(),
         take_suggested_tags: cfg.tags.take_suggested,
+        fetch_avatars: cfg.github.fetch_avatars,
         saved,
     }
 }

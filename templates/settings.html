@@ -23,6 +23,13 @@
     </section>
 
     <section class="panel">
+      <h2>Repository icons</h2>
+      <div class="settings-row"><label>Fetch repo icons</label>
+        <input type="checkbox" name="fetch_avatars" value="1" {% if ctx.fetch_avatars %}checked{% endif %}></div>
+      <p class="note">Download the repo owner's GitHub avatar and store it in the archive as the repo icon. Disable to skip the extra API call and storage; existing icons are kept.</p>
+    </section>
+
+    <section class="panel">
       <h2>Release binaries</h2>
       <p class="note">Also download the binary files attached to releases, not just the source snapshot. Assets are matched by filename, so <code>foo-win64.zip</code>, <code>foo-x86_64-unknown-linux-gnu.tar.gz</code> and <code>foo_1.2_amd64.deb</code> all work. Source tarballs and files without an OS and arch in the name are skipped. Leave everything unchecked to disable.</p>
       <div class="settings-row"><label>Download all platforms</label>

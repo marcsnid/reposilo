@@ -1011,6 +1011,7 @@ async fn settings_save(
     cfg.releases.platforms = platforms;
     cfg.releases.max_asset_mb = num(&f, "release_max_asset_mb", cfg.releases.max_asset_mb);
     cfg.tags.take_suggested = f.0.get("take_suggested_tags").map(|v| v == "1").unwrap_or(false);
+    cfg.github.fetch_avatars = f.0.get("fetch_avatars").map(|v| v == "1").unwrap_or(false);
 
     // apply live
     *st.cfg.write().await = cfg.clone();

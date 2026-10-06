@@ -66,7 +66,7 @@ fn render_branch_changelog(info: &crate::forgeapi::CompareInfo) -> String {
     }
     out.push_str("\n\n");
     for c in &info.commits {
-        out.push_str(&format!("- `{}` {} — {} ({})\n", c.sha, c.message, c.author, c.date));
+        out.push_str(&format!("- `{}` {} · {} ({})\n", c.sha, c.message, c.author, c.date));
     }
     out
 }
@@ -341,9 +341,11 @@ impl Archiver {
         crate::types::write_json(&manifest_path, &manifest)?;
 
         // store the owner avatar locally so the repo icon survives the remote
-        if let Some(avatar) = avatar_url {
-            if let Some(bytes) = crate::forgeapi::fetch_avatar(&avatar).await {
-                let _ = fs::write(repo_dir.join("icon"), bytes);
+        if self.cfg.github.fetch_avatars {
+            if let Some(avatar) = avatar_url {
+                if let Some(bytes) = crate::forgeapi::fetch_avatar(&avatar).await {
+                    let _ = fs::write(repo_dir.join("icon"), bytes);
+                }
             }
         }
 
@@ -738,7 +740,8 @@ impl Archiver {
 
         // backfill the owner avatar for archives created before icon support
         // (GitHub only; a zero-byte `icon` marks "checked, no avatar")
-        if !repo_dir.join("icon").exists()
+        if self.cfg.github.fetch_avatars
+            && !repo_dir.join("icon").exists()
             && matches!(crate::forge::detect(&origin), Ok(info) if info.kind == crate::forge::ForgeKind::GitHub)
         {
             if let Some(meta) = crate::forgeapi::github_repo_meta(&self.cfg, &origin).await {
