@@ -3,6 +3,8 @@
 use std::sync::Arc;
 
 use askama::Template;
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 
 use crate::server::AppState;
 
@@ -50,6 +52,38 @@ fn lang_class(name: &str) -> &'static str {
     }
 }
 
+/// User-selectable badge colors: (manifest key, label, CSS dot modifier).
+pub const COLOR_CHOICES: &[(&str, &str, &str)] = &[
+    ("red", "Red", "dot-0"),
+    ("orange", "Orange", "dot-1"),
+    ("yellow", "Yellow", "dot-2"),
+    ("green", "Green", "dot-3"),
+    ("blue", "Blue", "dot-4"),
+    ("purple", "Purple", "dot-5"),
+    ("pink", "Pink", "dot-6"),
+    ("gray", "Gray", "dot-7"),
+];
+
+/// Map a palette key to its CSS dot class (None for empty/unknown).
+pub fn color_class(key: &str) -> Option<&'static str> {
+    COLOR_CHOICES.iter().find(|(k, _, _)| *k == key).map(|(_, _, c)| *c)
+}
+
+/// One swatch in the metadata color picker.
+#[derive(Debug, Clone)]
+pub struct ColorChoiceView {
+    pub key: String,
+    pub name: String,
+    pub class: String,
+}
+
+pub fn color_choices() -> Vec<ColorChoiceView> {
+    COLOR_CHOICES
+        .iter()
+        .map(|(k, n, c)| ColorChoiceView { key: k.to_string(), name: n.to_string(), class: c.to_string() })
+        .collect()
+}
+
 pub fn human_bytes(b: u64) -> String {
     let units = ["B", "KB", "MB", "GB", "TB"];
     let mut v = b as f64;
@@ -63,6 +97,33 @@ pub fn human_bytes(b: u64) -> String {
     } else {
         format!("{v:.1} {u}", u = units[u])
     }
+}
+
+/// Relative "time ago" for an RFC3339 timestamp, plus its exact `YYYY-MM-DD`
+/// date (for a `title` tooltip). e.g. `("3d ago", "2026-10-03")`.
+pub fn humanize_ago(ts: &str) -> Option<(String, String)> {
+    humanize_ago_from(ts, OffsetDateTime::now_utc())
+}
+
+/// Deterministic core of `humanize_ago` (fixed `now`), for tests.
+pub fn humanize_ago_from(ts: &str, now: OffsetDateTime) -> Option<(String, String)> {
+    let t = OffsetDateTime::parse(ts, &Rfc3339).ok()?;
+    let exact = format!("{:04}-{:02}-{:02}", t.year(), u8::from(t.month()), t.day());
+    let secs = (now - t).whole_seconds().max(0);
+    let human = if secs < 45 {
+        "just now".to_string()
+    } else if secs < 3600 {
+        format!("{}m ago", (secs / 60).max(1))
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else if secs < 86_400 * 30 {
+        format!("{}d ago", secs / 86_400)
+    } else if secs < 86_400 * 365 {
+        format!("{}mo ago", secs / (86_400 * 30))
+    } else {
+        format!("{}y ago", secs / (86_400 * 365))
+    };
+    Some((human, exact))
 }
 
 /// Full page URL with the given filter state, e.g. "/?tags=a,q=foo".
@@ -111,6 +172,9 @@ pub struct RepoCard {
     pub rel: String,
     pub name: String,
     pub forge: String,
+    /// Origin URL (empty for unidentified imports), used by the card's
+    /// "open origin" quick action.
+    pub origin: String,
     pub description: String,
     pub tags: Vec<TagUrl>,
     pub remote_gone: bool,
@@ -121,8 +185,12 @@ pub struct RepoCard {
     pub snapshot_count: usize,
     pub release_count: usize,
     pub latest_release: String, // empty = none
-    pub last_archived: String,  // empty = never
+    pub last_archived: String,  // exact date (tooltip), "-" = never
+    pub last_archived_ago: String, // "3d ago" / "never"
     pub size_human: String,
+    pub color: String,       // palette key or empty = no tint
+    pub color_class: String, // "dot-N" or empty (detail header)
+    pub has_icon: bool,      // stored owner avatar
 }
 
 #[derive(Debug, Clone)]
@@ -300,6 +368,7 @@ pub async fn build_list_ctx(st: &Arc<AppState>, tags: &[String], q: &str, folder
                 rel: r.rel.clone(),
                 name: r.manifest.name.clone(),
                 forge: r.manifest.forge.clone(),
+                origin: r.manifest.origin.clone().unwrap_or_default(),
                 description: r.manifest.description.clone().unwrap_or_default(),
                 tags: r
                     .manifest
@@ -320,7 +389,22 @@ pub async fn build_list_ctx(st: &Arc<AppState>, tags: &[String], q: &str, folder
                     .first()
                     .map(|e| e.sidecar.archived_at.chars().take(10).collect())
                     .unwrap_or_else(|| "-".into()),
+                last_archived_ago: r
+                    .branch_snapshots
+                    .first()
+                    .and_then(|e| humanize_ago(&e.sidecar.archived_at))
+                    .map(|(h, _)| h)
+                    .unwrap_or_else(|| "never".into()),
                 size_human: human_bytes(total_bytes),
+                color: r.manifest.color.clone().unwrap_or_default(),
+                color_class: r
+                    .manifest
+                    .color
+                    .as_deref()
+                    .and_then(color_class)
+                    .unwrap_or_default()
+                    .to_string(),
+                has_icon: r.has_icon,
             }
         })
         .collect();
@@ -406,7 +490,8 @@ pub struct SnapView {
     pub label: String,
     pub commit: String,
     pub commit_short: String,
-    pub date: String,
+    pub date: String,       // "3d ago"
+    pub date_exact: String, // exact date (tooltip)
     pub size_human: String,
     pub download_url: String,
     pub version: String, // empty = not a versioned release
@@ -423,6 +508,13 @@ pub struct FileView {
     pub url: String, // empty = not viewable
 }
 
+/// One entry in the new-folder parent dropdown.
+#[derive(Debug, Clone)]
+pub struct FolderParentOption {
+    pub path: String,
+    pub selected: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct FolderFormCtx {
     /// "new" or "edit"
@@ -435,8 +527,8 @@ pub struct FolderFormCtx {
     pub name: String,
     /// Parent folder path (empty = archive root).
     pub parent: String,
-    /// Existing folders, for the parent dropdown.
-    pub parents: Vec<String>,
+    /// Existing folders, for the parent dropdown (with the current one marked).
+    pub parents: Vec<FolderParentOption>,
     /// Current icon (empty = colored dot).
     pub icon: String,
     /// Repo count inside (edit mode); 0 allows delete.
@@ -466,8 +558,14 @@ pub struct DetailCtx {
     pub default_branch: String,
     pub language: String,
     pub lang_class: String,
-    pub added: String,
-    pub last_checked: String,
+    pub added: String,           // "3d ago"
+    pub added_exact: String,     // exact date (tooltip)
+    pub last_checked: String,    // "2h ago" / "Never"
+    pub last_checked_exact: String, // exact timestamp (tooltip)
+    pub color: String,           // palette key or empty
+    pub color_class: String,     // "dot-N" or empty
+    pub color_choices: Vec<ColorChoiceView>,
+    pub has_icon: bool,          // stored owner avatar
     pub remote_state: String,
     pub schedule_days: u32,
     pub keep_branch: i64,
@@ -553,11 +651,17 @@ pub async fn build_detail_ctx(st: &Arc<AppState>, repo: &crate::index::RepoEntry
         all_folder_paths(&index)
     };
 
-    let snap_view = |e: &crate::index::SnapshotEntry| SnapView {
+    let snap_view = |e: &crate::index::SnapshotEntry| {
+        let (date, date_exact) = humanize_ago(&e.sidecar.archived_at).unwrap_or_else(|| {
+            let d: String = e.sidecar.archived_at.chars().take(10).collect();
+            (d.clone(), d)
+        });
+        SnapView {
         label: e.sidecar.r#ref.clone(),
         commit: e.sidecar.commit.clone(),
         commit_short: e.sidecar.commit.chars().take(7).collect(),
-        date: e.sidecar.archived_at.chars().take(10).collect(),
+        date,
+        date_exact,
         size_human: human_bytes(e.sidecar.zip.bytes),
         download_url: format!(
             "/api/repos/{}/archive/{}/{}",
@@ -596,6 +700,7 @@ pub async fn build_detail_ctx(st: &Arc<AppState>, repo: &crate::index::RepoEntry
                 })
                 .collect()
         },
+        }
     };
 
     let branch_snapshots = repo.branch_snapshots.iter().map(snap_view).collect();
@@ -656,6 +761,16 @@ pub async fn build_detail_ctx(st: &Arc<AppState>, repo: &crate::index::RepoEntry
         (String::new(), String::new(), false, Vec::new())
     };
 
+    let (added, added_exact) = humanize_ago(&m.added).unwrap_or_else(|| {
+        let d: String = m.added.chars().take(10).collect();
+        (d.clone(), d)
+    });
+    let (last_checked, last_checked_exact) = m
+        .last_checked
+        .as_deref()
+        .and_then(humanize_ago)
+        .unwrap_or_else(|| ("Never".to_string(), "Never".to_string()));
+
     DetailCtx {
         rel: repo.rel.clone(),
         name: m.name.clone(),
@@ -677,8 +792,14 @@ pub async fn build_detail_ctx(st: &Arc<AppState>, repo: &crate::index::RepoEntry
         default_branch: m.default_branch.clone(),
         language: m.language.clone().unwrap_or_default(),
         lang_class: m.language.as_deref().map(lang_class).unwrap_or_default().to_string(),
-        added: m.added.chars().take(10).collect(),
-        last_checked: m.last_checked.clone().unwrap_or_else(|| "never".into()),
+        added,
+        added_exact,
+        last_checked,
+        last_checked_exact,
+        color: m.color.clone().unwrap_or_default(),
+        color_class: m.color.as_deref().and_then(color_class).unwrap_or_default().to_string(),
+        color_choices: color_choices(),
+        has_icon: repo.has_icon,
         remote_state: m.remote_state.clone().unwrap_or_default(),
         schedule_days: m.schedule.interval_days,
         keep_branch: m
@@ -849,6 +970,10 @@ pub struct SettingsCtx {
     pub release_all: bool,
     pub release_platforms_extra: String,
     pub release_max_asset_mb: String,
+    // tags
+    pub take_suggested_tags: bool,
+    // icons
+    pub fetch_avatars: bool,
     pub saved: bool,
 }
 
@@ -913,6 +1038,8 @@ pub fn settings_ctx_from(cfg: &crate::config::Config, saved: bool) -> SettingsCt
         release_all: all,
         release_platforms_extra,
         release_max_asset_mb: cfg.releases.max_asset_mb.to_string(),
+        take_suggested_tags: cfg.tags.take_suggested,
+        fetch_avatars: cfg.github.fetch_avatars,
         saved,
     }
 }
@@ -1006,7 +1133,8 @@ pub struct NotifView {
     pub kind: String,
     pub repo: String,
     pub title: String,
-    pub at: String,
+    pub at: String,       // "3d ago"
+    pub at_exact: String, // exact date/time (tooltip)
     pub changelog_html: String,
 }
 
@@ -1158,5 +1286,35 @@ pub fn stats_ctx_from(
         days,
         otel_enabled: cfg.otel.enabled,
         otel_endpoint: cfg.otel.endpoint.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::humanize_ago_from;
+    use time::macros::datetime;
+
+    #[test]
+    fn humanizes_relative_time() {
+        let now = datetime!(2026-10-06 12:00:00 UTC);
+        assert_eq!(humanize_ago_from("2026-10-06T12:00:00Z", now).unwrap().0, "just now");
+        assert_eq!(humanize_ago_from("2026-10-06T11:30:00Z", now).unwrap().0, "30m ago");
+        assert_eq!(humanize_ago_from("2026-10-06T09:00:00Z", now).unwrap().0, "3h ago");
+        assert_eq!(humanize_ago_from("2026-10-03T12:00:00Z", now).unwrap().0, "3d ago");
+        assert_eq!(humanize_ago_from("2026-08-06T12:00:00Z", now).unwrap().0, "2mo ago");
+        assert_eq!(humanize_ago_from("2024-10-06T12:00:00Z", now).unwrap().0, "2y ago");
+    }
+
+    #[test]
+    fn humanize_returns_exact_date() {
+        let now = datetime!(2026-10-06 12:00:00 UTC);
+        let (human, exact) = humanize_ago_from("2026-10-03T08:15:00Z", now).unwrap();
+        assert_eq!(human, "3d ago");
+        assert_eq!(exact, "2026-10-03");
+    }
+
+    #[test]
+    fn humanize_rejects_garbage() {
+        assert!(humanize_ago_from("not a date", datetime!(2026-10-06 12:00:00 UTC)).is_none());
     }
 }

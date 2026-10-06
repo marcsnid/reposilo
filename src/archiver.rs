@@ -41,6 +41,10 @@ pub struct RefreshSummary {
     pub pruned: Vec<String>,
     /// True when the remote could not be reached at all.
     pub remote_unavailable: bool,
+    /// Commit count in the new branch snapshot, when a compare was available.
+    pub branch_commits: Option<u64>,
+    /// Markdown changelog for the new branch snapshot (commit readout).
+    pub branch_changelog: Option<String>,
 }
 
 /// Make a string safe to use as a single filesystem path component.
@@ -48,6 +52,23 @@ pub fn sanitize(s: &str) -> String {
     s.chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
         .collect()
+}
+
+/// Render a branch-snapshot changelog from a GitHub compare result.
+fn render_branch_changelog(info: &crate::forgeapi::CompareInfo) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("**{} commit(s)**", info.total_commits));
+    if info.files_changed > 0 {
+        out.push_str(&format!(" · **{} file(s) changed**", info.files_changed));
+    }
+    if !info.html_url.is_empty() {
+        out.push_str(&format!(" · [view on GitHub]({})", info.html_url));
+    }
+    out.push_str("\n\n");
+    for c in &info.commits {
+        out.push_str(&format!("- `{}` {} · {} ({})\n", c.sha, c.message, c.author, c.date));
+    }
+    out
 }
 
 /// Best-effort changelog for a release: GitHub release notes, or the
@@ -279,14 +300,22 @@ impl Archiver {
             .ok()
             .and_then(|tree| crate::files::detect_language(&tree));
         // forge enrichment (GitHub: stars, topics → suggested tags, description)
-        let (stars, suggested_tags) = match crate::forgeapi::github_repo_meta(&self.cfg, url).await {
+        let (stars, suggested_tags, avatar_url) = match crate::forgeapi::github_repo_meta(&self.cfg, url).await {
             Some(meta) => {
                 if description.is_none() {
                     description = meta.description;
                 }
-                (Some(meta.stars), meta.topics)
+                (Some(meta.stars), meta.topics, meta.avatar_url)
             }
-            None => (None, Vec::new()),
+            None => (None, Vec::new(), None),
+        };
+
+        // "take on suggested tags": keep manual tags, then add the forge's
+        // suggested topics (case-insensitively deduped) when enabled.
+        let manifest_tags = if self.cfg.tags.take_suggested {
+            crate::tagging::merge_suggested(tags, &suggested_tags)
+        } else {
+            tags.to_vec()
         };
 
         let manifest = RepoManifest {
@@ -294,7 +323,7 @@ impl Archiver {
             forge: info.kind.id().to_string(),
             name: info.name.clone(),
             added: now_rfc3339(),
-            tags: tags.to_vec(),
+            tags: manifest_tags,
             description,
             language,
             stars,
@@ -306,12 +335,22 @@ impl Archiver {
             notes,
             remote_state: None,
             unavailable_since: None,
+            color: None,
             unidentified: false,
         };
         crate::types::write_json(&manifest_path, &manifest)?;
 
+        // store the owner avatar locally so the repo icon survives the remote
+        if self.cfg.github.fetch_avatars {
+            if let Some(avatar) = avatar_url {
+                if let Some(bytes) = crate::forgeapi::fetch_avatar(&avatar).await {
+                    let _ = fs::write(repo_dir.join("icon"), bytes);
+                }
+            }
+        }
+
         if self.cfg.scheduler.run_on_add {
-            self.snapshot_ref(repo_dir, git_dir, rel, &info.name, url, &branch, SnapshotKind::Branch, None, None)
+            self.snapshot_ref(repo_dir, git_dir, rel, &info.name, url, &branch, SnapshotKind::Branch, None, None, None)
                 .await
                 .context("failed to snapshot default branch")?;
 
@@ -320,7 +359,7 @@ impl Archiver {
                     Ok(_) => {
                         let version = tag.trim_start_matches(['v', 'V']);
                         let mut sc = self
-                            .snapshot_ref(repo_dir, git_dir, rel, &info.name, url, &tag, SnapshotKind::Release, Some(version), None)
+                            .snapshot_ref(repo_dir, git_dir, rel, &info.name, url, &tag, SnapshotKind::Release, Some(version), None, None)
                             .await
                             .context("failed to archive release")?;
                         if let Err(e) = self.sync_release_assets(repo_dir, &mut sc).await {
@@ -410,6 +449,7 @@ impl Archiver {
         kind: SnapshotKind,
         version: Option<&str>,
         rev: Option<&str>, // commit-ish to archive; defaults to `label`
+        changelog_override: Option<&str>, // branch snapshots pass a compare readout
     ) -> Result<SnapshotSidecar> {
         let shallow = git_dir.to_path_buf();
         let rev = rev.unwrap_or(label);
@@ -438,8 +478,11 @@ impl Archiver {
         let zip_path = zip_dir.join(&zip_name);
         let committed_at = git(self.cfg.git.timeout_secs, &["log", "-1", "--format=%cI", rev], Some(&shallow)).await.ok();
 
-        // changelog: forge release notes first, then CHANGELOG.md at the tag
-        let changelog = if matches!(kind, SnapshotKind::Release) {
+        // changelog: an explicit branch readout wins, else forge release notes
+        // first, then CHANGELOG.md at the tag (releases only)
+        let changelog = if let Some(c) = changelog_override {
+            Some(c.chars().take(32 * 1024).collect::<String>())
+        } else if matches!(kind, SnapshotKind::Release) {
             fetch_changelog(&self.cfg, origin, git_dir, label, version)
                 .await
                 .map(|c| c.chars().take(32 * 1024).collect::<String>())
@@ -695,6 +738,26 @@ impl Archiver {
         let name = manifest.name.clone();
         let mirror = shallow.is_dir(); // full-mirror mode keeps a persistent git store
 
+        // backfill the owner avatar for archives created before icon support
+        // (GitHub only; a zero-byte `icon` marks "checked, no avatar")
+        if self.cfg.github.fetch_avatars
+            && !repo_dir.join("icon").exists()
+            && matches!(crate::forge::detect(&origin), Ok(info) if info.kind == crate::forge::ForgeKind::GitHub)
+        {
+            if let Some(meta) = crate::forgeapi::github_repo_meta(&self.cfg, &origin).await {
+                match meta.avatar_url {
+                    Some(url) => {
+                        if let Some(bytes) = crate::forgeapi::fetch_avatar(&url).await {
+                            let _ = fs::write(repo_dir.join("icon"), bytes);
+                        }
+                    }
+                    None => {
+                        let _ = fs::write(repo_dir.join("icon"), b"");
+                    }
+                }
+            }
+        }
+
         // Probe the remote first (cheap). If it's gone entirely, record that
         // state on the manifest and keep the local archive untouched.
         let head_out = git(self.cfg.git.timeout_secs, &["ls-remote", "--symref", &origin, "HEAD"], None).await;
@@ -805,10 +868,23 @@ impl Archiver {
             }
         }
 
-        // branch snapshot
+        // branch snapshot, with a commit-level changelog when the forge can
+        // compare the previous and new commits (GitHub only for now)
         if branch_changed {
-            self.snapshot_ref(repo_dir, git_dir, &rel, &name, &origin, &branch, SnapshotKind::Branch, None, None)
+            let changelog = if !local_sha.is_empty() && !remote_branch_sha.is_empty() {
+                match crate::forgeapi::github_compare(&self.cfg, &origin, &local_sha, &remote_branch_sha).await {
+                    Some(info) => {
+                        summary.branch_commits = Some(info.total_commits);
+                        Some(render_branch_changelog(&info))
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            };
+            self.snapshot_ref(repo_dir, git_dir, &rel, &name, &origin, &branch, SnapshotKind::Branch, None, None, changelog.as_deref())
                 .await?;
+            summary.branch_changelog = changelog;
             summary.new_branch_snapshot = true;
         }
 
@@ -818,7 +894,7 @@ impl Archiver {
                 if self.fetch_tag(git_dir, &origin, &tag).await.is_ok() {
                     let version = tag.trim_start_matches(['v', 'V']);
                     let mut sc = self
-                        .snapshot_ref(repo_dir, git_dir, &rel, &name, &origin, &tag, SnapshotKind::Release, Some(version), None)
+                        .snapshot_ref(repo_dir, git_dir, &rel, &name, &origin, &tag, SnapshotKind::Release, Some(version), None, None)
                         .await?;
                     if let Err(e) = self.sync_release_assets(repo_dir, &mut sc).await {
                         tracing::warn!(repo = %rel, error = %format!("{e:#}"), "release asset sync failed");
@@ -1031,6 +1107,34 @@ mod tests {
     fn sanitize_keeps_safe_chars() {
         assert_eq!(sanitize("feature/abc-def"), "feature_abc-def");
         assert_eq!(sanitize("sm64"), "sm64");
+    }
+
+    #[test]
+    fn branch_changelog_lists_commits_and_summary() {
+        let info = crate::forgeapi::CompareInfo {
+            total_commits: 2,
+            files_changed: 5,
+            html_url: "https://github.com/o/r/compare/a...b".into(),
+            commits: vec![
+                crate::forgeapi::CompareCommit {
+                    sha: "abc1234".into(),
+                    message: "fix the thing".into(),
+                    author: "Alice".into(),
+                    date: "2026-10-01".into(),
+                },
+                crate::forgeapi::CompareCommit {
+                    sha: "def5678".into(),
+                    message: "add feature".into(),
+                    author: "Bob".into(),
+                    date: "2026-10-02".into(),
+                },
+            ],
+        };
+        let md = render_branch_changelog(&info);
+        assert!(md.contains("**2 commit(s)**"), "{md}");
+        assert!(md.contains("**5 file(s) changed**"), "{md}");
+        assert!(md.contains("abc1234"), "{md}");
+        assert!(md.contains("add feature"), "{md}");
     }
 
     /// With no configured platforms, asset syncing must not touch the network

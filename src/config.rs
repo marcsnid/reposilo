@@ -20,6 +20,16 @@ pub struct Config {
     pub releases: ReleasesCfg,
     pub llm: LlmCfg,
     pub otel: OtelCfg,
+    pub tags: TagsCfg,
+}
+
+/// Tag-related behavior.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TagsCfg {
+    /// When true, forge-suggested tags (e.g. GitHub topics) are applied to a
+    /// repo's normal tag list automatically, alongside any manual tags.
+    pub take_suggested: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,12 +192,21 @@ pub fn resolve_token(token: Option<&str>) -> Option<String> {
     (!resolved.is_empty()).then_some(resolved)
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GithubCfg {
     /// Token for GitHub API suggestions. Supports "env:VAR" indirection
     /// so the secret never has to live in this file.
     pub token: Option<String>,
+    /// Download the repo owner's avatar and store it as the repo icon.
+    /// Disable to avoid the extra API call / storage (true by default).
+    pub fetch_avatars: bool,
+}
+
+impl Default for GithubCfg {
+    fn default() -> Self {
+        Self { token: None, fetch_avatars: true }
+    }
 }
 
 impl GithubCfg {
@@ -321,11 +340,25 @@ mod tests {
     }
 
     #[test]
+    fn github_fetch_avatars_defaults_true_and_parses_false() {
+        assert!(Config::default().github.fetch_avatars);
+        let cfg: Config = toml::from_str("[github]\nfetch_avatars = false\n").unwrap();
+        assert!(!cfg.github.fetch_avatars);
+    }
+
+    #[test]
+    fn tags_take_suggested_parses() {
+        let cfg: Config = toml::from_str("[tags]\ntake_suggested = true\n").unwrap();
+        assert!(cfg.tags.take_suggested);
+        assert!(!Config::default().tags.take_suggested);
+    }
+
+    #[test]
     fn env_token_indirection() {
         std::env::set_var("REPOSILO_TEST_TOKEN", "s3cret");
-        let cfg: GithubCfg = GithubCfg { token: Some("env:REPOSILO_TEST_TOKEN".into()) };
+        let cfg: GithubCfg = GithubCfg { token: Some("env:REPOSILO_TEST_TOKEN".into()), ..Default::default() };
         assert_eq!(cfg.resolved_token().as_deref(), Some("s3cret"));
-        let missing = GithubCfg { token: Some("env:REPOSILO_TEST_TOKEN_MISSING".into()) };
+        let missing = GithubCfg { token: Some("env:REPOSILO_TEST_TOKEN_MISSING".into()), ..Default::default() };
         assert!(missing.resolved_token().is_none());
     }
 }

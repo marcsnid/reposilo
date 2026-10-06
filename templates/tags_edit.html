@@ -1,27 +1,31 @@
 <div class="tag-editor" id="tag-editor">
   <div class="chips">
     {% for t in ctx.tags %}
-    <form class="chip-form" hx-post="/repos/{{ ctx.rel }}/tags" hx-target="#tag-editor" hx-swap="outerHTML">
+    <form class="chip-form" hx-post="/repos/{{ ctx.rel }}/tags" hx-target="#tag-editor" hx-swap="outerHTML" hx-indicator="find .spinner">
       <input type="hidden" name="op" value="remove">
       <input type="hidden" name="value" value="{{ t }}">
-      <button type="submit" class="chip active">#{{ t }} <b>×</b></button>
+      <button type="submit" class="chip active"><span class="spinner htmx-indicator"></span>#{{ t }} <b>×</b></button>
     </form>
     {% endfor %}
-    {% if ctx.tags.is_empty() %}<span class="dim">no tags yet</span>{% endif %}
+    {% if ctx.tags.is_empty() %}<span class="dim">No tags yet</span>{% endif %}
   </div>
-  <form class="tag-add" hx-post="/repos/{{ ctx.rel }}/tags" hx-target="#tag-editor" hx-swap="outerHTML">
+  <form class="tag-add" hx-post="/repos/{{ ctx.rel }}/tags" hx-target="#tag-editor" hx-swap="outerHTML" hx-indicator="find .spinner">
     <input type="hidden" name="op" value="add">
     <input type="text" name="value" placeholder="add tag…" required maxlength="64">
-    <button type="submit">Add</button>
+    <button type="submit"><span class="spinner htmx-indicator"></span>Add</button>
   </form>
   {% if !ctx.suggested_tags.is_empty() %}
   <h2>Suggested</h2>
   <div class="chips">
+    <form class="chip-form" hx-post="/repos/{{ ctx.rel }}/tags" hx-target="#tag-editor" hx-swap="outerHTML" hx-indicator="find .spinner">
+      <input type="hidden" name="op" value="add_suggested">
+      <button type="submit" class="chip suggested-all"><span class="spinner htmx-indicator"></span>Add all</button>
+    </form>
     {% for t in ctx.suggested_tags %}
-    <form class="chip-form" hx-post="/repos/{{ ctx.rel }}/tags" hx-target="#tag-editor" hx-swap="outerHTML">
+    <form class="chip-form" hx-post="/repos/{{ ctx.rel }}/tags" hx-target="#tag-editor" hx-swap="outerHTML" hx-indicator="find .spinner">
       <input type="hidden" name="op" value="add">
       <input type="hidden" name="value" value="{{ t }}">
-      <button type="submit" class="chip">+ #{{ t }}</button>
+      <button type="submit" class="chip"><span class="spinner htmx-indicator"></span>+ #{{ t }}</button>
     </form>
     {% endfor %}
   </div>

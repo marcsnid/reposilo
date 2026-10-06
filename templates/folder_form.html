@@ -1,49 +1,55 @@
-<div class="panel folder-form" id="folder-form">
-  {% if ctx.mode == "new" %}
-  <form hx-post="/folders/create" hx-target="#folder-form" hx-swap="outerHTML">
-    <div class="settings-row"><label>Name</label>
-      <input type="text" name="name" required maxlength="64" placeholder="e.g. games, tools, docs…"></div>
-    <div class="settings-row"><label>Parent</label>
-      <select name="parent">
-        <option value="">(archive root)</option>
-        {% for p in ctx.parents %}
-        <option value="{{ p }}">{{ p }}</option>
-        {% endfor %}
-      </select></div>
-    <p class="note">Nested folders use full paths, e.g. create "cli" with parent "rust" for rust/cli.</p>
-  {% else %}
-  <form hx-post="{{ ctx.update_url }}" hx-target="#folder-form" hx-swap="outerHTML">
-    <div class="settings-row"><label>Name</label>
-      <input type="text" name="name" required maxlength="64" value="{{ ctx.name }}"></div>
-    <p class="note">{{ ctx.rel }} <span class="count">{{ ctx.count }}</span></p>
-  {% endif %}
-    <div class="settings-row"><label>Icon</label>
-      <input type="text" name="icon" id="folder-icon" maxlength="8" value="{{ ctx.icon }}" placeholder="emoji, blank = colored dot"></div>
-    <div class="emoji-pick">
-      <button type="button" onclick="document.getElementById('folder-icon').value='🎮'">🎮</button>
-      <button type="button" onclick="document.getElementById('folder-icon').value='🕹️'">🕹️</button>
-      <button type="button" onclick="document.getElementById('folder-icon').value='🧩'">🧩</button>
-      <button type="button" onclick="document.getElementById('folder-icon').value='🔧'">🔧</button>
-      <button type="button" onclick="document.getElementById('folder-icon').value='🛠️'">🛠️</button>
-      <button type="button" onclick="document.getElementById('folder-icon').value='📚'">📚</button>
-      <button type="button" onclick="document.getElementById('folder-icon').value='🎨'">🎨</button>
-      <button type="button" onclick="document.getElementById('folder-icon').value='🎵'">🎵</button>
-      <button type="button" onclick="document.getElementById('folder-icon').value='🖥️'">🖥️</button>
-      <button type="button" onclick="document.getElementById('folder-icon').value='💾'">💾</button>
-      <button type="button" onclick="document.getElementById('folder-icon').value='📦'">📦</button>
-      <button type="button" onclick="document.getElementById('folder-icon').value='🌐'">🌐</button>
-      <button type="button" onclick="document.getElementById('folder-icon').value='🔬'">🔬</button>
-      <button type="button" onclick="document.getElementById('folder-icon').value='⚙️'">⚙️</button>
-      <button type="button" onclick="document.getElementById('folder-icon').value='🗂️'">🗂️</button>
-      <button type="button" onclick="document.getElementById('folder-icon').value='⭐'">⭐</button>
-      <button type="button" title="colored dot" onclick="document.getElementById('folder-icon').value=''">●</button>
-    </div>
-    <div class="form-buttons">
-      <button type="submit" name="op" value="save">{% if ctx.mode == "new" %}Create folder{% else %}Save{% endif %}</button>
-      <button type="button" class="dim-btn" hx-get="/folders/close" hx-target="#folder-form-slot" hx-swap="innerHTML">Cancel</button>
-      {% if ctx.mode == "edit" && ctx.count == 0 %}
-      <button type="submit" name="op" value="delete" class="dim-btn">Delete folder</button>
-      {% endif %}
-    </div>
-  </form>
+<div class="modal-backdrop" id="folder-modal" onclick="if(event.target===this)this.remove()">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="folder-modal-title">
+    <h2 id="folder-modal-title">{% if ctx.mode == "new" %}New folder{% else %}Edit folder{% endif %}</h2>
+    {% if ctx.mode == "new" %}
+    <form hx-post="/folders/create" hx-target="#folder-form-error" hx-swap="innerHTML">
+      <div class="settings-row"><label for="folder-name">Name</label>
+        <input id="folder-name" type="text" name="name" required maxlength="64" placeholder="e.g. games, tools, docs…" autofocus></div>
+      <div class="settings-row"><label for="folder-parent">Parent</label>
+        <select id="folder-parent" name="parent">
+          <option value="" {% if ctx.parent.is_empty() %}selected{% endif %}>/ (archive root)</option>
+          {% for p in ctx.parents %}
+          <option value="{{ p.path }}" {% if p.selected %}selected{% endif %}>{{ p.path }}</option>
+          {% endfor %}
+        </select></div>
+      <p class="note">Nested folders use full paths, e.g. create "cli" with parent "rust" for rust/cli.</p>
+    {% else %}
+    <form hx-post="{{ ctx.update_url }}" hx-target="#folder-form-error" hx-swap="innerHTML">
+      <input type="hidden" name="rel" value="{{ ctx.rel }}">
+      <div class="settings-row"><label for="folder-name">Name</label>
+        <input id="folder-name" type="text" name="name" required maxlength="64" value="{{ ctx.name }}" autofocus></div>
+      <p class="note">{{ ctx.rel }} · <span class="count">{{ ctx.count }} repo(s)</span></p>
+    {% endif %}
+      <div class="settings-row"><label for="folder-icon">Icon</label>
+        <input id="folder-icon" type="text" name="icon" value="{{ ctx.icon }}" placeholder="one emoji, blank = colored dot"
+               oninput="this.value = oneGrapheme(this.value)"></div>
+      <div class="emoji-pick">
+        <button type="button" onclick="document.getElementById('folder-icon').value='🎮'">🎮</button>
+        <button type="button" onclick="document.getElementById('folder-icon').value='🕹️'">🕹️</button>
+        <button type="button" onclick="document.getElementById('folder-icon').value='🧩'">🧩</button>
+        <button type="button" onclick="document.getElementById('folder-icon').value='🔧'">🔧</button>
+        <button type="button" onclick="document.getElementById('folder-icon').value='🛠️'">🛠️</button>
+        <button type="button" onclick="document.getElementById('folder-icon').value='📚'">📚</button>
+        <button type="button" onclick="document.getElementById('folder-icon').value='🎨'">🎨</button>
+        <button type="button" onclick="document.getElementById('folder-icon').value='🎵'">🎵</button>
+        <button type="button" onclick="document.getElementById('folder-icon').value='🖥️'">🖥️</button>
+        <button type="button" onclick="document.getElementById('folder-icon').value='💾'">💾</button>
+        <button type="button" onclick="document.getElementById('folder-icon').value='📦'">📦</button>
+        <button type="button" onclick="document.getElementById('folder-icon').value='🌐'">🌐</button>
+        <button type="button" onclick="document.getElementById('folder-icon').value='🔬'">🔬</button>
+        <button type="button" onclick="document.getElementById('folder-icon').value='⚙️'">⚙️</button>
+        <button type="button" onclick="document.getElementById('folder-icon').value='🗂️'">🗂️</button>
+        <button type="button" onclick="document.getElementById('folder-icon').value='⭐'">⭐</button>
+        <button type="button" title="colored dot" onclick="document.getElementById('folder-icon').value=''">●</button>
+      </div>
+      <div id="folder-form-error"></div>
+      <div class="modal-actions">
+        <button type="button" class="dim-btn" hx-get="/folders/close" hx-target="#modal-root" hx-swap="innerHTML">Cancel</button>
+        {% if ctx.mode == "edit" && ctx.count == 0 %}
+        <button type="submit" name="op" value="delete" class="refresh-btn danger">Delete folder</button>
+        {% endif %}
+        <button type="submit" name="op" value="save" class="refresh-btn">{% if ctx.mode == "new" %}Create folder{% else %}Save{% endif %}</button>
+      </div>
+    </form>
+  </div>
 </div>

@@ -30,8 +30,15 @@ timeout_secs = 600
 platforms = ["darwin-arm64", "linux-x64"]
 # max_asset_mb = 0
 
+# Automatically adopt forge-suggested tags (e.g. GitHub topics) in addition
+# to any tags you pass at add time.
+[tags]
+take_suggested = false
+
 [github]
 # token = "env:GITHUB_TOKEN"
+# Download the repo owner's avatar as the repo icon (default true).
+# fetch_avatars = true
 
 [gitlab]
 # token = "env:GITLAB_TOKEN"

@@ -3,9 +3,8 @@
 {% block content %}
 <div class="detail narrow">
   <div class="detail-head"><h1>Settings</h1></div>
-  {% if ctx.saved %}<div class="job-status ok">Saved &#10003; (applied live where possible)</div>{% endif %}
 
-  <form class="settings-form" hx-post="/settings" hx-target="#settings-area" hx-swap="outerHTML">
+  <form class="settings-form" hx-post="/settings" hx-target="#settings-area" hx-swap="outerHTML" hx-indicator="find .spinner">
     <div id="settings-area">
     <section class="panel">
       <h2>Retention</h2>
@@ -14,6 +13,20 @@
         <input type="number" name="keep_branch" value="{{ ctx.keep_branch }}" min="-1"></div>
       <div class="settings-row"><label>Releases to keep</label>
         <input type="number" name="keep_releases" value="{{ ctx.keep_releases }}" min="-1"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Tags</h2>
+      <div class="settings-row"><label>Take on suggested tags</label>
+        <input type="checkbox" name="take_suggested_tags" value="1" {% if ctx.take_suggested_tags %}checked{% endif %}></div>
+      <p class="note">When enabled, forge-suggested tags (e.g. GitHub topics) are added to a repo automatically, alongside any tags you enter yourself.</p>
+    </section>
+
+    <section class="panel">
+      <h2>Repository icons</h2>
+      <div class="settings-row"><label>Fetch repo icons</label>
+        <input type="checkbox" name="fetch_avatars" value="1" {% if ctx.fetch_avatars %}checked{% endif %}></div>
+      <p class="note">Download the repo owner's GitHub avatar and store it in the archive as the repo icon. Disable to skip the extra API call and storage; existing icons are kept.</p>
     </section>
 
     <section class="panel">
@@ -84,7 +97,7 @@
       <div class="settings-row"><label>Archive root</label><input type="text" value="{{ ctx.archive_root }}" disabled></div>
     </section>
 
-    <button type="submit" class="refresh-btn">Save settings</button>
+    <button type="submit" class="refresh-btn"><span class="spinner htmx-indicator"></span>Save settings</button>
     </div>
   </form>
 
@@ -93,14 +106,14 @@
     <p class="note">Runs the configured llama.cpp over all untagged repos (batched, README-based). Configure the endpoint above first.</p>
     <button class="refresh-btn"
       hx-post="/api/autotag" hx-swap="none"
-      onclick="this.disabled=true; this.textContent='tagging… (check the bell icon in a few minutes)'">
-      Tag untagged repos now</button>
+      hx-indicator="find .spinner" hx-disabled-elt="this"><span class="spinner htmx-indicator"></span>Tag untagged repos now</button>
   </section>
 
   <section class="panel">
     <h2>Archive integrity</h2>
+    <p class="note">Checks every stored zip against its sidecar hash. Progress and the result appear in the status area at the bottom.</p>
     <button class="refresh-btn"
-      hx-post="/settings/verify" hx-target="#verify-area" hx-swap="innerHTML">Verify archive</button>
+      hx-post="/settings/verify" hx-target="#toast" hx-swap="innerHTML" hx-indicator="find .spinner"><span class="spinner htmx-indicator"></span>Verify archive</button>
     <div id="verify-area"></div>
   </section>
 

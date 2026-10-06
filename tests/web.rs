@@ -317,6 +317,11 @@ async fn folder_management_flow() -> Result<()> {
         .send()
         .await?;
     assert_eq!(resp.status(), 200);
+    let created = resp.text().await?;
+    assert!(
+        created.contains("hx-swap-oob=\"delete\""),
+        "a successful create must close the modal: {created}"
+    );
     // folder.json on disk carries the icon
     let fm: serde_json::Value = serde_json::from_str(&fs::read_to_string(
         tmp.path().join("archive/games/folder.json"),
@@ -326,6 +331,42 @@ async fn folder_management_flow() -> Result<()> {
     let page = client.get(format!("{base}/")).send().await?.text().await?;
     assert!(page.contains("games"), "{page}");
     assert!(page.contains("🎮"), "{page}");
+
+    // the edit form must carry the folder path so save/rename works (regression:
+    // the hidden `rel` field was missing, so updates failed with "no such folder")
+    let form = client
+        .get(format!("{base}/folders/edit?rel=games"))
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert!(form.contains(r#"name="rel" value="games""#), "edit form must resubmit rel: {form}");
+    assert!(form.contains("modal-backdrop"), "folder edit should be a modal: {form}");
+    assert!(form.contains("id=\"folder-modal\""), "{form}");
+    assert!(form.contains("id=\"folder-form-error\""), "errors stay inside the modal: {form}");
+
+    // a new folder defaults its parent to the folder currently open
+    let new_form = client
+        .get(format!("{base}/folders/new?parent=games"))
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert!(
+        new_form.contains(r#"<option value="games" selected>"#),
+        "the open folder should be preselected as parent: {new_form}"
+    );
+
+    // an icon longer than one character is trimmed to a single grapheme
+    let resp = client
+        .post(format!("{base}/folders/create"))
+        .form(&[("parent", ""), ("name", "wordy"), ("icon", "hello")])
+        .send()
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let wm: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(tmp.path().join("archive/wordy/folder.json"))?)?;
+    assert_eq!(wm["icon"], "h");
 
     // nested folder: decomp under games
     let resp = client
@@ -482,30 +523,45 @@ async fn repo_delete_ui_confirms_then_deletes() -> Result<()> {
         .await?;
     wait_jobs_done(&base).await;
 
-    // the detail page offers a Danger zone delete
+    // the detail page offers an Actions panel with delete + force refresh
     let detail = client
         .get(format!("{base}/repos/remotes-delproj"))
         .send()
         .await?
         .text()
         .await?;
-    assert!(detail.contains("Danger zone"), "{detail}");
+    assert!(detail.contains("Actions"), "{detail}");
+    assert!(detail.contains("Force Refresh"), "{detail}");
     assert!(detail.contains("/repos/remotes-delproj/delete"), "{detail}");
 
-    // the confirm fragment asks, and offers the extra file-delete check
+    // the confirm modal asks for the repo name and offers the extra file check
     let confirm = client
         .get(format!("{base}/repos/remotes-delproj/delete"))
         .send()
         .await?;
     assert_eq!(confirm.status(), 200);
     let body = confirm.text().await?;
-    assert!(body.contains("also permanently delete the archive files"), "{body}");
+    assert!(body.contains("modal-backdrop"), "{body}");
+    assert!(body.contains("Are you sure you want to delete"), "{body}");
+    assert!(body.contains("This is irreversible."), "{body}");
+    assert!(body.contains("name=\"confirm\""), "{body}");
+    assert!(body.contains("Permanently delete the archive files"), "{body}");
     assert!(body.contains("name=\"files\""), "{body}");
 
-    // POST without the check => unregister only, snapshot files stay
+    // a wrong/missing typed name must be refused and must not touch the repo
+    let bad = client
+        .post(format!("{base}/repos/remotes-delproj/delete"))
+        .form(&[("files", "0"), ("confirm", "not-the-name")])
+        .send()
+        .await?;
+    assert_eq!(bad.status(), 200);
+    assert!(bad.text().await?.contains("Type the repository name exactly"), "mismatch refused");
+    assert!(archive.join("remotes-delproj").join("repo.json").exists(), "repo must survive a mismatch");
+
+    // POST with the typed name, no file check => unregister only, files stay
     let del = client
         .post(format!("{base}/repos/remotes-delproj/delete"))
-        .form(&[("files", "0")])
+        .form(&[("files", "0"), ("confirm", "delproj")])
         .send()
         .await?;
     assert_eq!(del.status(), 200);
@@ -544,7 +600,7 @@ async fn repo_delete_ui_with_files_removes_the_directory() -> Result<()> {
 
     let del = client
         .post(format!("{base}/repos/remotes-purgeproj/delete"))
-        .form(&[("files", "1")])
+        .form(&[("files", "1"), ("confirm", "purgeproj")])
         .send()
         .await?;
     assert_eq!(del.status(), 200);
@@ -803,6 +859,8 @@ async fn settings_verify_button_reports_integrity() -> Result<()> {
     let settings = client.get(format!("{base}/settings")).send().await?.text().await?;
     assert!(settings.contains("Archive integrity"), "settings should offer verify");
     assert!(settings.contains("hx-post=\"/settings/verify\""));
+    // verify progress is surfaced in the bottom toast
+    assert!(settings.contains("hx-post=\"/settings/verify\" hx-target=\"#toast\""), "{settings}");
 
     // clean archive -> all good
     let first = client
@@ -811,9 +869,15 @@ async fn settings_verify_button_reports_integrity() -> Result<()> {
         .await?
         .text()
         .await?;
+    assert!(first.contains("spinner"), "running verify should show the spinner: {first}");
+    assert!(
+        first.contains("id=\"verify-area\" hx-swap-oob=\"innerHTML\""),
+        "the report area must be updated out-of-band: {first}"
+    );
     let report = wait_verify_done(&base, extract_verify_id(&first)).await;
-    assert!(report.contains("verified 1"), "expected a clean report: {report}");
-    assert!(!report.contains("problem"), "clean report should have no problems: {report}");
+    assert!(report.contains("Verified 1"), "expected a clean report: {report}");
+    assert!(report.contains("No problems found"), "expected the clean note: {report}");
+    assert!(!report.contains("badge danger"), "clean report should have no problem rows: {report}");
 
     // corrupt the zip -> the next verify flags it
     fs::write(rel.join("demo-v1.0.0.zip"), b"tampered!")?;
@@ -826,5 +890,214 @@ async fn settings_verify_button_reports_integrity() -> Result<()> {
     let report = wait_verify_done(&base, extract_verify_id(&second)).await;
     assert!(report.contains("problem"), "expected problems: {report}");
     assert!(report.contains("sha256") || report.contains("size"), "expected a hash/size flag: {report}");
+    Ok(())
+}
+
+/// "Add all suggested" must adopt every forge/LLM suggestion at once while
+/// keeping the repo's own tags.
+#[tokio::test]
+async fn add_all_suggested_tags_merges_them() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    let repo = root.join("owner-demo");
+    fs::create_dir_all(&repo)?;
+    fs::write(
+        repo.join("repo.json"),
+        r#"{"forge":"github","name":"demo","added":"2025-01-01T00:00:00Z","default_branch":"main","tags":["manual"],"suggested_tags":["cli","rust","tooling"]}"#,
+    )?;
+
+    let (base, _st) = spawn_server(test_cfg(&root)).await;
+    let client = reqwest::Client::new();
+
+    // before: the purple "Add all" pill leads the suggested row
+    let before = client.get(format!("{base}/repos/owner-demo")).send().await?.text().await?;
+    assert!(before.contains("suggested-all"), "expected an Add all pill: {before}");
+    assert!(before.contains(">Add all</button>"), "{before}");
+
+    let body = client
+        .post(format!("{base}/repos/owner-demo/tags"))
+        .form(&[("op", "add_suggested")])
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert!(body.contains("#cli"), "{body}");
+    assert!(body.contains("#rust"), "{body}");
+    assert!(body.contains("#tooling"), "{body}");
+    assert!(!body.contains("suggested-all"), "suggestions should all be adopted: {body}");
+
+    let m: serde_json::Value = serde_json::from_str(&fs::read_to_string(repo.join("repo.json"))?)?;
+    let tags: Vec<String> =
+        m["tags"].as_array().unwrap().iter().map(|t| t.as_str().unwrap().to_string()).collect();
+    assert_eq!(tags, vec!["cli", "manual", "rust", "tooling"]);
+    Ok(())
+}
+
+/// The gallery offers grid/list view toggles (rendered server-side; the
+/// choice itself is client-side via localStorage).
+#[tokio::test]
+async fn index_offers_grid_and_list_view_toggles() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let archive = tmp.path().join("archive");
+    fs::create_dir_all(&archive)?;
+    let (base, _st) = spawn_server(test_cfg(&archive)).await;
+    let client = reqwest::Client::new();
+
+    let html = client.get(format!("{base}/")).send().await?.text().await?;
+    assert!(html.contains("class=\"view-toggle\""), "{html}");
+    assert!(html.contains("data-view=\"grid\""), "{html}");
+    assert!(html.contains("data-view=\"list\""), "{html}");
+    assert!(html.contains("setView('list')"), "{html}");
+
+    // the swapped fragment carries the toggles too
+    let frag = client
+        .get(format!("{base}/"))
+        .header("HX-Request", "true")
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert!(frag.contains("class=\"view-toggle\""), "{frag}");
+    Ok(())
+}
+
+/// Gallery cards expose hover quick actions: force-refresh and open-origin.
+#[tokio::test]
+async fn gallery_card_has_quick_actions() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    let repo = root.join("owner-demo");
+    fs::create_dir_all(&repo)?;
+    fs::write(
+        repo.join("repo.json"),
+        r#"{"forge":"github","name":"demo","added":"2025-01-01T00:00:00Z","default_branch":"main","origin":"https://github.com/owner/demo.git"}"#,
+    )?;
+
+    let (base, _st) = spawn_server(test_cfg(&root)).await;
+    let client = reqwest::Client::new();
+    let html = client.get(format!("{base}/")).send().await?.text().await?;
+
+    assert!(html.contains("card-actions"), "card actions missing: {html}");
+    assert!(html.contains(r#"hx-post="/repos/owner-demo/refresh""#), "{html}");
+    assert!(html.contains(r#"href="https://github.com/owner/demo.git""#), "{html}");
+
+    // unidentified repos (no origin) only get the refresh action
+    let mystery = root.join("_unknown/mystery");
+    fs::create_dir_all(&mystery)?;
+    fs::write(
+        mystery.join("repo.json"),
+        r#"{"forge":"generic","name":"mystery","added":"2025-01-01T00:00:00Z","default_branch":"main","unidentified":true}"#,
+    )?;
+    let (base2, _st2) = spawn_server(test_cfg(&root)).await;
+    let page = reqwest::get(format!("{base2}/")).await?.text().await?;
+    assert!(page.contains(r#"hx-post="/repos/_unknown/mystery/refresh""#), "{page}");
+    assert_eq!(
+        page.matches(r#"title="Open origin""#).count(),
+        1,
+        "only the repo with an origin gets the action: {page}"
+    );
+    Ok(())
+}
+
+/// User-chosen color labels round-trip through the manifest and render as a
+/// colored dot badge on the card and detail header.
+#[tokio::test]
+async fn metadata_color_badge_roundtrips() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    let repo = root.join("owner-demo");
+    fs::create_dir_all(&repo)?;
+    fs::write(
+        repo.join("repo.json"),
+        r#"{"forge":"github","name":"demo","added":"2025-01-01T00:00:00Z","default_branch":"main"}"#,
+    )?;
+
+    let (base, _st) = spawn_server(test_cfg(&root)).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{base}/repos/owner-demo/metadata"))
+        .form(&[("name", "demo"), ("description", ""), ("notes", ""), ("color", "blue")])
+        .send()
+        .await?;
+    assert_eq!(resp.status(), 200);
+
+    let m: serde_json::Value = serde_json::from_str(&fs::read_to_string(repo.join("repo.json"))?)?;
+    assert_eq!(m["color"], "blue");
+
+    let page = client.get(format!("{base}/")).send().await?.text().await?;
+    assert!(page.contains("card tinted"), "card should be tinted: {page}");
+    assert!(page.contains("data-color=\"blue\""), "card should carry the color: {page}");
+    let detail = client.get(format!("{base}/repos/owner-demo")).send().await?.text().await?;
+    assert!(detail.contains("panel tinted"), "About panel should be tinted: {detail}");
+    assert!(detail.contains("data-color=\"blue\""), "About panel should carry the color: {detail}");
+    assert!(detail.contains("name=\"color\""), "metadata should offer color swatches: {detail}");
+
+    // clearing the color removes the badge
+    client
+        .post(format!("{base}/repos/owner-demo/metadata"))
+        .form(&[("name", "demo"), ("description", ""), ("notes", ""), ("color", "")])
+        .send()
+        .await?;
+    let m2: serde_json::Value = serde_json::from_str(&fs::read_to_string(repo.join("repo.json"))?)?;
+    assert!(m2["color"].is_null(), "empty color should clear the badge: {m2}");
+    Ok(())
+}
+
+/// A stored owner avatar is served from the archive and shown on the card and
+/// detail header. Repos without one 404 and show no icon.
+#[tokio::test]
+async fn repo_icon_is_stored_and_served() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    let repo = root.join("owner-demo");
+    let plain = root.join("owner-plain");
+    let empty = root.join("owner-empty");
+    fs::create_dir_all(&repo)?;
+    fs::create_dir_all(&plain)?;
+    fs::create_dir_all(&empty)?;
+    fs::write(
+        repo.join("repo.json"),
+        r#"{"forge":"github","name":"demo","added":"2025-01-01T00:00:00Z","default_branch":"main"}"#,
+    )?;
+    fs::write(
+        plain.join("repo.json"),
+        r#"{"forge":"github","name":"plain","added":"2025-01-01T00:00:00Z","default_branch":"main"}"#,
+    )?;
+    fs::write(
+        empty.join("repo.json"),
+        r#"{"forge":"github","name":"empty","added":"2025-01-01T00:00:00Z","default_branch":"main"}"#,
+    )?;
+    let icon: &[u8] = b"\x89PNG\r\n\x1a\nfake-avatar-bytes";
+    fs::write(repo.join("icon"), icon)?;
+    // zero-byte marker = "checked, no avatar" -> not an icon
+    fs::write(empty.join("icon"), b"")?;
+
+    let (base, _st) = spawn_server(test_cfg(&root)).await;
+    let client = reqwest::Client::new();
+
+    let resp = client.get(format!("{base}/repo-icon/owner-demo")).send().await?;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers().get("content-type").unwrap().to_str().unwrap(), "image/png");
+    assert_eq!(resp.bytes().await?.as_ref(), icon);
+
+    let page = client.get(format!("{base}/")).send().await?.text().await?;
+    assert!(page.contains(r#"src="/repo-icon/owner-demo""#), "card icon missing: {page}");
+    assert!(!page.contains(r#"src="/repo-icon/owner-plain""#), "plain repo should have no icon: {page}");
+    assert!(!page.contains(r#"src="/repo-icon/owner-empty""#), "zero-byte marker is not an icon: {page}");
+
+    let detail = client.get(format!("{base}/repos/owner-demo")).send().await?.text().await?;
+    assert!(detail.contains("repo-icon-lg"), "detail icon missing: {detail}");
+    assert!(detail.contains(r#"src="/repo-icon/owner-demo""#), "{detail}");
+
+    assert_eq!(
+        client.get(format!("{base}/repo-icon/owner-plain")).send().await?.status(),
+        404
+    );
+    // a zero-byte marker file must not be served either
+    assert_eq!(
+        client.get(format!("{base}/repo-icon/owner-empty")).send().await?.status(),
+        404
+    );
     Ok(())
 }

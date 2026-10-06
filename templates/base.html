@@ -10,6 +10,8 @@
         var t = localStorage.getItem('rs-theme');
         if (!t) { t = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'; }
         document.documentElement.dataset.theme = t;
+        var v = localStorage.getItem('rs-view');
+        document.documentElement.dataset.view = v === 'list' ? 'list' : 'grid';
       } catch (e) {}
     })();
     function toggleTheme() {
@@ -17,6 +19,34 @@
       var n = d.dataset.theme === 'dark' ? 'light' : 'dark';
       d.dataset.theme = n;
       try { localStorage.setItem('rs-theme', n); } catch (e) {}
+    }
+    function setView(v) {
+      v = v === 'list' ? 'list' : 'grid';
+      document.documentElement.dataset.view = v;
+      try { localStorage.setItem('rs-view', v); } catch (e) {}
+      syncViewButtons();
+    }
+    function syncViewButtons() {
+      var v = document.documentElement.dataset.view === 'list' ? 'list' : 'grid';
+      var btns = document.querySelectorAll('.view-btn');
+      for (var i = 0; i < btns.length; i++) {
+        btns[i].classList.toggle('active', btns[i].dataset.view === v);
+      }
+    }
+    // Keep an icon field to a single visible character (emoji are graphemes
+    // made of several code points, so this uses Intl.Segmenter when present).
+    function oneGrapheme(s) {
+      try {
+        if (window.Intl && Intl.Segmenter) {
+          var seg = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+          var first = seg.segment(s)[Symbol.iterator]().next().value;
+          return first ? first.segment : '';
+        }
+      } catch (e) {}
+      var chars = Array.from(s);
+      var out = chars[0] || '';
+      if (chars[1] && /[\uFE0E\uFE0F\u20E3]/.test(chars[1])) { out += chars[1]; }
+      return out;
     }
     // drag-and-drop: repo cards onto sidebar folders
     function dragRepo(ev) {
@@ -52,14 +82,18 @@
       <details class="add-menu">
         <summary>&#xFF0B; Add repo</summary>
         <div class="add-panel">
-          <form hx-post="/repos/add" hx-target="#add-result" hx-swap="innerHTML">
-            <input name="url" type="url" placeholder="https://github.com/owner/repo.git" required>
-            <input name="tags" placeholder="tags, comma separated (optional)">
-            <input name="folder" list="add-folder-list" placeholder="folder (optional, e.g. tools/rust/cli)">
+          <h4>Add repository</h4>
+          <form hx-post="/repos/add" hx-target="#toast" hx-swap="innerHTML" hx-indicator="find .spinner"
+                hx-on::after-request="this.reset(); this.closest('details').open = false">
+            <label for="add-url">Repository URL</label>
+            <input id="add-url" name="url" type="url" placeholder="https://github.com/owner/repo.git" required>
+            <label for="add-tags">Tags</label>
+            <input id="add-tags" name="tags" placeholder="comma separated (optional)">
+            <label for="add-folder">Folder</label>
+            <input id="add-folder" name="folder" list="add-folder-list" placeholder="e.g. tools/rust (optional)">
             <datalist id="add-folder-list" hx-get="/folders/options" hx-trigger="load" hx-target="this" hx-swap="innerHTML"></datalist>
-            <button type="submit">Archive</button>
+            <button type="submit"><span class="spinner htmx-indicator"></span>Archive</button>
           </form>
-          <div id="add-result"></div>
         </div>
       </details>
       <button class="theme-toggle" onclick="toggleTheme()" title="toggle theme" aria-label="toggle theme">
@@ -78,6 +112,39 @@
     </div>
   </header>
   <div id="toast"></div>
+  <div id="modal-root"></div>
+  <script>
+    // Status messages land in the fixed #toast area at the bottom of the
+    // viewport and fade out once the job is done. htmx swaps fragments in
+    // asynchronously, so always scan the live #toast after a swap (an
+    // outerHTML poll replaces the element, so the event target is stale).
+    (function () {
+      function dismiss(el) {
+        if (!el || el.dataset.toastDismissed) return;
+        el.dataset.toastDismissed = '1';
+        el.classList.add('toast-out');
+        setTimeout(function () { el.remove(); }, 450);
+      }
+      function schedule() {
+        var toast = document.getElementById('toast');
+        if (!toast) return;
+        Array.prototype.forEach.call(toast.children, function (n) {
+          if (n.dataset.toastScheduled) return;
+          // in-progress polls and interactive confirmations stay put
+          if (n.hasAttribute('hx-get') || n.querySelector('form') || n.querySelector('input[type="checkbox"]')) return;
+          n.dataset.toastScheduled = '1';
+          n.classList.add('toast-msg');
+          var delay = (n.classList.contains('import-error') || n.classList.contains('failed')) ? 6000 : 3500;
+          setTimeout(function () { dismiss(n); }, delay);
+        });
+      }
+      document.body.addEventListener('htmx:afterSwap', schedule);
+      document.body.addEventListener('htmx:oobAfterSwap', schedule);
+      document.body.addEventListener('htmx:afterSwap', syncViewButtons);
+      schedule();
+      syncViewButtons();
+    })();
+  </script>
   {% block content %}{% endblock %}
 </body>
 </html>

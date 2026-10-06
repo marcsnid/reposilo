@@ -542,6 +542,7 @@ pub async fn import_one(
             unavailable_since: None,
             suggested_tags: Vec::new(),
             stars: None,
+            color: None,
             unidentified: unknown,
         }
     };

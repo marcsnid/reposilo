@@ -931,6 +931,16 @@ async fn repo_post(
     refresh_repo(&st, &rest).await
 }
 
+/// Human title for a branch-snapshot notification. Uses the forge compare
+/// count when we have it, and falls back to the generic wording otherwise.
+fn snapshot_notification_title(commits: Option<u64>) -> String {
+    match commits {
+        Some(1) => "1 new commit on the default branch".to_string(),
+        Some(n) => format!("{n} new commits on the default branch"),
+        None => "new branch snapshot archived".to_string(),
+    }
+}
+
 /// Shared background job for manual + scheduled refreshes.
 /// Caller must have locked the repo via try_lock_repo; the job unlocks when
 /// it finishes. An optional semaphore permit bounds scheduler concurrency.
@@ -959,7 +969,8 @@ pub async fn spawn_refresh_job(
                     fields.push("new_releases");
                 }
                 if summary.new_branch_snapshot {
-                    st.push_notification("new_snapshot", &rel, "new branch snapshot archived".to_string(), None).await;
+                    let title = snapshot_notification_title(summary.branch_commits);
+                    st.push_notification("new_snapshot", &rel, title, summary.branch_changelog).await;
                     fields.push("new_snapshots");
                 }
                 if summary.remote_unavailable {
@@ -1447,6 +1458,13 @@ mod tests {
     use super::*;
     use crate::types::RepoManifest;
 
+    #[test]
+    fn snapshot_titles_use_the_commit_count() {
+        assert_eq!(snapshot_notification_title(None), "new branch snapshot archived");
+        assert_eq!(snapshot_notification_title(Some(1)), "1 new commit on the default branch");
+        assert_eq!(snapshot_notification_title(Some(17)), "17 new commits on the default branch");
+    }
+
     fn manifest(origin: Option<&str>, last_checked: Option<String>, remote_state: Option<&str>) -> RepoManifest {
         RepoManifest {
             origin: origin.map(str::to_string),
@@ -1465,6 +1483,7 @@ mod tests {
             unavailable_since: None,
             suggested_tags: vec![],
             stars: None,
+            color: None,
             unidentified: false,
         }
     }

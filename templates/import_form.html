@@ -1,4 +1,4 @@
-<form class="import-form" hx-post="/import/scan" hx-target="#import-area">
+<form class="import-form" hx-post="/import/scan" hx-target="#import-area" hx-indicator="find .spinner">
   <input type="text" name="dir" placeholder="/path/to/zip/collection" required size="50">
-  <button type="submit">Scan</button>
+  <button type="submit"><span class="spinner htmx-indicator"></span>Scan</button>
 </form>

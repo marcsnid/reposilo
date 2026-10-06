@@ -48,6 +48,7 @@ pub fn router() -> Router<Arc<AppState>> {
             "/repos/{*rest}",
             get(repo_page).post(repo_post),
         )
+        .route("/repo-icon/{*rel}", get(repo_icon))
         .route("/assets/style.css", get(style_css))
         .route("/assets/htmx.min.js", get(htmx_js))
 }
@@ -62,6 +63,47 @@ async fn oob_app_refresh(st: &Arc<AppState>) -> String {
     let ctx = views::build_list_ctx(st, &[], "", "").await;
     let inner = views::FragmentT { ctx }.render().unwrap_or_default();
     format!(r#"<div id="app" class="app" hx-swap-oob="outerHTML">{inner}</div>"#)
+}
+
+/// Out-of-band success toast: drop a status message into the fixed #toast
+/// area while the main response swaps somewhere else.
+fn oob_toast(msg: &str) -> String {
+    format!(
+        r#"<div id="toast" hx-swap-oob="innerHTML"><div class="job-status ok">{}</div></div>"#,
+        html_escape(msg)
+    )
+}
+
+/// Out-of-band close for a modal (e.g. after a successful form submit).
+fn oob_close_modal(id: &str) -> String {
+    format!(r#"<div id="{id}" hx-swap-oob="delete"></div>"#)
+}
+
+/// Keep only the first visible character of an icon so a pasted word cannot
+/// break the sidebar layout. Emoji are grapheme clusters of several code
+/// points, so variation selectors, ZWJ sequences, keycaps and skin-tone
+/// modifiers that belong to the first character are kept with it.
+fn icon_first_char(icon: &str) -> String {
+    let mut chars = icon.chars();
+    let Some(first) = chars.next() else { return String::new() };
+    let mut out = String::new();
+    out.push(first);
+    let mut rest = chars.peekable();
+    while let Some(&c) = rest.peek() {
+        let joins = matches!(c, '\u{FE0E}' | '\u{FE0F}' | '\u{20E3}' | '\u{200D}')
+            || ('\u{1F3FB}'..='\u{1F3FF}').contains(&c)
+            || matches!(c as u32, 0x0300..=0x036F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0xFE20..=0xFE2F);
+        if !joins {
+            break;
+        }
+        out.push(rest.next().unwrap());
+        if c == '\u{200D}' {
+            if let Some(next) = rest.next() {
+                out.push(next);
+            }
+        }
+    }
+    out
 }
 
 fn render<T: Template>(t: &T) -> Response {
@@ -89,6 +131,39 @@ async fn htmx_js() -> Response {
         Body::from(include_str!("../assets/htmx.min.js")),
     )
         .into_response()
+}
+
+/// GET /repo-icon/{rel}: serve a repo's stored owner avatar (if any).
+async fn repo_icon(State(st): State<Arc<AppState>>, AxPath(rel): AxPath<String>) -> Response {
+    let Some(repo) = st.find_repo(rel.trim_matches('/')).await else {
+        return (StatusCode::NOT_FOUND, "no such repo").into_response();
+    };
+    match tokio::fs::read(repo.dir.join("icon")).await {
+        Ok(bytes) if !bytes.is_empty() => (
+            [
+                (header::CONTENT_TYPE, sniff_image(&bytes)),
+                (header::CACHE_CONTROL, "public, max-age=86400"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        _ => (StatusCode::NOT_FOUND, "no icon").into_response(),
+    }
+}
+
+/// Best-effort image content type from magic bytes (avatars are stored raw).
+fn sniff_image(b: &[u8]) -> &'static str {
+    if b.starts_with(&[0x89, b'P', b'N', b'G']) {
+        "image/png"
+    } else if b.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        "image/jpeg"
+    } else if b.starts_with(b"GIF8") {
+        "image/gif"
+    } else if b.len() > 12 && &b[0..4] == b"RIFF" && &b[8..12] == b"WEBP" {
+        "image/webp"
+    } else {
+        "application/octet-stream"
+    }
 }
 
 /// GET /healthz: unauthenticated liveness probe for containers and monitoring.
@@ -333,6 +408,13 @@ async fn update_tags(
             let v = form.value.trim();
             tags.retain(|t| !t.eq_ignore_ascii_case(v));
         }
+        "add_suggested" => {
+            for t in &manifest.suggested_tags {
+                if !tags.iter().any(|e| e.eq_ignore_ascii_case(t)) {
+                    tags.push(t.clone());
+                }
+            }
+        }
         _ => return (StatusCode::BAD_REQUEST, "bad op").into_response(),
     }
     tags.sort();
@@ -451,6 +533,10 @@ async fn save_metadata_ui(st: &Arc<AppState>, rel: &str, form: HashMap<String, S
         }
         manifest.description = form.get("description").map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
         manifest.notes = form.get("notes").map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        // color radio always submits (empty = no color); a missing field leaves it alone
+        if let Some(c) = form.get("color") {
+            manifest.color = Some(c.trim().to_string()).filter(|s| !s.is_empty());
+        }
         if let Err(e) = crate::types::write_json(&manifest_path, &manifest) {
             st.unlock_repo(rel).await;
             return html(format!(r#"<div class="import-error">cannot save manifest: {e:#}</div>"#));
@@ -464,11 +550,11 @@ async fn save_metadata_ui(st: &Arc<AppState>, rel: &str, form: HashMap<String, S
     let moved = new_rel != repo.rel;
     let oob = oob_app_refresh(st).await;
     let msg = if origin_changed {
-        format!(r#"&#10003; metadata saved: origin set, repo is now <a href="/repos/{new_rel}">{new_rel}</a><br><span class="dim">hit the Refresh button to clone it</span>"#)
+        format!(r#"&#10003; Metadata saved: origin set, repo is now <a href="/repos/{new_rel}">{new_rel}</a><br><span class="dim">Hit Force Refresh to clone it</span>"#)
     } else if moved {
-        format!(r#"&#10003; metadata saved: moved to <a href="/repos/{new_rel}">{new_rel}</a>"#)
+        format!(r#"&#10003; Metadata saved: moved to <a href="/repos/{new_rel}">{new_rel}</a>"#)
     } else {
-        "&#10003; metadata saved".to_string()
+        "&#10003; Metadata saved".to_string()
     };
     html(format!(r#"<div class="job-status ok">{msg}</div>{oob}"#))
 }
@@ -497,37 +583,64 @@ async fn assign_origin_ui(st: &Arc<AppState>, rel: &str, form: OriginForm) -> Re
         Ok(new_rel) => {
             let oob = oob_app_refresh(st).await;
             html(format!(
-                r#"<div class="job-status ok">✓ origin saved: repo is now <a href="/repos/{new_rel}">{new_rel}</a><br><span class="dim">hit ⟳ Refresh now to clone it</span></div>{oob}"#
+                r#"<div class="job-status ok">✓ Origin saved: repo is now <a href="/repos/{new_rel}">{new_rel}</a><br><span class="dim">Hit ⟳ Force Refresh to clone it</span></div>{oob}"#
             ))
         }
         Err(e) => html(format!(r#"<div class="import-error">{}</div>"#, e.1)),
     }
 }
 
-/// GET /repos/{rel}/delete: confirmation fragment. A plain "are you sure?"
-/// plus an optional check to also delete the archive files.
+/// GET /repos/{rel}/delete: a centered modal that forces the user to type
+/// the repository name before the (red) delete button unlocks.
 async fn delete_confirm_ui(st: &Arc<AppState>, rel: &str) -> Response {
-    if st.find_repo(rel).await.is_none() {
+    let Some(repo) = st.find_repo(rel).await else {
         return (StatusCode::NOT_FOUND, "no such repo").into_response();
-    }
-    let e = html_escape(rel);
+    };
+    let name = if repo.manifest.name.trim().is_empty() {
+        repo.rel.clone()
+    } else {
+        repo.manifest.name.clone()
+    };
+    let rel_e = html_escape(&repo.rel);
+    let name_e = html_escape(&name);
     html(format!(
-        r##"<div class="job-status" style="text-align:left">
-  <p>Delete <b>{e}</b>?</p>
-  <label style="display:block;margin:0.4rem 0"><input type="checkbox" name="files" value="1"> also permanently delete the archive files (irreversible)</label>
-  <button class="refresh-btn"
-    hx-post="/repos/{rel}/delete" hx-include="closest .job-status" hx-target="#toast" hx-swap="innerHTML">Delete</button>
-  <button type="button" class="dim-btn" onclick="this.closest('.job-status').remove()">Cancel</button>
+        r##"<div class="modal-backdrop" id="delete-modal" onclick="if(event.target===this)this.remove()">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="delete-title">
+    <h2 id="delete-title">Delete repository</h2>
+    <p>Are you sure you want to delete <b>{name_e}</b>?</p>
+    <p class="danger-text" style="margin:0.2rem 0 0.7rem">This is irreversible.</p>
+    <form hx-post="/repos/{rel_e}/delete" hx-target="#toast" hx-swap="innerHTML" data-confirm="{name_e}" hx-indicator="find .spinner"
+          hx-on::after-request="if(event.detail.xhr.getResponseHeader('X-Delete-OK')) document.getElementById('delete-modal').remove()">
+      <label class="dim" for="delete-confirm">Type <b>{name_e}</b> to confirm</label>
+      <input type="text" id="delete-confirm" name="confirm" autocomplete="off" autofocus
+             oninput="this.form.querySelector('button[type=submit]').disabled = this.value.trim() !== this.form.dataset.confirm">
+      <label style="display:block;margin:0.5rem 0"><input type="checkbox" name="files" value="1"> Permanently delete the archive files</label>
+      <div class="modal-actions">
+        <button type="button" class="dim-btn" onclick="document.getElementById('delete-modal').remove()">Cancel</button>
+        <button type="submit" class="refresh-btn danger" disabled><span class="spinner htmx-indicator"></span>Delete</button>
+      </div>
+    </form>
+  </div>
 </div>"##
     ))
 }
 
 /// POST /repos/{rel}/delete: unregister (and optionally remove files), then
-/// send the browser back to the index.
+/// send the browser back to the index. Requires the typed name to match.
 async fn delete_repo_ui(st: &Arc<AppState>, rel: &str, form: HashMap<String, String>) -> Response {
     let Some(repo) = st.find_repo(rel).await else {
         return (StatusCode::NOT_FOUND, "no such repo").into_response();
     };
+    let expected = if repo.manifest.name.trim().is_empty() {
+        repo.rel.clone()
+    } else {
+        repo.manifest.name.clone()
+    };
+    let typed = form.get("confirm").map(|s| s.trim().to_string()).unwrap_or_default();
+    if typed != expected.trim() {
+        // 200 so the toast swaps in; no X-Delete-OK, so the modal stays open.
+        return html(r#"<div class="job-status failed">Type the repository name exactly to confirm deletion.</div>"#.into());
+    }
     let delete_files = form
         .get("files")
         .map(|v| v == "1" || v == "on" || v == "true")
@@ -535,9 +648,9 @@ async fn delete_repo_ui(st: &Arc<AppState>, rel: &str, form: HashMap<String, Str
     match crate::server::delete_repo(st, &repo, delete_files).await {
         Ok(()) => {
             let msg = if delete_files {
-                "deleted repository and its files"
+                "Deleted repository and its files"
             } else {
-                "removed repository from the index (files kept)"
+                "Removed repository from the index (files kept)"
             };
             let mut resp = html(format!(
                 r#"<div class="job-status ok">{msg}</div>{}"#,
@@ -545,6 +658,8 @@ async fn delete_repo_ui(st: &Arc<AppState>, rel: &str, form: HashMap<String, Str
             ));
             resp.headers_mut()
                 .insert("HX-Redirect", axum::http::HeaderValue::from_static("/"));
+            resp.headers_mut()
+                .insert("X-Delete-OK", axum::http::HeaderValue::from_static("1"));
             resp
         }
         Err(e) => html(format!(r#"<div class="import-error">{}</div>"#, e.1)),
@@ -595,23 +710,38 @@ async fn repo_move(State(st): State<Arc<AppState>>, Form(form): Form<MoveForm>) 
     match result {
         Ok(_) => {
             st.reindex().await.ok();
-            html(oob_app_refresh(&st).await)
+            html(format!("{}{}", oob_toast("Repository moved"), oob_app_refresh(&st).await))
         }
         Err(e) => err(e),
     }
 }
 
 /// GET /folders/new: the create form (parent dropdown from the index).
-async fn folders_new(State(st): State<Arc<AppState>>) -> Response {
+/// `?parent=…` preselects the folder that is currently open in the sidebar.
+async fn folders_new(
+    State(st): State<Arc<AppState>>,
+    Query(map): Query<HashMap<String, String>>,
+) -> Response {
+    let requested = map.get("parent").cloned().unwrap_or_default();
     let ctx = {
         let index = st.index.read().await;
+        let requested = requested.trim().trim_matches('/').to_string();
+        let parent = if !requested.is_empty() && views::valid_folder_path(&requested, &index) {
+            requested
+        } else {
+            String::new()
+        };
+        let parents = views::all_folder_paths(&index)
+            .into_iter()
+            .map(|path| views::FolderParentOption { selected: path == parent, path })
+            .collect();
         FolderFormCtx {
             mode: "new".into(),
             rel: String::new(),
             update_url: "/folders/create".into(),
             name: String::new(),
-            parent: String::new(),
-            parents: views::all_folder_paths(&index),
+            parent,
+            parents,
             icon: String::new(),
             count: 0,
         }
@@ -697,12 +827,18 @@ async fn folders_create(
     if let Err(e) = tokio::fs::create_dir_all(&dir).await {
         return err(format!("cannot create folder: {e}"));
     }
-    let manifest = crate::types::FolderManifest { icon: Some(form.icon.trim().to_string()).filter(|s| !s.is_empty()) };
+    let icon = icon_first_char(form.icon.trim());
+    let manifest = crate::types::FolderManifest { icon: Some(icon).filter(|s| !s.is_empty()) };
     if let Err(e) = crate::types::write_json(&dir.join("folder.json"), &manifest) {
         return err(format!("cannot write folder.json: {e}"));
     }
     st.reindex().await.ok();
-    html(oob_app_refresh(&st).await)
+    html(format!(
+        "{}{}{}",
+        oob_close_modal("folder-modal"),
+        oob_toast("Folder created"),
+        oob_app_refresh(&st).await
+    ))
 }
 
 #[derive(Deserialize, Default)]
@@ -741,7 +877,12 @@ async fn folders_update(
             return err(format!("cannot delete folder: {e}"));
         }
         st.reindex().await.ok();
-        return html(oob_app_refresh(&st).await);
+        return html(format!(
+            "{}{}{}",
+            oob_close_modal("folder-modal"),
+            oob_toast("Folder deleted"),
+            oob_app_refresh(&st).await
+        ));
     }
 
     // save: rename when the name changed
@@ -761,12 +902,18 @@ async fn folders_update(
         }
     }
     let dir = root.join(&new_rel);
-    let manifest = crate::types::FolderManifest { icon: Some(form.icon.trim().to_string()).filter(|s| !s.is_empty()) };
+    let icon = icon_first_char(form.icon.trim());
+    let manifest = crate::types::FolderManifest { icon: Some(icon).filter(|s| !s.is_empty()) };
     if let Err(e) = crate::types::write_json(&dir.join("folder.json"), &manifest) {
         return err(format!("cannot write folder.json: {e}"));
     }
     st.reindex().await.ok();
-    html(oob_app_refresh(&st).await)
+    html(format!(
+        "{}{}{}",
+        oob_close_modal("folder-modal"),
+        oob_toast("Folder saved"),
+        oob_app_refresh(&st).await
+    ))
 }
 
 // ---------- settings ----------
@@ -863,6 +1010,8 @@ async fn settings_save(
     platforms.retain(|p| seen.insert(p.clone()));
     cfg.releases.platforms = platforms;
     cfg.releases.max_asset_mb = num(&f, "release_max_asset_mb", cfg.releases.max_asset_mb);
+    cfg.tags.take_suggested = f.0.get("take_suggested_tags").map(|v| v == "1").unwrap_or(false);
+    cfg.github.fetch_avatars = f.0.get("fetch_avatars").map(|v| v == "1").unwrap_or(false);
 
     // apply live
     *st.cfg.write().await = cfg.clone();
@@ -876,7 +1025,12 @@ async fn settings_save(
         }
         None => tracing::warn!("settings changed in memory only (config path unknown)"),
     }
-    render(&views::SettingsT { ctx: views::settings_ctx_from(&cfg, true) })
+    // re-render the panel (saved flag off: feedback goes to the toast) while
+    // an OOB toast confirms the save at the bottom of the viewport
+    let page = views::SettingsT { ctx: views::settings_ctx_from(&cfg, false) }
+        .render()
+        .unwrap_or_default();
+    html(format!("{}{page}", oob_toast("Settings saved")))
 }
 
 // ---------- import ----------
@@ -1162,16 +1316,23 @@ async fn notifications_page(State(st): State<Arc<AppState>>, headers: HeaderMap)
     let can_mark_read = user.is_some();
     let views: Vec<views::NotifView> = items
         .iter()
-        .map(|n| views::NotifView {
-            kind: n.kind.clone(),
-            repo: n.repo.clone(),
-            title: n.title.clone(),
-            at: n.at.chars().take(16).collect(),
-            changelog_html: n
-                .body
-                .as_deref()
-                .map(crate::files::markdown_to_html)
-                .unwrap_or_default(),
+        .map(|n| {
+            let (at, at_exact) = views::humanize_ago(&n.at).unwrap_or_else(|| {
+                let t: String = n.at.chars().take(16).collect();
+                (t.clone(), t)
+            });
+            views::NotifView {
+                kind: n.kind.clone(),
+                repo: n.repo.clone(),
+                title: n.title.clone(),
+                at,
+                at_exact,
+                changelog_html: n
+                    .body
+                    .as_deref()
+                    .map(crate::files::markdown_to_html)
+                    .unwrap_or_default(),
+            }
         })
         .collect();
     let ctx = views::NotificationsCtx { items: views, can_mark_read };
@@ -1187,4 +1348,32 @@ async fn notifications_mark_read(State(st): State<Arc<AppState>>, headers: Heade
         .header("location", "/notifications")
         .body(Body::empty())
         .unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{icon_first_char, sniff_image};
+
+    #[test]
+    fn sniffs_common_image_types() {
+        assert_eq!(sniff_image(b"\x89PNG\r\n\x1a\n"), "image/png");
+        assert_eq!(sniff_image(b"\xFF\xD8\xFF\xE0"), "image/jpeg");
+        assert_eq!(sniff_image(b"GIF89a"), "image/gif");
+        assert_eq!(sniff_image(b"RIFF\x00\x00\x00\x00WEBPVP8 "), "image/webp");
+        assert_eq!(sniff_image(b"not an image"), "application/octet-stream");
+    }
+
+    #[test]
+    fn icon_keeps_only_the_first_character() {
+        assert_eq!(icon_first_char(""), "");
+        assert_eq!(icon_first_char("a"), "a");
+        assert_eq!(icon_first_char("hello"), "h");
+        assert_eq!(icon_first_char("🎮"), "🎮");
+        // variation selector stays with its base
+        assert_eq!(icon_first_char("🕹️"), "🕹️");
+        // ZWJ sequence is preserved as one visible character
+        assert_eq!(icon_first_char("👨‍👩‍👧‍👦"), "👨‍👩‍👧‍👦");
+        // leading whitespace is dropped by the caller's trim; here it is kept
+        assert_eq!(icon_first_char("1abc"), "1");
+    }
 }
