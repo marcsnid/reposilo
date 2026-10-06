@@ -52,11 +52,15 @@
       <details class="add-menu">
         <summary>&#xFF0B; Add repo</summary>
         <div class="add-panel">
+          <h4>Add repository</h4>
           <form hx-post="/repos/add" hx-target="#toast" hx-swap="innerHTML" hx-indicator="find .spinner"
                 hx-on::after-request="this.reset(); this.closest('details').open = false">
-            <input name="url" type="url" placeholder="https://github.com/owner/repo.git" required>
-            <input name="tags" placeholder="tags, comma separated (optional)">
-            <input name="folder" list="add-folder-list" placeholder="folder (optional, e.g. tools/rust/cli)">
+            <label for="add-url">Repository URL</label>
+            <input id="add-url" name="url" type="url" placeholder="https://github.com/owner/repo.git" required>
+            <label for="add-tags">Tags</label>
+            <input id="add-tags" name="tags" placeholder="comma separated (optional)">
+            <label for="add-folder">Folder</label>
+            <input id="add-folder" name="folder" list="add-folder-list" placeholder="e.g. tools/rust (optional)">
             <datalist id="add-folder-list" hx-get="/folders/options" hx-trigger="load" hx-target="this" hx-swap="innerHTML"></datalist>
             <button type="submit"><span class="spinner htmx-indicator"></span>Archive</button>
           </form>

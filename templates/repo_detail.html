@@ -132,6 +132,11 @@
           <li>
             <a class="dl" href="{{ s.download_url }}" download>{{ s.label }}@{{ s.commit_short }}</a>
             <span class="snap-meta">{{ s.date }} · {{ s.size_human }}</span>
+            {% if !s.changelog_html.is_empty() %}
+            <details><summary class="dim" style="font-size:0.8rem;cursor:pointer">Changes</summary>
+              <div class="readme">{{ s.changelog_html|safe }}</div>
+            </details>
+            {% endif %}
           </li>
           {% endfor %}
         </ul>

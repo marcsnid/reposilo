@@ -311,6 +311,28 @@ mod tests {
         ];
         assert_eq!(pick_readme(&e).unwrap().path, "readme.md");
     }
+
+    /// A repo with no root README but one under `.github/` must resolve via
+    /// `list_subdir` + `find_readme` (the shallow-clone path the archiver uses).
+    #[tokio::test]
+    async fn readme_falls_back_to_github_dir_in_a_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").current_dir(repo).args(args).output().unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        std::fs::create_dir_all(repo.join(".github")).unwrap();
+        std::fs::write(repo.join(".github/README.md"), "# Title\n\nFallback body text.\n").unwrap();
+        std::fs::write(repo.join("main.rs"), "fn main() {}\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "init"]);
+
+        assert_eq!(readme_description(repo, "HEAD").await.as_deref(), Some("Fallback body text."));
+    }
 }
 // ---------- primary language detection ----------
 

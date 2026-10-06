@@ -2,12 +2,16 @@
 <div class="job-status" hx-get="/settings/verify/{{ ctx.id }}" hx-trigger="every 1s" hx-swap="outerHTML">
   <span class="spinner" role="status" aria-label="verifying"></span>Verifying {{ ctx.done_count }}/{{ ctx.total }}
 </div>
+<div id="verify-area" hx-swap-oob="innerHTML"></div>
 {% else if ctx.failed %}
 <div class="job-status failed">&#10007; {{ ctx.error }}</div>
+<div id="verify-area" hx-swap-oob="innerHTML"></div>
 {% else if ctx.problems.is_empty() %}
 <div class="job-status ok">&#10003; Verified {{ ctx.snapshots }} snapshot(s)</div>
+<div id="verify-area" hx-swap-oob="innerHTML"><p class="note">No problems found. Checked {{ ctx.snapshots }} snapshot(s).</p></div>
 {% else %}
 <div class="job-status failed">&#10007; Found {{ ctx.problems.len() }} problem(s)</div>
+<div id="verify-area" hx-swap-oob="innerHTML">
 <table class="files"><tbody>
   {% for p in ctx.problems %}
   <tr>
@@ -17,4 +21,5 @@
   </tr>
   {% endfor %}
 </tbody></table>
+</div>
 {% endif %}

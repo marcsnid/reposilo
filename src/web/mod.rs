@@ -342,6 +342,13 @@ async fn update_tags(
             let v = form.value.trim();
             tags.retain(|t| !t.eq_ignore_ascii_case(v));
         }
+        "add_suggested" => {
+            for t in &manifest.suggested_tags {
+                if !tags.iter().any(|e| e.eq_ignore_ascii_case(t)) {
+                    tags.push(t.clone());
+                }
+            }
+        }
         _ => return (StatusCode::BAD_REQUEST, "bad op").into_response(),
     }
     tags.sort();

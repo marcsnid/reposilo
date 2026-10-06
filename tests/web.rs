@@ -828,6 +828,8 @@ async fn settings_verify_button_reports_integrity() -> Result<()> {
     let settings = client.get(format!("{base}/settings")).send().await?.text().await?;
     assert!(settings.contains("Archive integrity"), "settings should offer verify");
     assert!(settings.contains("hx-post=\"/settings/verify\""));
+    // verify progress is surfaced in the bottom toast
+    assert!(settings.contains("hx-post=\"/settings/verify\" hx-target=\"#toast\""), "{settings}");
 
     // clean archive -> all good
     let first = client
@@ -836,9 +838,15 @@ async fn settings_verify_button_reports_integrity() -> Result<()> {
         .await?
         .text()
         .await?;
+    assert!(first.contains("spinner"), "running verify should show the spinner: {first}");
+    assert!(
+        first.contains("id=\"verify-area\" hx-swap-oob=\"innerHTML\""),
+        "the report area must be updated out-of-band: {first}"
+    );
     let report = wait_verify_done(&base, extract_verify_id(&first)).await;
     assert!(report.contains("Verified 1"), "expected a clean report: {report}");
-    assert!(!report.contains("problem"), "clean report should have no problems: {report}");
+    assert!(report.contains("No problems found"), "expected the clean note: {report}");
+    assert!(!report.contains("badge danger"), "clean report should have no problem rows: {report}");
 
     // corrupt the zip -> the next verify flags it
     fs::write(rel.join("demo-v1.0.0.zip"), b"tampered!")?;
@@ -851,5 +859,45 @@ async fn settings_verify_button_reports_integrity() -> Result<()> {
     let report = wait_verify_done(&base, extract_verify_id(&second)).await;
     assert!(report.contains("problem"), "expected problems: {report}");
     assert!(report.contains("sha256") || report.contains("size"), "expected a hash/size flag: {report}");
+    Ok(())
+}
+
+/// "Add all suggested" must adopt every forge/LLM suggestion at once while
+/// keeping the repo's own tags.
+#[tokio::test]
+async fn add_all_suggested_tags_merges_them() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    let repo = root.join("owner-demo");
+    fs::create_dir_all(&repo)?;
+    fs::write(
+        repo.join("repo.json"),
+        r#"{"forge":"github","name":"demo","added":"2025-01-01T00:00:00Z","default_branch":"main","tags":["manual"],"suggested_tags":["cli","rust","tooling"]}"#,
+    )?;
+
+    let (base, _st) = spawn_server(test_cfg(&root)).await;
+    let client = reqwest::Client::new();
+
+    // before: the purple "Add all" pill leads the suggested row
+    let before = client.get(format!("{base}/repos/owner-demo")).send().await?.text().await?;
+    assert!(before.contains("suggested-all"), "expected an Add all pill: {before}");
+    assert!(before.contains(">Add all</button>"), "{before}");
+
+    let body = client
+        .post(format!("{base}/repos/owner-demo/tags"))
+        .form(&[("op", "add_suggested")])
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert!(body.contains("#cli"), "{body}");
+    assert!(body.contains("#rust"), "{body}");
+    assert!(body.contains("#tooling"), "{body}");
+    assert!(!body.contains("suggested-all"), "suggestions should all be adopted: {body}");
+
+    let m: serde_json::Value = serde_json::from_str(&fs::read_to_string(repo.join("repo.json"))?)?;
+    let tags: Vec<String> =
+        m["tags"].as_array().unwrap().iter().map(|t| t.as_str().unwrap().to_string()).collect();
+    assert_eq!(tags, vec!["cli", "manual", "rust", "tooling"]);
     Ok(())
 }

@@ -104,8 +104,9 @@
 
   <section class="panel">
     <h2>Archive integrity</h2>
+    <p class="note">Checks every stored zip against its sidecar hash. Progress and the result appear in the status area at the bottom.</p>
     <button class="refresh-btn"
-      hx-post="/settings/verify" hx-target="#verify-area" hx-swap="innerHTML">Verify archive</button>
+      hx-post="/settings/verify" hx-target="#toast" hx-swap="innerHTML" hx-indicator="find .spinner"><span class="spinner htmx-indicator"></span>Verify archive</button>
     <div id="verify-area"></div>
   </section>
 

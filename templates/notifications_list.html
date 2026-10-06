@@ -20,7 +20,14 @@
       <span class="dim">{{ n.at }} · <a href="/repos/{{ n.repo }}">{{ n.repo }}</a></span>
     </div>
     {% if !n.changelog_html.is_empty() %}
+    {% if n.kind == "new_snapshot" %}
+    <details class="notif-details">
+      <summary class="dim">Show changes</summary>
+      <div class="readme">{{ n.changelog_html|safe }}</div>
+    </details>
+    {% else %}
     <div class="readme">{{ n.changelog_html|safe }}</div>
+    {% endif %}
     {% endif %}
   </div>
   {% endfor %}

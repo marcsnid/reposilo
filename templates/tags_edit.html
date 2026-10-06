@@ -17,6 +17,10 @@
   {% if !ctx.suggested_tags.is_empty() %}
   <h2>Suggested</h2>
   <div class="chips">
+    <form class="chip-form" hx-post="/repos/{{ ctx.rel }}/tags" hx-target="#tag-editor" hx-swap="outerHTML" hx-indicator="find .spinner">
+      <input type="hidden" name="op" value="add_suggested">
+      <button type="submit" class="chip suggested-all"><span class="spinner htmx-indicator"></span>Add all</button>
+    </form>
     {% for t in ctx.suggested_tags %}
     <form class="chip-form" hx-post="/repos/{{ ctx.rel }}/tags" hx-target="#tag-editor" hx-swap="outerHTML" hx-indicator="find .spinner">
       <input type="hidden" name="op" value="add">
