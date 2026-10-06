@@ -5,7 +5,7 @@
 <div class="llm-result">
   llama.cpp guesses this is <b>{{ ctx.llm_name }}</b>. Search:
   {% for q in ctx.llm_queries %}
-  <button type="button" class="chip" hx-get="{{ q.url }}" hx-target="#suggest_{{ ctx.i }}">{{ q.q }}</button>
+  <button type="button" class="chip" hx-get="{{ q.url }}" hx-target="#suggest_{{ ctx.i }}" hx-indicator="find .spinner"><span class="spinner htmx-indicator"></span>{{ q.q }}</button>
   {% endfor %}
 </div>
 {% endif %}

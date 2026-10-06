@@ -503,20 +503,34 @@ async fn repo_delete_ui_confirms_then_deletes() -> Result<()> {
     assert!(detail.contains("Force Refresh"), "{detail}");
     assert!(detail.contains("/repos/remotes-delproj/delete"), "{detail}");
 
-    // the confirm fragment asks, and offers the extra file-delete check
+    // the confirm modal asks for the repo name and offers the extra file check
     let confirm = client
         .get(format!("{base}/repos/remotes-delproj/delete"))
         .send()
         .await?;
     assert_eq!(confirm.status(), 200);
     let body = confirm.text().await?;
-    assert!(body.contains("also permanently delete the archive files"), "{body}");
+    assert!(body.contains("modal-backdrop"), "{body}");
+    assert!(body.contains("Are you sure you want to delete"), "{body}");
+    assert!(body.contains("This is irreversible."), "{body}");
+    assert!(body.contains("name=\"confirm\""), "{body}");
+    assert!(body.contains("Permanently delete the archive files"), "{body}");
     assert!(body.contains("name=\"files\""), "{body}");
 
-    // POST without the check => unregister only, snapshot files stay
+    // a wrong/missing typed name must be refused and must not touch the repo
+    let bad = client
+        .post(format!("{base}/repos/remotes-delproj/delete"))
+        .form(&[("files", "0"), ("confirm", "not-the-name")])
+        .send()
+        .await?;
+    assert_eq!(bad.status(), 200);
+    assert!(bad.text().await?.contains("Type the repository name exactly"), "mismatch refused");
+    assert!(archive.join("remotes-delproj").join("repo.json").exists(), "repo must survive a mismatch");
+
+    // POST with the typed name, no file check => unregister only, files stay
     let del = client
         .post(format!("{base}/repos/remotes-delproj/delete"))
-        .form(&[("files", "0")])
+        .form(&[("files", "0"), ("confirm", "delproj")])
         .send()
         .await?;
     assert_eq!(del.status(), 200);
@@ -555,7 +569,7 @@ async fn repo_delete_ui_with_files_removes_the_directory() -> Result<()> {
 
     let del = client
         .post(format!("{base}/repos/remotes-purgeproj/delete"))
-        .form(&[("files", "1")])
+        .form(&[("files", "1"), ("confirm", "purgeproj")])
         .send()
         .await?;
     assert_eq!(del.status(), 200);
@@ -823,7 +837,7 @@ async fn settings_verify_button_reports_integrity() -> Result<()> {
         .text()
         .await?;
     let report = wait_verify_done(&base, extract_verify_id(&first)).await;
-    assert!(report.contains("verified 1"), "expected a clean report: {report}");
+    assert!(report.contains("Verified 1"), "expected a clean report: {report}");
     assert!(!report.contains("problem"), "clean report should have no problems: {report}");
 
     // corrupt the zip -> the next verify flags it

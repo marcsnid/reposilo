@@ -678,7 +678,7 @@ pub async fn build_detail_ctx(st: &Arc<AppState>, repo: &crate::index::RepoEntry
         language: m.language.clone().unwrap_or_default(),
         lang_class: m.language.as_deref().map(lang_class).unwrap_or_default().to_string(),
         added: m.added.chars().take(10).collect(),
-        last_checked: m.last_checked.clone().unwrap_or_else(|| "never".into()),
+        last_checked: m.last_checked.clone().unwrap_or_else(|| "Never".into()),
         remote_state: m.remote_state.clone().unwrap_or_default(),
         schedule_days: m.schedule.interval_days,
         keep_branch: m

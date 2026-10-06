@@ -7,10 +7,9 @@
   suggestions{% if ctx.llm_enabled %}, or the llama.cpp button to identify a zip from its
   contents{% endif %}. Uncheck rows to skip them.
 </p>
-<form class="import-rows" hx-post="/import/commit" hx-target="#import-job-status">
+<form class="import-rows" hx-post="/import/commit" hx-target="#toast" hx-swap="innerHTML" hx-indicator="#import-submit-spinner">
   <input type="hidden" name="scan" value="{{ ctx.scan_id }}">
-  <label class="dim"><input type="checkbox" name="keep" value="1"> keep originals (copy instead of move)</label>
-  <div class="job-status" id="import-job-status"></div>
+  <label class="dim"><input type="checkbox" name="keep" value="1"> Keep originals (copy instead of move)</label>
   {% for r in ctx.rows %}
   <div class="import-row panel">
     <div class="import-row-head">
@@ -30,19 +29,19 @@
              placeholder="origin URL (https://github.com/owner/repo.git)">
       <input type="text" name="tags_{{ r.i }}" value="{{ r.tags_value }}" placeholder="tags, comma separated">
       <label class="dim"><input type="checkbox" name="unknown_{{ r.i }}" value="1"
-             {% if r.unknown_default %}checked{% endif %}> unknown</label>
+             {% if r.unknown_default %}checked{% endif %}> Unknown</label>
     </div>
     <div class="import-row-actions">
-      <button type="button" class="chip" hx-get="{{ r.suggest_url }}" hx-target="#suggest_{{ r.i }}">GitHub</button>
+      <button type="button" class="chip" hx-get="{{ r.suggest_url }}" hx-target="#suggest_{{ r.i }}" hx-indicator="find .spinner"><span class="spinner htmx-indicator"></span>GitHub</button>
       {% if ctx.llm_enabled %}
       <button type="button" class="chip"
               hx-post="/import/llm" hx-vals='{"scan": "{{ ctx.scan_id }}", "i": "{{ r.i }}"}'
-              hx-target="#suggest_{{ r.i }}">llama.cpp</button>
+              hx-target="#suggest_{{ r.i }}" hx-indicator="find .spinner"><span class="spinner htmx-indicator"></span>llama.cpp</button>
       {% endif %}
     </div>
     <div id="suggest_{{ r.i }}"></div>
   </div>
   {% endfor %}
-  <button type="submit" class="refresh-btn">Import selected</button>
+  <button type="submit" class="refresh-btn"><span class="spinner htmx-indicator" id="import-submit-spinner"></span>Import selected</button>
 </form>
 {% endif %}

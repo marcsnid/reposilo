@@ -6,12 +6,12 @@
   {% if !ctx.items.is_empty() %}
   {% if ctx.can_mark_read %}
   <form method="post" action="/notifications" style="margin:0.5rem 0">
-    <button type="submit" class="chip">mark all read</button>
+    <button type="submit" class="chip">Mark all read</button>
   </form>
     {% endif %}
   {% endif %}
   {% if ctx.items.is_empty() %}
-  <p class="dim">no notifications</p>
+  <p class="dim">No notifications yet</p>
   {% else %}
   {% for n in ctx.items %}
   <div class="panel notification {% if n.kind == "new_release" %}new-release{% endif %}">

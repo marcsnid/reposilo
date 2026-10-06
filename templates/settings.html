@@ -3,9 +3,8 @@
 {% block content %}
 <div class="detail narrow">
   <div class="detail-head"><h1>Settings</h1></div>
-  {% if ctx.saved %}<div class="job-status ok">Saved &#10003; (applied live where possible)</div>{% endif %}
 
-  <form class="settings-form" hx-post="/settings" hx-target="#settings-area" hx-swap="outerHTML">
+  <form class="settings-form" hx-post="/settings" hx-target="#settings-area" hx-swap="outerHTML" hx-indicator="find .spinner">
     <div id="settings-area">
     <section class="panel">
       <h2>Retention</h2>
@@ -91,7 +90,7 @@
       <div class="settings-row"><label>Archive root</label><input type="text" value="{{ ctx.archive_root }}" disabled></div>
     </section>
 
-    <button type="submit" class="refresh-btn">Save settings</button>
+    <button type="submit" class="refresh-btn"><span class="spinner htmx-indicator"></span>Save settings</button>
     </div>
   </form>
 
@@ -100,8 +99,7 @@
     <p class="note">Runs the configured llama.cpp over all untagged repos (batched, README-based). Configure the endpoint above first.</p>
     <button class="refresh-btn"
       hx-post="/api/autotag" hx-swap="none"
-      onclick="this.disabled=true; this.textContent='tagging… (check the bell icon in a few minutes)'">
-      Tag untagged repos now</button>
+      hx-indicator="find .spinner" hx-disabled-elt="this"><span class="spinner htmx-indicator"></span>Tag untagged repos now</button>
   </section>
 
   <section class="panel">

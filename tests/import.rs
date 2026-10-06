@@ -386,7 +386,7 @@ async fn metadata_editor_updates_manifest() -> Result<()> {
         .await?
         .text()
         .await?;
-    assert!(resp.contains("metadata saved"), "{resp}");
+    assert!(resp.contains("Metadata saved"), "{resp}");
     assert!(resp.contains("example-solved"), "repo should have been promoted: {resp}");
 
     // manifest reflects everything, repo moved out of _unknown
@@ -407,7 +407,7 @@ async fn metadata_editor_updates_manifest() -> Result<()> {
         .await?
         .text()
         .await?;
-    assert!(resp.contains("metadata saved"), "{resp}");
+    assert!(resp.contains("Metadata saved"), "{resp}");
     let m: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(archive.join("example-solved/repo.json"))?)?;
     assert!(m["description"].is_null(), "empty field clears: {}", m["description"]);

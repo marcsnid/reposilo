@@ -262,9 +262,21 @@ table.files tr:last-child td { border-bottom: none; }
 .notes { white-space: pre-wrap; margin: 0; }
 
 /* job status */
-.job-status { padding: 0.6rem 0.9rem; margin: 0.6rem 0; border-radius: 6px; font-size: 0.9rem; }
+.job-status { padding: 0.6rem 0.9rem; margin: 0.6rem 0; border-radius: 6px; font-size: 0.9rem; border: 1px solid var(--border); }
 .job-status.ok { background: #1a7f3722; border: 1px solid var(--ok); }
 .job-status.failed { background: #cf222e22; border: 1px solid var(--danger); }
+
+/* inline busy indicator for running jobs */
+.spinner {
+  display: inline-block; width: 0.85em; height: 0.85em;
+  border: 2px solid currentColor; border-right-color: transparent;
+  border-radius: 50%; vertical-align: -0.08em; margin-right: 0.5rem;
+  animation: spin 0.7s linear infinite; opacity: 0.75;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+/* htmx-managed spinner: hidden until the request it is attached to runs */
+.spinner.htmx-indicator { display: none; }
+.spinner.htmx-indicator.htmx-request { display: inline-block; }
 
 /* bottom-of-page status toasts: fixed, fade in, auto-dismiss when terminal */
 #toast {
@@ -272,8 +284,16 @@ table.files tr:last-child td { border-bottom: none; }
   z-index: 100; display: flex; flex-direction: column; gap: 0.4rem;
   width: min(92vw, 44rem); pointer-events: none;
 }
-#toast > * { pointer-events: auto; box-shadow: 0 6px 24px #00000040; }
-#toast .job-status, #toast .import-error { margin: 0; }
+#toast > * {
+  pointer-events: auto;
+  box-shadow: 0 0 0 2px var(--border), 0 10px 30px #00000066;
+}
+/* opaque background so page content cannot show through the toast */
+#toast .job-status, #toast .import-error {
+  margin: 0;
+  background-color: var(--bg-panel);
+  border-width: 1px;
+}
 .toast-msg { animation: toast-in 0.22s ease-out; }
 .toast-out { animation: toast-out 0.4s ease-in forwards; }
 @keyframes toast-in {
@@ -283,6 +303,21 @@ table.files tr:last-child td { border-bottom: none; }
 @keyframes toast-out {
   to { opacity: 0; transform: translateY(0.7rem); }
 }
+
+/* centered confirmation modal (delete and other destructive actions) */
+.modal-backdrop {
+  position: fixed; inset: 0; z-index: 200; padding: 1rem;
+  background: #00000080; display: flex; align-items: center; justify-content: center;
+  animation: toast-in 0.15s ease-out;
+}
+.modal {
+  background: var(--bg-panel); border: 1px solid var(--border); border-radius: 10px;
+  padding: 1.2rem; width: min(92vw, 30rem); box-shadow: 0 12px 40px #00000080;
+}
+.modal h2 { margin: 0 0 0.5rem; }
+.modal input[type="text"] { width: 100%; margin: 0.35rem 0 0.6rem; }
+.modal .modal-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 1rem; }
+.danger-text { color: var(--danger); font-weight: 600; }
 .dim { color: var(--text-muted); }
 .note { color: var(--text-muted); font-size: 0.8rem; font-style: italic; }
 

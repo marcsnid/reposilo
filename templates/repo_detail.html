@@ -57,7 +57,7 @@
         <h2>About</h2>
         <details class="metadata-editor">
           <summary>&#9998; Edit metadata</summary>
-          <form class="metadata-form" hx-post="/repos/{{ ctx.rel }}/metadata" hx-target="#toast" hx-swap="innerHTML">
+          <form class="metadata-form" hx-post="/repos/{{ ctx.rel }}/metadata" hx-target="#toast" hx-swap="innerHTML" hx-indicator="find .spinner">
             <div class="settings-row"><label>Name</label>
               <input type="text" name="name" value="{{ ctx.name }}"></div>
             <div class="settings-row"><label>Description</label>
@@ -73,16 +73,16 @@
                 <option value="{{ f }}"></option>
                 {% endfor %}
               </datalist></div>
-            <button type="submit" class="refresh-btn">Save metadata</button>
+            <button type="submit" class="refresh-btn"><span class="spinner htmx-indicator"></span>Save metadata</button>
           </form>
         </details>
         <dl class="meta">
           <dt>Archived size</dt><dd>{{ ctx.total_size }}</dd>
           {% if !ctx.language.is_empty() %}<dt>Language</dt><dd><span class="lang"><i class="dot {{ ctx.lang_class }}"></i> {{ ctx.language }}</span></dd>{% endif %}
           <dt>Default branch</dt><dd>{{ ctx.default_branch }}</dd>
-          <dt>Schedule</dt><dd>every {{ ctx.schedule_days }} days</dd>
+          <dt>Schedule</dt><dd>Every {{ ctx.schedule_days }} days</dd>
           <dt>Retention</dt><dd>
-            {% if ctx.keep_branch == -1 %}keep all snapshots{% else %}keep newest {{ ctx.keep_branch }} snapshot(s){% endif %},
+            {% if ctx.keep_branch == -1 %}Keep all snapshots{% else %}Keep newest {{ ctx.keep_branch }} snapshot(s){% endif %},
             {% if ctx.keep_releases == -1 %}keep all releases{% else %}keep newest {{ ctx.keep_releases }} release(s){% endif %}
           </dd>
           <dt>Added</dt><dd>{{ ctx.added }}</dd>
@@ -114,7 +114,7 @@
             </ul>
             {% endif %}
             {% if !s.changelog_html.is_empty() %}
-            <details><summary class="dim" style="font-size:0.8rem;cursor:pointer">changelog</summary>
+            <details><summary class="dim" style="font-size:0.8rem;cursor:pointer">Changelog</summary>
               <div class="readme">{{ s.changelog_html|safe }}</div>
             </details>
             {% endif %}
@@ -146,9 +146,8 @@
             hx-target="#toast" hx-swap="innerHTML">⟳ Force Refresh</button>
           <button class="refresh-btn danger"
             hx-get="/repos/{{ ctx.rel }}/delete"
-            hx-target="#delete-area" hx-swap="innerHTML">Delete repository</button>
+            hx-target="#modal-root" hx-swap="innerHTML">Delete repository</button>
         </div>
-        <div id="delete-area"></div>
       </section>
     </aside>
   </div>
