@@ -136,13 +136,22 @@ button:hover, button[type="submit"]:hover { background: var(--chip-hover); }
   margin: 1rem 0 0.4rem;
 }
 .sidebar ul { list-style: none; margin: 0; padding: 0; }
-.sidebar li a, .sidebar li .count { padding: 0.15rem 0.4rem; }
-.sidebar li a { display: inline-block; border-radius: 6px; color: var(--text); }
+.folders, .taglist { display: flex; flex-direction: column; gap: 0.12rem; }
+.folders li, .taglist li { display: flex; align-items: center; gap: 0.1rem; }
+.sidebar li a {
+  flex: 1; min-width: 0; position: relative;
+  display: flex; align-items: center; gap: 0.4rem;
+  padding: 0.32rem 0.5rem; border-radius: 6px; color: var(--text);
+  transition: background 0.12s ease, color 0.12s ease;
+}
 .sidebar li a:hover { background: var(--chip-hover); text-decoration: none; }
 .sidebar li a.active { background: var(--chip-active); color: var(--accent); font-weight: 600; }
-.sidebar .count { color: var(--text-muted); font-size: 0.8rem; }
-.folders li.depth-1 { padding-left: 0.9rem; }
-.folders li.depth-2 { padding-left: 1.8rem; }
+.sidebar li a.active::before {
+  content: ""; position: absolute; left: 0; top: 0.22rem; bottom: 0.22rem;
+  width: 2px; border-radius: 2px; background: var(--accent);
+}
+.sidebar .count { color: var(--text-muted); font-size: 0.8rem; margin-left: auto; }
+.sidebar li a.active .count { color: var(--accent); }
 
 /* folder icons: emoji or a colored dot when unset (color hashes from the path) */
 .ficon { display: inline-block; width: 1.2em; text-align: center; }
