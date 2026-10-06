@@ -61,6 +61,7 @@
       {% for r in ctx.repos %}
       <div class="card{% if !r.color.is_empty() %} tinted{% endif %}"{% if !r.color.is_empty() %} data-color="{{ r.color }}"{% endif %} draggable="true" data-rel="{{ r.rel }}" ondragstart="dragRepo(event)">
         <div class="card-head">
+          {% if r.has_icon %}<img class="repo-icon" src="/repo-icon/{{ r.rel }}" alt="" width="20" height="20" loading="lazy">{% endif %}
           <a class="card-title" href="/repos/{{ r.rel }}">{{ r.name }}</a>
           <span class="badge forge-{{ r.forge }}">{{ r.forge }}</span>
           {% if r.remote_dead %}<span class="badge">remote dead</span>{% else if r.remote_gone %}<span class="badge">remote gone</span>{% endif %}

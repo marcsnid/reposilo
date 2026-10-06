@@ -190,6 +190,7 @@ pub struct RepoCard {
     pub size_human: String,
     pub color: String,       // palette key or empty = no tint
     pub color_class: String, // "dot-N" or empty (detail header)
+    pub has_icon: bool,      // stored owner avatar
 }
 
 #[derive(Debug, Clone)]
@@ -403,6 +404,7 @@ pub async fn build_list_ctx(st: &Arc<AppState>, tags: &[String], q: &str, folder
                     .and_then(color_class)
                     .unwrap_or_default()
                     .to_string(),
+                has_icon: r.has_icon,
             }
         })
         .collect();
@@ -563,6 +565,7 @@ pub struct DetailCtx {
     pub color: String,           // palette key or empty
     pub color_class: String,     // "dot-N" or empty
     pub color_choices: Vec<ColorChoiceView>,
+    pub has_icon: bool,          // stored owner avatar
     pub remote_state: String,
     pub schedule_days: u32,
     pub keep_branch: i64,
@@ -796,6 +799,7 @@ pub async fn build_detail_ctx(st: &Arc<AppState>, repo: &crate::index::RepoEntry
         color: m.color.clone().unwrap_or_default(),
         color_class: m.color.as_deref().and_then(color_class).unwrap_or_default().to_string(),
         color_choices: color_choices(),
+        has_icon: repo.has_icon,
         remote_state: m.remote_state.clone().unwrap_or_default(),
         schedule_days: m.schedule.interval_days,
         keep_branch: m

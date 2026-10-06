@@ -8,6 +8,8 @@ pub struct RepoMeta {
     pub stars: u64,
     pub topics: Vec<String>,
     pub description: Option<String>,
+    /// Owner avatar URL (the icon GitHub shows next to the repo).
+    pub avatar_url: Option<String>,
 }
 
 fn gh_request(cfg: &Config, origin: &str, suffix: &str) -> Option<reqwest::RequestBuilder> {
@@ -44,7 +46,41 @@ pub async fn github_repo_meta(cfg: &Config, origin: &str) -> Option<RepoMeta> {
             .map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect())
             .unwrap_or_default(),
         description: resp["description"].as_str().map(String::from),
+        avatar_url: resp["owner"]["avatar_url"].as_str().map(String::from),
     })
+}
+
+/// Download a small avatar image (best-effort, capped at 2 MB). GitHub
+/// avatars accept a size hint, so we ask for 64px — plenty for a 20–34px UI
+/// at 2x and a fraction of the full-size image.
+pub async fn fetch_avatar(url: &str) -> Option<Vec<u8>> {
+    let url = if url.contains("avatars.githubusercontent.com") {
+        if url.contains('?') {
+            format!("{url}&s=64")
+        } else {
+            format!("{url}?s=64")
+        }
+    } else {
+        url.to_string()
+    };
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .ok()?;
+    let resp = client
+        .get(&url)
+        .header(reqwest::header::USER_AGENT, "reposilo")
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let bytes = resp.bytes().await.ok()?;
+    if bytes.is_empty() || bytes.len() > 2 * 1024 * 1024 {
+        return None;
+    }
+    Some(bytes.to_vec())
 }
 
 /// One commit in a `compare` readout.

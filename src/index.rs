@@ -27,6 +27,8 @@ pub struct RepoEntry {
     pub branch_snapshots: Vec<SnapshotEntry>,
     /// Newest first.
     pub releases: Vec<SnapshotEntry>,
+    /// True when a stored owner avatar (`icon` file) exists for this repo.
+    pub has_icon: bool,
 }
 
 /// A folder with an explicit `folder.json` on disk (folders also exist
@@ -46,7 +48,8 @@ impl RepoEntry {
             .with_context(|| format!("bad manifest in {rel}"))?;
         let branch_snapshots = load_snapshots_under(&dir.join("branch"));
         let releases = load_snapshots_under(&dir.join("releases"));
-        Ok(Self { dir, rel, manifest, branch_snapshots, releases })
+        let has_icon = std::fs::metadata(dir.join("icon")).map(|m| m.len() > 0).unwrap_or(false);
+        Ok(Self { dir, rel, manifest, branch_snapshots, releases, has_icon })
     }
 }
 

@@ -300,14 +300,14 @@ impl Archiver {
             .ok()
             .and_then(|tree| crate::files::detect_language(&tree));
         // forge enrichment (GitHub: stars, topics → suggested tags, description)
-        let (stars, suggested_tags) = match crate::forgeapi::github_repo_meta(&self.cfg, url).await {
+        let (stars, suggested_tags, avatar_url) = match crate::forgeapi::github_repo_meta(&self.cfg, url).await {
             Some(meta) => {
                 if description.is_none() {
                     description = meta.description;
                 }
-                (Some(meta.stars), meta.topics)
+                (Some(meta.stars), meta.topics, meta.avatar_url)
             }
-            None => (None, Vec::new()),
+            None => (None, Vec::new(), None),
         };
 
         // "take on suggested tags": keep manual tags, then add the forge's
@@ -339,6 +339,13 @@ impl Archiver {
             unidentified: false,
         };
         crate::types::write_json(&manifest_path, &manifest)?;
+
+        // store the owner avatar locally so the repo icon survives the remote
+        if let Some(avatar) = avatar_url {
+            if let Some(bytes) = crate::forgeapi::fetch_avatar(&avatar).await {
+                let _ = fs::write(repo_dir.join("icon"), bytes);
+            }
+        }
 
         if self.cfg.scheduler.run_on_add {
             self.snapshot_ref(repo_dir, git_dir, rel, &info.name, url, &branch, SnapshotKind::Branch, None, None, None)
@@ -728,6 +735,25 @@ impl Archiver {
         }
         let name = manifest.name.clone();
         let mirror = shallow.is_dir(); // full-mirror mode keeps a persistent git store
+
+        // backfill the owner avatar for archives created before icon support
+        // (GitHub only; a zero-byte `icon` marks "checked, no avatar")
+        if !repo_dir.join("icon").exists()
+            && matches!(crate::forge::detect(&origin), Ok(info) if info.kind == crate::forge::ForgeKind::GitHub)
+        {
+            if let Some(meta) = crate::forgeapi::github_repo_meta(&self.cfg, &origin).await {
+                match meta.avatar_url {
+                    Some(url) => {
+                        if let Some(bytes) = crate::forgeapi::fetch_avatar(&url).await {
+                            let _ = fs::write(repo_dir.join("icon"), bytes);
+                        }
+                    }
+                    None => {
+                        let _ = fs::write(repo_dir.join("icon"), b"");
+                    }
+                }
+            }
+        }
 
         // Probe the remote first (cheap). If it's gone entirely, record that
         // state on the manifest and keep the local archive untouched.

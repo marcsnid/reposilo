@@ -48,6 +48,7 @@ pub fn router() -> Router<Arc<AppState>> {
             "/repos/{*rest}",
             get(repo_page).post(repo_post),
         )
+        .route("/repo-icon/{*rel}", get(repo_icon))
         .route("/assets/style.css", get(style_css))
         .route("/assets/htmx.min.js", get(htmx_js))
 }
@@ -130,6 +131,39 @@ async fn htmx_js() -> Response {
         Body::from(include_str!("../assets/htmx.min.js")),
     )
         .into_response()
+}
+
+/// GET /repo-icon/{rel}: serve a repo's stored owner avatar (if any).
+async fn repo_icon(State(st): State<Arc<AppState>>, AxPath(rel): AxPath<String>) -> Response {
+    let Some(repo) = st.find_repo(rel.trim_matches('/')).await else {
+        return (StatusCode::NOT_FOUND, "no such repo").into_response();
+    };
+    match tokio::fs::read(repo.dir.join("icon")).await {
+        Ok(bytes) if !bytes.is_empty() => (
+            [
+                (header::CONTENT_TYPE, sniff_image(&bytes)),
+                (header::CACHE_CONTROL, "public, max-age=86400"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        _ => (StatusCode::NOT_FOUND, "no icon").into_response(),
+    }
+}
+
+/// Best-effort image content type from magic bytes (avatars are stored raw).
+fn sniff_image(b: &[u8]) -> &'static str {
+    if b.starts_with(&[0x89, b'P', b'N', b'G']) {
+        "image/png"
+    } else if b.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        "image/jpeg"
+    } else if b.starts_with(b"GIF8") {
+        "image/gif"
+    } else if b.len() > 12 && &b[0..4] == b"RIFF" && &b[8..12] == b"WEBP" {
+        "image/webp"
+    } else {
+        "application/octet-stream"
+    }
 }
 
 /// GET /healthz: unauthenticated liveness probe for containers and monitoring.
@@ -1317,7 +1351,16 @@ async fn notifications_mark_read(State(st): State<Arc<AppState>>, headers: Heade
 
 #[cfg(test)]
 mod tests {
-    use super::icon_first_char;
+    use super::{icon_first_char, sniff_image};
+
+    #[test]
+    fn sniffs_common_image_types() {
+        assert_eq!(sniff_image(b"\x89PNG\r\n\x1a\n"), "image/png");
+        assert_eq!(sniff_image(b"\xFF\xD8\xFF\xE0"), "image/jpeg");
+        assert_eq!(sniff_image(b"GIF89a"), "image/gif");
+        assert_eq!(sniff_image(b"RIFF\x00\x00\x00\x00WEBPVP8 "), "image/webp");
+        assert_eq!(sniff_image(b"not an image"), "application/octet-stream");
+    }
 
     #[test]
     fn icon_keeps_only_the_first_character() {

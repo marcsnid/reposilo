@@ -227,6 +227,12 @@ button:hover, button[type="submit"]:hover { background: var(--chip-hover); }
 .card.tinted:hover { box-shadow: 0 0 0 1px var(--tint), 0 10px 26px #00000040; }
 .card-head { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
 .card-title { flex: 0 1 auto; font-size: 1.05rem; font-weight: 600; }
+/* stored owner avatar, from the repo itself */
+.repo-icon {
+  width: 20px; height: 20px; border-radius: 5px; object-fit: cover;
+  flex: 0 0 auto; background: var(--chip-bg);
+}
+.repo-icon-lg { width: 34px; height: 34px; border-radius: 8px; vertical-align: middle; margin-right: 0.45rem; }
 /* quick actions: revealed on hover / keyboard focus */
 .card-actions { display: inline-flex; gap: 0.25rem; margin-left: auto; opacity: 0; transition: opacity 0.12s ease; }
 .card:hover .card-actions, .card:focus-within .card-actions { opacity: 1; }

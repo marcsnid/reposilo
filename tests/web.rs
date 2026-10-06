@@ -1043,3 +1043,61 @@ async fn metadata_color_badge_roundtrips() -> Result<()> {
     assert!(m2["color"].is_null(), "empty color should clear the badge: {m2}");
     Ok(())
 }
+
+/// A stored owner avatar is served from the archive and shown on the card and
+/// detail header. Repos without one 404 and show no icon.
+#[tokio::test]
+async fn repo_icon_is_stored_and_served() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    let repo = root.join("owner-demo");
+    let plain = root.join("owner-plain");
+    let empty = root.join("owner-empty");
+    fs::create_dir_all(&repo)?;
+    fs::create_dir_all(&plain)?;
+    fs::create_dir_all(&empty)?;
+    fs::write(
+        repo.join("repo.json"),
+        r#"{"forge":"github","name":"demo","added":"2025-01-01T00:00:00Z","default_branch":"main"}"#,
+    )?;
+    fs::write(
+        plain.join("repo.json"),
+        r#"{"forge":"github","name":"plain","added":"2025-01-01T00:00:00Z","default_branch":"main"}"#,
+    )?;
+    fs::write(
+        empty.join("repo.json"),
+        r#"{"forge":"github","name":"empty","added":"2025-01-01T00:00:00Z","default_branch":"main"}"#,
+    )?;
+    let icon: &[u8] = b"\x89PNG\r\n\x1a\nfake-avatar-bytes";
+    fs::write(repo.join("icon"), icon)?;
+    // zero-byte marker = "checked, no avatar" -> not an icon
+    fs::write(empty.join("icon"), b"")?;
+
+    let (base, _st) = spawn_server(test_cfg(&root)).await;
+    let client = reqwest::Client::new();
+
+    let resp = client.get(format!("{base}/repo-icon/owner-demo")).send().await?;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers().get("content-type").unwrap().to_str().unwrap(), "image/png");
+    assert_eq!(resp.bytes().await?.as_ref(), icon);
+
+    let page = client.get(format!("{base}/")).send().await?.text().await?;
+    assert!(page.contains(r#"src="/repo-icon/owner-demo""#), "card icon missing: {page}");
+    assert!(!page.contains(r#"src="/repo-icon/owner-plain""#), "plain repo should have no icon: {page}");
+    assert!(!page.contains(r#"src="/repo-icon/owner-empty""#), "zero-byte marker is not an icon: {page}");
+
+    let detail = client.get(format!("{base}/repos/owner-demo")).send().await?.text().await?;
+    assert!(detail.contains("repo-icon-lg"), "detail icon missing: {detail}");
+    assert!(detail.contains(r#"src="/repo-icon/owner-demo""#), "{detail}");
+
+    assert_eq!(
+        client.get(format!("{base}/repo-icon/owner-plain")).send().await?.status(),
+        404
+    );
+    // a zero-byte marker file must not be served either
+    assert_eq!(
+        client.get(format!("{base}/repo-icon/owner-empty")).send().await?.status(),
+        404
+    );
+    Ok(())
+}

@@ -4,7 +4,7 @@
 <div class="detail">
   <div class="detail-head">
     <div>
-      <h1><a href="{{ ctx.back_url }}">←</a> {{ ctx.name }}</h1>
+      <h1><a href="{{ ctx.back_url }}">←</a> {% if ctx.has_icon %}<img class="repo-icon repo-icon-lg" src="/repo-icon/{{ ctx.rel }}" alt="" width="34" height="34">{% endif %}{{ ctx.name }}</h1>
       <div class="detail-sub">
         <span class="badge forge-{{ ctx.forge }}">{{ ctx.forge }}</span>
         {% if ctx.unidentified %}<span class="badge danger">unidentified</span>{% endif %}
