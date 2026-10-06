@@ -327,6 +327,16 @@ async fn folder_management_flow() -> Result<()> {
     assert!(page.contains("games"), "{page}");
     assert!(page.contains("🎮"), "{page}");
 
+    // the edit form must carry the folder path so save/rename works (regression:
+    // the hidden `rel` field was missing, so updates failed with "no such folder")
+    let form = client
+        .get(format!("{base}/folders/edit?rel=games"))
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert!(form.contains(r#"name="rel" value="games""#), "edit form must resubmit rel: {form}");
+
     // nested folder: decomp under games
     let resp = client
         .post(format!("{base}/folders/create"))
@@ -482,14 +492,15 @@ async fn repo_delete_ui_confirms_then_deletes() -> Result<()> {
         .await?;
     wait_jobs_done(&base).await;
 
-    // the detail page offers a Danger zone delete
+    // the detail page offers an Actions panel with delete + force refresh
     let detail = client
         .get(format!("{base}/repos/remotes-delproj"))
         .send()
         .await?
         .text()
         .await?;
-    assert!(detail.contains("Danger zone"), "{detail}");
+    assert!(detail.contains("Actions"), "{detail}");
+    assert!(detail.contains("Force Refresh"), "{detail}");
     assert!(detail.contains("/repos/remotes-delproj/delete"), "{detail}");
 
     // the confirm fragment asks, and offers the extra file-delete check

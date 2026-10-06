@@ -849,6 +849,8 @@ pub struct SettingsCtx {
     pub release_all: bool,
     pub release_platforms_extra: String,
     pub release_max_asset_mb: String,
+    // tags
+    pub take_suggested_tags: bool,
     pub saved: bool,
 }
 
@@ -913,6 +915,7 @@ pub fn settings_ctx_from(cfg: &crate::config::Config, saved: bool) -> SettingsCt
         release_all: all,
         release_platforms_extra,
         release_max_asset_mb: cfg.releases.max_asset_mb.to_string(),
+        take_suggested_tags: cfg.tags.take_suggested,
         saved,
     }
 }

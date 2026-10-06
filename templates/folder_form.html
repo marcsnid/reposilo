@@ -13,9 +13,10 @@
     <p class="note">Nested folders use full paths, e.g. create "cli" with parent "rust" for rust/cli.</p>
   {% else %}
   <form hx-post="{{ ctx.update_url }}" hx-target="#folder-form" hx-swap="outerHTML">
+    <input type="hidden" name="rel" value="{{ ctx.rel }}">
     <div class="settings-row"><label>Name</label>
       <input type="text" name="name" required maxlength="64" value="{{ ctx.name }}"></div>
-    <p class="note">{{ ctx.rel }} <span class="count">{{ ctx.count }}</span></p>
+    <p class="note">{{ ctx.rel }} · <span class="count">{{ ctx.count }} repo(s)</span></p>
   {% endif %}
     <div class="settings-row"><label>Icon</label>
       <input type="text" name="icon" id="folder-icon" maxlength="8" value="{{ ctx.icon }}" placeholder="emoji, blank = colored dot"></div>

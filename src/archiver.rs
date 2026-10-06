@@ -289,12 +289,20 @@ impl Archiver {
             None => (None, Vec::new()),
         };
 
+        // "take on suggested tags": keep manual tags, then add the forge's
+        // suggested topics (case-insensitively deduped) when enabled.
+        let manifest_tags = if self.cfg.tags.take_suggested {
+            crate::tagging::merge_suggested(tags, &suggested_tags)
+        } else {
+            tags.to_vec()
+        };
+
         let manifest = RepoManifest {
             origin: Some(url.to_string()),
             forge: info.kind.id().to_string(),
             name: info.name.clone(),
             added: now_rfc3339(),
-            tags: tags.to_vec(),
+            tags: manifest_tags,
             description,
             language,
             stars,

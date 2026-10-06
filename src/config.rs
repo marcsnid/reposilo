@@ -20,6 +20,16 @@ pub struct Config {
     pub releases: ReleasesCfg,
     pub llm: LlmCfg,
     pub otel: OtelCfg,
+    pub tags: TagsCfg,
+}
+
+/// Tag-related behavior.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TagsCfg {
+    /// When true, forge-suggested tags (e.g. GitHub topics) are applied to a
+    /// repo's normal tag list automatically, alongside any manual tags.
+    pub take_suggested: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -318,6 +328,13 @@ mod tests {
         assert_eq!(cfg.releases.max_asset_mb, 0);
         assert!(cfg.gitlab.token.is_none());
         assert!(cfg.forgejo.token.is_none());
+    }
+
+    #[test]
+    fn tags_take_suggested_parses() {
+        let cfg: Config = toml::from_str("[tags]\ntake_suggested = true\n").unwrap();
+        assert!(cfg.tags.take_suggested);
+        assert!(!Config::default().tags.take_suggested);
     }
 
     #[test]

@@ -80,30 +80,84 @@ fn is_hex_sha(s: &str) -> bool {
     !s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-fn is_safe_path(s: &str) -> bool {
+/// A relative path made of safe components (no absolute paths, no `..`).
+/// Used for `git show <commit>:<path>` and `git ls-tree <commit> <dir>/`.
+fn is_safe_rel_path(s: &str) -> bool {
     !s.is_empty()
-        && !s.contains('/')
-        && !s.contains("..")
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+        && !s.starts_with('/')
+        && !s.contains('\\')
+        && s.split('/').all(|seg| {
+            !seg.is_empty()
+                && seg != "."
+                && seg != ".."
+                && seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+        })
 }
 
-/// Read one file at a commit. `path` must be a simple root-level name and
-/// `commit` must be a hex sha (validated to keep `git show <rev>:<path>`
-/// unambiguous and safe).
+/// Read one file at a commit. `path` is a safe relative path (may contain
+/// `/` for fallback README locations) and `commit` must be a hex sha
+/// (validated to keep `git show <rev>:<path>` unambiguous and safe).
 pub async fn read_file(shallow: &Path, commit: &str, path: &str) -> Result<Vec<u8>> {
     anyhow::ensure!(is_hex_sha(commit), "invalid commit id");
-    anyhow::ensure!(is_safe_path(path), "invalid file path");
+    anyhow::ensure!(is_safe_rel_path(path), "invalid file path");
     let spec = format!("{commit}:{path}");
     git_bytes(&["show", &spec], shallow).await
 }
 
-/// Pick the README entry from a root listing, GitHub-style priority:
+/// List one subdirectory of a commit (non-recursive). Entry paths are
+/// returned relative to that subdirectory so `pick_readme` works unchanged.
+pub async fn list_subdir(shallow: &Path, commit: &str, dir: &str) -> Result<Vec<FileEntry>> {
+    anyhow::ensure!(is_hex_sha(commit), "invalid commit id");
+    anyhow::ensure!(is_safe_rel_path(dir), "invalid dir");
+    let out = git_str(&["ls-tree", "-l", "--full-name", commit, &format!("{dir}/")], shallow).await?;
+    let prefix = format!("{dir}/");
+    let mut entries = Vec::new();
+    for line in out.lines() {
+        let Some((meta, path)) = line.split_once('\t') else { continue };
+        let parts: Vec<&str> = meta.split_whitespace().collect();
+        if parts.len() < 4 {
+            continue;
+        }
+        let is_dir = parts[1] == "tree";
+        let size = parts[3].parse::<u64>().unwrap_or(0);
+        let rel = path.strip_prefix(&prefix).unwrap_or(path).to_string();
+        entries.push(FileEntry { path: rel, is_dir, size });
+    }
+    Ok(entries)
+}
+
+/// Well-known directories a forge (or convention) may keep the README in
+/// when there is none at the repository root.
+pub const README_FALLBACK_DIRS: &[&str] =
+    &[".github", ".gitlab", ".gitea", ".forgejo", ".bitbucket", "docs"];
+
+/// Pick the README entry from a listing, GitHub-style priority:
 /// .md > .markdown > .txt > bare, regardless of listing order.
 pub fn pick_readme(entries: &[FileEntry]) -> Option<&FileEntry> {
     const CANDIDATES: &[&str] = &["readme.md", "readme.markdown", "readme.txt", "readme"];
     CANDIDATES
         .iter()
         .find_map(|c| entries.iter().filter(|e| !e.is_dir).find(|e| e.path.eq_ignore_ascii_case(c)))
+}
+
+/// Locate a README for a commit: root first, then the well-known fallback
+/// directories (`.github/README.md`, `.gitlab/README.md`, `docs/README.md`, …).
+/// Returns the path relative to the repo root.
+async fn find_readme(shallow: &Path, commit: &str) -> Option<String> {
+    let entries = list_root(shallow, commit).await.ok()?;
+    if let Some(r) = pick_readme(&entries) {
+        return Some(r.path.clone());
+    }
+    for dir in README_FALLBACK_DIRS {
+        if !entries.iter().any(|e| e.is_dir && e.path.eq_ignore_ascii_case(dir)) {
+            continue;
+        }
+        let Ok(sub) = list_subdir(shallow, commit, dir).await else { continue };
+        if let Some(r) = pick_readme(&sub) {
+            return Some(format!("{dir}/{}", r.path));
+        }
+    }
+    None
 }
 
 /// Render markdown to HTML.
@@ -158,14 +212,13 @@ pub fn first_paragraph(md: &str) -> Option<String> {
 
 /// Full README handling: returns (file name, rendered html, truncated).
 pub async fn render_readme(shallow: &Path, commit: &str) -> Option<(String, String, bool)> {
-    let entries = list_root(shallow, commit).await.ok()?;
-    let readme = pick_readme(&entries)?;
-    let bytes = read_file(shallow, commit, &readme.path).await.ok()?;
+    let path = find_readme(shallow, commit).await?;
+    let bytes = read_file(shallow, commit, &path).await.ok()?;
     const MAX: usize = 256 * 1024;
     let truncated = bytes.len() > MAX;
     let md = String::from_utf8_lossy(&bytes[..bytes.len().min(MAX)]).into_owned();
     let html = markdown_to_html(&md);
-    Some((readme.path.clone(), html, truncated))
+    Some((path, html, truncated))
 }
 
 /// Extract the section of a CHANGELOG covering a specific version/tag.
@@ -201,9 +254,8 @@ pub fn extract_changelog_section(text: &str, tag: &str, version: &str) -> Option
 /// Raw README text (up to `max` chars) for LLM context.
 pub async fn readme_text(shallow: &Path, rev: &str, max: usize) -> Option<String> {
     let commit = rev_parse(shallow, rev).await.ok()?;
-    let entries = list_root(shallow, &commit).await.ok()?;
-    let readme = pick_readme(&entries)?;
-    let bytes = read_file(shallow, &commit, &readme.path).await.ok()?;
+    let path = find_readme(shallow, &commit).await?;
+    let bytes = read_file(shallow, &commit, &path).await.ok()?;
     let text = String::from_utf8_lossy(&bytes[..bytes.len().min(max)]).into_owned();
     Some(text)
 }
@@ -212,9 +264,8 @@ pub async fn readme_text(shallow: &Path, rev: &str, max: usize) -> Option<String
 /// The rev may be a branch name, so it is resolved to a sha first.
 pub async fn readme_description(shallow: &Path, rev: &str) -> Option<String> {
     let commit = rev_parse(shallow, rev).await.ok()?;
-    let entries = list_root(shallow, &commit).await.ok()?;
-    let readme = pick_readme(&entries)?;
-    let bytes = read_file(shallow, &commit, &readme.path).await.ok()?;
+    let path = find_readme(shallow, &commit).await?;
+    let bytes = read_file(shallow, &commit, &path).await.ok()?;
     let md = String::from_utf8_lossy(&bytes[..bytes.len().min(64 * 1024)]).into_owned();
     first_paragraph(&md)
 }
@@ -527,6 +578,19 @@ fn fmt_of(path: &Path) -> Option<ArchFmt> {
     }
 }
 
+/// README candidates in priority order: repo root first, then the
+/// well-known fallback directories (`.github/README.md`, etc.).
+fn readme_paths() -> Vec<String> {
+    const NAMES: &[&str] = &["README.md", "README.markdown", "README.txt", "README"];
+    let mut out: Vec<String> = NAMES.iter().map(|n| n.to_string()).collect();
+    for dir in README_FALLBACK_DIRS {
+        for n in NAMES {
+            out.push(format!("{dir}/{n}"));
+        }
+    }
+    out
+}
+
 // ---------- tar.zst reading (zstd streaming + tar headers) ----------
 
 
@@ -586,13 +650,13 @@ fn readme_from_tar_zst(path: &Path) -> Option<(String, String, bool)> {
             None => cand.to_string(),
         }
     };
-    for cand in ["README.md", "README.markdown", "README.txt", "README"] {
-        let full = mk(cand);
+    for cand in readme_paths() {
+        let full = mk(&cand);
         if raw.iter().any(|(n, _, _)| n.eq_ignore_ascii_case(&full)) {
             let bytes = tar_read_entry(path, &full, 256 * 1024)?;
             let truncated = bytes.len() >= 256 * 1024;
             let text = String::from_utf8_lossy(&bytes).into_owned();
-            return Some((cand.to_string(), text, truncated));
+            return Some((cand, text, truncated));
         }
     }
     None
@@ -727,13 +791,13 @@ pub fn readme_from_zip(zip_path: &Path) -> Option<(String, String, bool)> {
             None => cand.to_string(),
         }
     };
-    for cand in ["README.md", "README.markdown", "README.txt", "README"] {
-        let full = mk(cand);
+    for cand in readme_paths() {
+        let full = mk(&cand);
         if names.iter().any(|n| n.eq_ignore_ascii_case(&full)) {
             let bytes = zip_read(zip_path, &full, 256 * 1024)?;
             let truncated = bytes.len() >= 256 * 1024;
             let text = String::from_utf8_lossy(&bytes).into_owned();
-            return Some((cand.to_string(), text, truncated));
+            return Some((cand, text, truncated));
         }
     }
     None
@@ -802,6 +866,26 @@ mod zip_tests {
         let (name, text, _) = readme_from_zip(&p).unwrap();
         assert_eq!(name, "README.md");
         assert!(text.contains("# MD"));
+    }
+
+    #[test]
+    fn readme_from_zip_falls_back_to_github_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("d.zip");
+        make_zip(&p, &[("x/src/main.rs", "fn main(){}"), ("x/.github/README.md", "# From .github")]);
+        let (name, text, _) = readme_from_zip(&p).unwrap();
+        assert_eq!(name, ".github/README.md");
+        assert!(text.contains("From .github"));
+    }
+
+    #[test]
+    fn readme_from_zip_prefers_root_over_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("e.zip");
+        make_zip(&p, &[("x/README.md", "# root"), ("x/.github/README.md", "# fallback")]);
+        let (name, text, _) = readme_from_zip(&p).unwrap();
+        assert_eq!(name, "README.md");
+        assert!(text.contains("root"));
     }
 }
 
@@ -887,5 +971,15 @@ mod tarzst_tests {
         let (name, text, _) = readme_from_archive(&p).unwrap();
         assert_eq!(name, "README.md");
         assert!(text.contains("# MD"));
+    }
+
+    #[test]
+    fn readme_from_tar_zst_falls_back_to_github_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("d.tar.zst");
+        make_tar_zst(&p, &[("x/src/main.rs", "fn main(){}"), ("x/.github/README.md", "# From .github")]);
+        let (name, text, _) = readme_from_archive(&p).unwrap();
+        assert_eq!(name, ".github/README.md");
+        assert!(text.contains("From .github"));
     }
 }

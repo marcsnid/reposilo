@@ -464,7 +464,7 @@ async fn save_metadata_ui(st: &Arc<AppState>, rel: &str, form: HashMap<String, S
     let moved = new_rel != repo.rel;
     let oob = oob_app_refresh(st).await;
     let msg = if origin_changed {
-        format!(r#"&#10003; metadata saved: origin set, repo is now <a href="/repos/{new_rel}">{new_rel}</a><br><span class="dim">hit the Refresh button to clone it</span>"#)
+        format!(r#"&#10003; metadata saved: origin set, repo is now <a href="/repos/{new_rel}">{new_rel}</a><br><span class="dim">hit Force Refresh to clone it</span>"#)
     } else if moved {
         format!(r#"&#10003; metadata saved: moved to <a href="/repos/{new_rel}">{new_rel}</a>"#)
     } else {
@@ -497,7 +497,7 @@ async fn assign_origin_ui(st: &Arc<AppState>, rel: &str, form: OriginForm) -> Re
         Ok(new_rel) => {
             let oob = oob_app_refresh(st).await;
             html(format!(
-                r#"<div class="job-status ok">✓ origin saved: repo is now <a href="/repos/{new_rel}">{new_rel}</a><br><span class="dim">hit ⟳ Refresh now to clone it</span></div>{oob}"#
+                r#"<div class="job-status ok">✓ origin saved: repo is now <a href="/repos/{new_rel}">{new_rel}</a><br><span class="dim">hit ⟳ Force Refresh to clone it</span></div>{oob}"#
             ))
         }
         Err(e) => html(format!(r#"<div class="import-error">{}</div>"#, e.1)),
@@ -863,6 +863,7 @@ async fn settings_save(
     platforms.retain(|p| seen.insert(p.clone()));
     cfg.releases.platforms = platforms;
     cfg.releases.max_asset_mb = num(&f, "release_max_asset_mb", cfg.releases.max_asset_mb);
+    cfg.tags.take_suggested = f.0.get("take_suggested_tags").map(|v| v == "1").unwrap_or(false);
 
     // apply live
     *st.cfg.write().await = cfg.clone();

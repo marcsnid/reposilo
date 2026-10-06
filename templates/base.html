@@ -78,6 +78,39 @@
     </div>
   </header>
   <div id="toast"></div>
+  <script>
+    // Status messages land in the fixed #toast area at the bottom of the
+    // viewport and fade out once the job is done. htmx swaps the fragments
+    // in asynchronously, so hook into afterSwap.
+    (function () {
+      function dismiss(el) {
+        if (!el || el.dataset.toastDismissed) return;
+        el.dataset.toastDismissed = '1';
+        el.classList.add('toast-out');
+        setTimeout(function () { el.remove(); }, 450);
+      }
+      document.body.addEventListener('htmx:afterSwap', function (evt) {
+        var t = evt.detail && evt.detail.target;
+        if (!t) return;
+        var nodes = [];
+        if (t.matches && t.matches('.job-status, .import-error')) nodes.push(t);
+        if (t.id === 'toast') {
+          nodes = nodes.concat(Array.prototype.slice.call(t.children));
+        } else {
+          nodes = nodes.concat(Array.prototype.slice.call(t.querySelectorAll('.job-status, .import-error')));
+        }
+        nodes.forEach(function (n) {
+          if (!n.closest('#toast')) return;
+          n.classList.add('toast-msg');
+          // keep in-progress polls and interactive confirmations on screen
+          var sticky = n.hasAttribute('hx-get') || n.querySelector('form') || n.querySelector('input[type="checkbox"]');
+          if (sticky) return;
+          var delay = n.classList.contains('import-error') || n.classList.contains('failed') ? 7000 : 4000;
+          setTimeout(function () { dismiss(n); }, delay);
+        });
+      });
+    })();
+  </script>
   {% block content %}{% endblock %}
 </body>
 </html>

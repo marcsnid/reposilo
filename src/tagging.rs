@@ -5,6 +5,20 @@ use crate::index::RepoEntry;
 use crate::llm::{LlmTagger, TagTarget};
 use crate::types::write_json;
 
+/// Merge suggested tags (forge topics, LLM suggestions) into a repo's own tag
+/// list. Case-insensitive de-dupe, stable lowercase ordering.
+pub fn merge_suggested(base: &[String], suggested: &[String]) -> Vec<String> {
+    let mut out = base.to_vec();
+    for t in suggested {
+        if !out.iter().any(|e| e.eq_ignore_ascii_case(t)) {
+            out.push(t.clone());
+        }
+    }
+    out.sort_by_key(|t| t.to_lowercase());
+    out.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+    out
+}
+
 pub struct AutotagEntryResult {
     pub repo: String,
     pub new_tags: Vec<String>,
@@ -77,4 +91,23 @@ fn readme_excerpt(r: &RepoEntry) -> Option<String> {
                 .and_then(|e| crate::files::readme_from_archive(&e.dir.join(&e.sidecar.zip.file)))
                 .map(|(_, text, _)| text.chars().take(2000).collect::<String>())
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_suggested;
+
+    #[test]
+    fn merge_keeps_manual_tags_and_dedupes_case_insensitively() {
+        let base = vec!["manual".to_string(), "Rust".to_string()];
+        let suggested = vec!["rust".to_string(), "cli".to_string(), "tooling".to_string()];
+        let merged = merge_suggested(&base, &suggested);
+        assert_eq!(merged, vec!["cli", "manual", "Rust", "tooling"]);
+    }
+
+    #[test]
+    fn merge_with_nothing_sorts_and_dedupes() {
+        let base = vec!["b".to_string(), "a".to_string(), "A".to_string()];
+        assert_eq!(merge_suggested(&base, &[]), vec!["a", "b"]);
+    }
 }
