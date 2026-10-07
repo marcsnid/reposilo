@@ -1195,7 +1195,7 @@ mod tests {
     #[test]
     fn sanitize_keeps_safe_chars() {
         assert_eq!(sanitize("feature/abc-def"), "feature_abc-def");
-        assert_eq!(sanitize("sm64"), "sm64");
+        assert_eq!(sanitize("ripgrep"), "ripgrep");
     }
 
     #[test]

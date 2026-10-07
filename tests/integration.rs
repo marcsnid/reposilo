@@ -89,7 +89,7 @@ async fn add_snapshots_branch_and_release() -> Result<()> {
     push_tag(&tmp.path().join("work-fixture"), "v1.0.0");
 
     let archiver = Archiver::new(test_cfg(&archive));
-    let repo_dir = archiver.add_repo(&file_url(&remote), &["decomps".into(), "n64".into()], None).await?;
+    let repo_dir = archiver.add_repo(&file_url(&remote), &["cli".into(), "rust".into()], None).await?;
 
     // zip-only storage: NO persistent git store at default depth
     assert!(!repo_dir.join("shallow.git").exists(), "git store must be ephemeral at depth>0");
@@ -103,7 +103,7 @@ async fn add_snapshots_branch_and_release() -> Result<()> {
     assert_eq!(m["forge"], "generic");
     assert_eq!(m["default_branch"], "master");
     assert_eq!(m["language"], "Rust", "language detected at add time");
-    assert_eq!(m["tags"][0], "decomps");
+    assert_eq!(m["tags"][0], "cli");
 
     // branch snapshot zip + sidecar
     let branch_dir = repo_dir.join("branch").join("master");
@@ -150,8 +150,8 @@ async fn add_snapshots_branch_and_release() -> Result<()> {
     // index sees it, filter works
     let index = Index::load(&archive)?;
     assert_eq!(index.repos.len(), 1);
-    assert_eq!(index.filter(&["decomps".into(), "n64".into()], None).len(), 1);
-    assert_eq!(index.filter(&["decomps".into(), "wrong".into()], None).len(), 0);
+    assert_eq!(index.filter(&["cli".into(), "rust".into()], None).len(), 1);
+    assert_eq!(index.filter(&["cli".into(), "wrong".into()], None).len(), 0);
     assert_eq!(index.filter(&[], Some("FIXTURE")).len(), 1); // case-insensitive query
     Ok(())
 }

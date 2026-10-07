@@ -44,6 +44,9 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/folders/update", post(folders_update))
         .route("/folders/options", get(folders_options))
         .route("/repos/move", post(repo_move))
+        .route("/repos/bulk", post(bulk_action))
+        .route("/repos/bulk/tag", get(bulk_tag_modal))
+        .route("/repos/bulk/move", get(bulk_move_modal))
         .route(
             "/repos/{*rest}",
             get(repo_page).post(repo_post),
@@ -714,6 +717,234 @@ async fn repo_move(State(st): State<Arc<AppState>>, Form(form): Form<MoveForm>) 
         }
         Err(e) => err(e),
     }
+}
+
+// ---------- bulk operations ----------
+
+#[derive(Deserialize, Default)]
+struct BulkForm {
+    #[serde(default)]
+    action: String,
+    /// JSON array of repo rel paths, built by the selection JS.
+    #[serde(default)]
+    repos: String,
+    #[serde(default)]
+    tag: String,
+    #[serde(default)]
+    folder: String,
+    #[serde(default)]
+    files: String,
+}
+
+fn bulk_toast(ok: bool, msg: &str) -> Response {
+    let cls = if ok { "ok" } else { "failed" };
+    html(format!(
+        r#"<div class="job-status {cls}">{}</div>"#,
+        html_escape(msg)
+    ))
+}
+
+/// A success toast plus an out-of-bounds refresh of the grid (which also
+/// resets the selection UI) and a close for the bulk modal, if one is open.
+async fn bulk_done(st: &Arc<AppState>, msg: String) -> Response {
+    html(format!(
+        r#"<div class="job-status ok">{}</div>{}{}"#,
+        html_escape(&msg),
+        oob_close_modal("bulk-modal"),
+        oob_app_refresh(st).await
+    ))
+}
+
+fn skip_note(skipped: usize) -> String {
+    if skipped == 0 {
+        String::new()
+    } else {
+        format!(" ({skipped} skipped: missing or busy)")
+    }
+}
+
+/// POST /repos/bulk: apply one action to the repositories selected in the UI.
+async fn bulk_action(State(st): State<Arc<AppState>>, Form(form): Form<BulkForm>) -> Response {
+    let rels: Vec<String> = serde_json::from_str::<Vec<String>>(&form.repos)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| r.trim().trim_matches('/').to_string())
+        .filter(|r| !r.is_empty())
+        .collect();
+    if rels.is_empty() {
+        return bulk_toast(false, "Select at least one repository");
+    }
+    match form.action.as_str() {
+        "refresh" => bulk_refresh(&st, rels).await,
+        "tag_add" => bulk_tag(&st, &rels, &form.tag, true).await,
+        "tag_remove" => bulk_tag(&st, &rels, &form.tag, false).await,
+        "move" => bulk_move(&st, &rels, &form.folder).await,
+        "delete" => bulk_delete(&st, &rels, form.files == "1").await,
+        _ => bulk_toast(false, "Unknown bulk action"),
+    }
+}
+
+/// GET /repos/bulk/tag: a modal to add or remove one tag on the selection.
+async fn bulk_tag_modal() -> Response {
+    html(
+        r##"<div class="modal-backdrop" id="bulk-modal" onclick="if(event.target===this)this.remove()">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="bulk-tag-title">
+    <h2 id="bulk-tag-title">Edit tags</h2>
+    <p class="dim">Applied to the selected repositories.</p>
+    <label for="bulk-tag-input">Tag</label>
+    <input id="bulk-tag-input" type="text" autocomplete="off" placeholder="e.g. cli" autofocus>
+    <div class="modal-actions">
+      <button type="button" class="dim-btn" onclick="document.getElementById('bulk-modal').remove()">Cancel</button>
+      <button type="button" class="dim-btn" hx-post="/repos/bulk" hx-target="#toast" hx-swap="innerHTML"
+              hx-include="#bulk-tag-input"
+              hx-vals='js:{action:"tag_remove", repos: JSON.stringify(selectedRepos())}'>Remove</button>
+      <button type="button" class="refresh-btn" hx-post="/repos/bulk" hx-target="#toast" hx-swap="innerHTML"
+              hx-include="#bulk-tag-input"
+              hx-vals='js:{action:"tag_add", repos: JSON.stringify(selectedRepos())}'><span class="spinner htmx-indicator"></span>Add</button>
+    </div>
+  </div>
+</div>"##
+            .to_string(),
+    )
+}
+
+/// GET /repos/bulk/move: a modal to move the selection into a folder.
+async fn bulk_move_modal() -> Response {
+    html(
+        r##"<div class="modal-backdrop" id="bulk-modal" onclick="if(event.target===this)this.remove()">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="bulk-move-title">
+    <h2 id="bulk-move-title">Move to folder</h2>
+    <p class="dim">Moves the selected repositories. Leave empty for the archive root.</p>
+    <label for="bulk-move-folder">Folder</label>
+    <input id="bulk-move-folder" type="text" list="bulk-move-list" autocomplete="off" placeholder="e.g. tools/rust" autofocus>
+    <datalist id="bulk-move-list" hx-get="/folders/options" hx-trigger="load" hx-target="this" hx-swap="innerHTML"></datalist>
+    <div class="modal-actions">
+      <button type="button" class="dim-btn" onclick="document.getElementById('bulk-modal').remove()">Cancel</button>
+      <button type="button" class="refresh-btn" hx-post="/repos/bulk" hx-target="#toast" hx-swap="innerHTML"
+              hx-include="#bulk-move-folder"
+              hx-vals='js:{action:"move", repos: JSON.stringify(selectedRepos())}'><span class="spinner htmx-indicator"></span>Move</button>
+    </div>
+  </div>
+</div>"##
+            .to_string(),
+    )
+}
+
+/// Queue a refresh for each selected repo. A coordinator task takes permits
+/// from the shared semaphore, so a bulk refresh honours `max_concurrent`
+/// instead of starting every clone at once.
+async fn bulk_refresh(st: &Arc<AppState>, rels: Vec<String>) -> Response {
+    let total = rels.len();
+    let st2 = st.clone();
+    tokio::spawn(async move {
+        for rel in rels {
+            if !st2.try_lock_repo(&rel).await {
+                continue;
+            }
+            let permit = st2.refresh_sem.clone().acquire_owned().await.ok();
+            crate::server::spawn_refresh_job(st2.clone(), rel, "manual-refresh", permit).await;
+        }
+    });
+    tracing::info!(count = total, "bulk refresh queued");
+    bulk_done(st, format!("Refresh queued for {total} repositories")).await
+}
+
+/// Add or remove one tag in a repo manifest. `Ok(true)` when the file changed.
+async fn edit_tags(st: &Arc<AppState>, rel: &str, tag: &str, add: bool) -> Result<bool, ()> {
+    let Some(repo) = st.find_repo(rel).await else {
+        return Err(());
+    };
+    let path = repo.dir.join("repo.json");
+    let Ok(mut manifest) = crate::types::read_json::<crate::types::RepoManifest>(&path) else {
+        return Err(());
+    };
+    let before = manifest.tags.clone();
+    if add {
+        if !manifest.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
+            manifest.tags.push(tag.to_string());
+        }
+    } else {
+        manifest.tags.retain(|t| !t.eq_ignore_ascii_case(tag));
+    }
+    manifest.tags.sort();
+    manifest.tags.dedup();
+    if manifest.tags == before {
+        return Ok(false);
+    }
+    crate::types::write_json(&path, &manifest).map_err(|_| ())?;
+    Ok(true)
+}
+
+async fn bulk_tag(st: &Arc<AppState>, rels: &[String], tag: &str, add: bool) -> Response {
+    let tag = tag.trim();
+    if tag.is_empty() {
+        return bulk_toast(false, "Enter a tag first");
+    }
+    let mut changed = 0usize;
+    let mut skipped = 0usize;
+    for rel in rels {
+        if !st.try_lock_repo(rel).await {
+            skipped += 1;
+            continue;
+        }
+        let result = edit_tags(st, rel, tag, add).await;
+        st.unlock_repo(rel).await;
+        match result {
+            Ok(true) => changed += 1,
+            Ok(false) => {}
+            Err(()) => skipped += 1,
+        }
+    }
+    st.reindex().await.ok();
+    let verb = if add { "added to" } else { "removed from" };
+    tracing::info!(tag, add, changed, skipped, "bulk tag applied");
+    bulk_done(st, format!("Tag '{tag}' {verb} {changed} repositories{}", skip_note(skipped))).await
+}
+
+async fn bulk_move(st: &Arc<AppState>, rels: &[String], folder: &str) -> Response {
+    let folder = folder.trim().trim_matches('/').to_string();
+    let mut moved = 0usize;
+    let mut skipped = 0usize;
+    for rel in rels {
+        let Some(repo) = st.find_repo(rel).await else {
+            skipped += 1;
+            continue;
+        };
+        if !st.try_lock_repo(rel).await {
+            skipped += 1;
+            continue;
+        }
+        let result = crate::server::move_repo_to_folder(st, &repo, &folder).await;
+        st.unlock_repo(rel).await;
+        match result {
+            Ok(_) => moved += 1,
+            Err(_) => skipped += 1,
+        }
+    }
+    st.reindex().await.ok();
+    let dest = if folder.is_empty() { "the root".to_string() } else { format!("/{folder}") };
+    tracing::info!(folder = %folder, moved, skipped, "bulk move done");
+    bulk_done(st, format!("Moved {moved} repositories to {dest}{}", skip_note(skipped))).await
+}
+
+async fn bulk_delete(st: &Arc<AppState>, rels: &[String], delete_files: bool) -> Response {
+    let mut deleted = 0usize;
+    let mut skipped = 0usize;
+    for rel in rels {
+        let Some(repo) = st.find_repo(rel).await else {
+            skipped += 1;
+            continue;
+        };
+        // delete_repo takes the repo lock itself, so do not hold it here.
+        match crate::server::delete_repo(st, &repo, delete_files).await {
+            Ok(()) => deleted += 1,
+            Err(_) => skipped += 1,
+        }
+    }
+    st.reindex().await.ok();
+    let kept = if delete_files { "with their files" } else { "(files kept)" };
+    tracing::info!(deleted, skipped, delete_files, "bulk delete done");
+    bulk_done(st, format!("Removed {deleted} repositories {kept}{}", skip_note(skipped))).await
 }
 
 /// GET /folders/new: the create form (parent dropdown from the index).

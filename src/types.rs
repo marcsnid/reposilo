@@ -124,7 +124,7 @@ fn is_zero(v: &u64) -> bool {
 pub struct SnapshotSidecar {
     /// "branch-snapshot" | "release"
     pub kind: String,
-    /// Repo path relative to the archive root, e.g. "decompals/sm64".
+    /// Repo path relative to the archive root, e.g. "tools/ripgrep".
     pub repo: String,
     pub origin: String,
     #[serde(rename = "ref")]

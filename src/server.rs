@@ -100,6 +100,8 @@ pub struct AppState {
     pub governor: Arc<RemoteGovernor>,
     /// Conditional-request cache for forge API responses.
     pub http_cache: Arc<std::sync::Mutex<crate::httpcache::HttpCache>>,
+    /// Bounds concurrent refresh jobs, shared by the scheduler and bulk actions.
+    pub refresh_sem: Arc<Semaphore>,
     /// True while a full-archive integrity check is running, so the scheduled
     /// loop does not start one on top of a manual check.
     pub verify_active: std::sync::atomic::AtomicBool,
@@ -118,6 +120,7 @@ impl AppState {
             cfg.archive.root = c.to_string_lossy().into_owned();
         }
         let index = Index::load(&root)?;
+        let refresh_sem = Arc::new(Semaphore::new(cfg.scheduler.max_concurrent.max(1)));
         let notifications: Vec<Notification> = crate::types::read_json::<NotificationsFile>(&root.join("notifications.json"))
             .map(|f| f.items)
             .unwrap_or_default();
@@ -136,6 +139,7 @@ impl AppState {
             metrics: Mutex::new(crate::metrics::Metrics::load(&root)),
             governor: Arc::new(RemoteGovernor::new()),
             http_cache: Arc::new(std::sync::Mutex::new(crate::httpcache::HttpCache::load(&root))),
+            refresh_sem,
             verify_active: std::sync::atomic::AtomicBool::new(false),
             users: std::sync::Mutex::new(crate::auth::Users::load(&root)),
             sessions: crate::auth::SessionStore::new(),
@@ -1483,7 +1487,7 @@ fn integrity_body(report: &crate::verify::VerifyReport) -> String {
 
 async fn scheduler_loop(st: Arc<AppState>) {
     let poll_secs = st.cfg().await.scheduler.poll_every_secs.max(60);
-    let sem = Arc::new(Semaphore::new(st.cfg().await.scheduler.max_concurrent.max(1)));
+    let sem = st.refresh_sem.clone();
     tracing::info!(poll_every_secs = poll_secs, "scheduler started");
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(poll_secs as u64)).await;

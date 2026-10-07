@@ -585,3 +585,14 @@ table.files tr:last-child td { border-bottom: none; }
 .stats-table th, .stats-table td { text-align: left; padding: 0.35rem 0.6rem; border-bottom: 1px solid var(--border); }
 .stats-table th { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.03em; opacity: 0.65; }
 .stats-table .bad, .bad { color: var(--danger); }
+
+/* bulk operations: selection checkboxes and the action bar */
+.bulk-bar { display: none; align-items: center; flex-wrap: wrap; gap: 0.5rem; padding: 0.5rem 0.7rem; margin: 0 0 0.8rem; background: var(--bg-panel); border: 1px solid var(--border); border-radius: 8px; }
+.bulk-bar.active { display: flex; }
+.bulk-bar .bulk-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 0.4rem; }
+.bulk-bar .bulk-actions .chip { cursor: pointer; }
+.bulk-bar .bulk-all { display: flex; align-items: center; gap: 0.3rem; white-space: nowrap; font-size: 0.85rem; }
+.bulk-bar .chip.danger { color: var(--danger); border-color: var(--danger); }
+/* keep the per-card checkbox quiet until it is hovered or checked */
+.card-head .bulk-check { margin: 0 0.1rem 0 0; cursor: pointer; opacity: 0.35; }
+.card:hover .bulk-check, .bulk-check:checked { opacity: 1; }

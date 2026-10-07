@@ -92,8 +92,8 @@ reposilo init --root /path/to/archive
 reposilo user add yourname --password <pw>   # optional: enable login
 
 # add + manage repos
-reposilo add https://github.com/n64decomp/sm64.git --tag decomps --tag n64
-reposilo list --tag decomps --tag n64
+reposilo add https://github.com/BurntSushi/ripgrep.git --tag cli --tag rust
+reposilo list --tag cli --tag rust
 reposilo refresh all                         # pull new snapshots/releases
 reposilo reindex --catalog                    # stats + catalog.json
 reposilo verify                               # hash every zip against its sidecar
@@ -114,6 +114,7 @@ reposilo serve --bind 0.0.0.0:8765           # or REPOSILO_BIND=0.0.0.0:8765
 #   - search, tag-filter, browse repos with rendered READMEs
 #   - create and manage folders (any nesting depth, emoji icons or colored dots);
 #     drag cards onto a folder to move repos between them
+#   - select repos with the checkboxes to refresh, tag, move or remove them in bulk
 #   - edit metadata (name, description, notes, origin, folder, tags) per repo
 #   - import zips from Settings; assign origins to _unknown repos
 #   - notifications with readable release changelogs
@@ -141,7 +142,7 @@ format = "zip"             # or "tar.zst" (zstd level 10 by default)
 keep_branch_snapshots = 1   # -1 keeps everything
 keep_releases = 1          # -1 keeps everything
 # [[retention.tag_rules]]  # per-tag overrides:
-# tag = "decomps"
+# tag = "cli"
 # keep_releases = -1
 
 [scheduler]

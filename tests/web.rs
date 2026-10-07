@@ -368,66 +368,66 @@ async fn folder_management_flow() -> Result<()> {
         serde_json::from_str(&fs::read_to_string(tmp.path().join("archive/wordy/folder.json"))?)?;
     assert_eq!(wm["icon"], "h");
 
-    // nested folder: decomp under games
+    // nested folder: cli under games
     let resp = client
         .post(format!("{base}/folders/create"))
-        .form(&[("parent", "games"), ("name", "decomp"), ("icon", "")])
+        .form(&[("parent", "games"), ("name", "cli"), ("icon", "")])
         .send()
         .await?;
     assert_eq!(resp.status(), 200);
-    assert!(tmp.path().join("archive/games/decomp/folder.json").exists());
+    assert!(tmp.path().join("archive/games/cli/folder.json").exists());
 
-    // move the repo into games/decomp via the metadata form
+    // move the repo into games/cli via the metadata form
     let resp = client
         .post(format!("{base}/repos/remotes-webproj/metadata"))
-        .form(&[("folder", "games/decomp"), ("name", "WebTest"), ("description", ""), ("notes", "")])
+        .form(&[("folder", "games/cli"), ("name", "WebTest"), ("description", ""), ("notes", "")])
         .send()
         .await?;
     assert_eq!(resp.status(), 200);
     assert!(
-        tmp.path().join("archive/games/decomp/remotes-webproj/repo.json").exists(),
+        tmp.path().join("archive/games/cli/remotes-webproj/repo.json").exists(),
         "repo moved on disk"
     );
     // sidebar shows the nested folder with count 1
     let page = client.get(format!("{base}/")).send().await?.text().await?;
-    assert!(page.contains("decomp"), "{page}");
+    assert!(page.contains("cli"), "{page}");
 
     // rename the inner folder
     let resp = client
         .post(format!("{base}/folders/update"))
-        .form(&[("rel", "games/decomp"), ("op", "save"), ("name", "n64"), ("icon", "🕹")])
+        .form(&[("rel", "games/cli"), ("op", "save"), ("name", "build"), ("icon", "")])
         .send()
         .await?;
     assert_eq!(resp.status(), 200);
-    assert!(tmp.path().join("archive/games/n64/remotes-webproj/repo.json").exists());
+    assert!(tmp.path().join("archive/games/build/remotes-webproj/repo.json").exists());
     let page = client.get(format!("{base}/")).send().await?.text().await?;
-    assert!(page.contains("🕹"), "{page}");
+    assert!(page.contains("build"), "{page}");
 
     // delete with a repo inside must fail
     let body = client
         .post(format!("{base}/folders/update"))
-        .form(&[("rel", "games/n64"), ("op", "delete"), ("name", "n64"), ("icon", "")])
+        .form(&[("rel", "games/build"), ("op", "delete"), ("name", "build"), ("icon", "")])
         .send()
         .await?
         .text()
         .await?;
     assert!(body.contains("move them out first"), "{body}");
-    assert!(tmp.path().join("archive/games/n64").exists());
+    assert!(tmp.path().join("archive/games/build").exists());
 
     // move the repo back out, then delete succeeds
     client
-        .post(format!("{base}/repos/games/n64/remotes-webproj/metadata"))
+        .post(format!("{base}/repos/games/build/remotes-webproj/metadata"))
         .form(&[("folder", ""), ("name", "WebTest"), ("description", ""), ("notes", "")])
         .send()
         .await?;
     assert!(tmp.path().join("archive/remotes-webproj/repo.json").exists());
     let resp = client
         .post(format!("{base}/folders/update"))
-        .form(&[("rel", "games/n64"), ("op", "delete"), ("name", "n64"), ("icon", "")])
+        .form(&[("rel", "games/build"), ("op", "delete"), ("name", "build"), ("icon", "")])
         .send()
         .await?;
     assert_eq!(resp.status(), 200);
-    assert!(!tmp.path().join("archive/games/n64").exists());
+    assert!(!tmp.path().join("archive/games/build").exists());
 
     // invalid names are rejected
     let body = client
@@ -1142,5 +1142,192 @@ async fn repo_icon_is_stored_and_served() -> Result<()> {
         client.get(format!("{base}/repo-icon/owner-empty")).send().await?.status(),
         404
     );
+    Ok(())
+}
+
+fn write_min_repo(root: &Path, rel: &str, name: &str) {
+    let dir = root.join(rel);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("repo.json"),
+        format!(r#"{{"forge":"generic","name":"{name}","added":"2025-01-01T00:00:00Z","default_branch":"main"}}"#),
+    )
+    .unwrap();
+}
+
+fn read_tags(root: &Path, rel: &str) -> Vec<String> {
+    let raw = fs::read_to_string(root.join(rel).join("repo.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    v["tags"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|t| t.as_str().map(str::to_string)).collect())
+        .unwrap_or_default()
+}
+
+/// Bulk tag, move and delete across several repos, plus the selection UI.
+#[tokio::test]
+async fn bulk_operations_tag_move_and_delete() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    write_min_repo(&root, "owner-a", "a");
+    write_min_repo(&root, "owner-b", "b");
+    let (base, _st) = spawn_server(test_cfg(&root)).await;
+    let client = reqwest::Client::new();
+
+    // The grid renders the selection controls.
+    let page = client.get(format!("{base}/")).send().await?.text().await?;
+    assert!(page.contains("id=\"bulk-bar\""), "bulk bar missing: {page}");
+    assert!(page.contains("class=\"bulk-check\""), "selection checkboxes missing");
+    assert!(page.contains("hx-post=\"/repos/bulk\""), "bulk action buttons missing");
+
+    let rels = serde_json::json!(["owner-a", "owner-b"]).to_string();
+
+    // Add a tag to both.
+    let resp = client
+        .post(format!("{base}/repos/bulk"))
+        .form(&[("action", "tag_add"), ("repos", rels.as_str()), ("tag", "bulk")])
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let body = resp.text().await?;
+    assert!(body.contains("added to 2 repositories"), "{body}");
+    assert_eq!(read_tags(&root, "owner-a"), vec!["bulk"]);
+    assert_eq!(read_tags(&root, "owner-b"), vec!["bulk"]);
+
+    // Remove it again.
+    let resp = client
+        .post(format!("{base}/repos/bulk"))
+        .form(&[("action", "tag_remove"), ("repos", rels.as_str()), ("tag", "bulk")])
+        .send()
+        .await?;
+    let body = resp.text().await?;
+    assert!(body.contains("removed from 2 repositories"), "{body}");
+    assert!(read_tags(&root, "owner-a").is_empty());
+
+    // Move both into a folder.
+    let resp = client
+        .post(format!("{base}/repos/bulk"))
+        .form(&[("action", "move"), ("repos", rels.as_str()), ("folder", "cat")])
+        .send()
+        .await?;
+    let body = resp.text().await?;
+    assert!(body.contains("Moved 2 repositories"), "{body}");
+    assert!(root.join("cat/owner-a/repo.json").exists(), "owner-a not moved");
+    assert!(root.join("cat/owner-b/repo.json").exists(), "owner-b not moved");
+
+    // Delete one from the index but keep its files.
+    let one = serde_json::json!(["cat/owner-a"]).to_string();
+    let resp = client
+        .post(format!("{base}/repos/bulk"))
+        .form(&[("action", "delete"), ("repos", one.as_str())])
+        .send()
+        .await?;
+    let body = resp.text().await?;
+    assert!(body.contains("Removed 1 repositories"), "{body}");
+    assert!(!root.join("cat/owner-a/repo.json").exists(), "manifest should be gone");
+    assert!(root.join("cat/owner-a").exists(), "files should be kept by default");
+    assert!(root.join("cat/owner-b/repo.json").exists(), "owner-b should be untouched");
+    Ok(())
+}
+
+/// An empty selection and an unknown action are rejected without touching disk.
+#[tokio::test]
+async fn bulk_rejects_empty_selection_and_bad_action() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    write_min_repo(&root, "owner-a", "a");
+    let (base, _st) = spawn_server(test_cfg(&root)).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{base}/repos/bulk"))
+        .form(&[("action", "tag_add"), ("repos", "[]"), ("tag", "x")])
+        .send()
+        .await?;
+    assert!(resp.text().await?.contains("Select at least one repository"));
+
+    let resp = client
+        .post(format!("{base}/repos/bulk"))
+        .form(&[("action", "explode"), ("repos", "[\"owner-a\"]")])
+        .send()
+        .await?;
+    assert!(resp.text().await?.contains("Unknown bulk action"));
+
+    let resp = client
+        .post(format!("{base}/repos/bulk"))
+        .form(&[("action", "tag_add"), ("repos", "[\"owner-a\"]"), ("tag", "  ")])
+        .send()
+        .await?;
+    assert!(resp.text().await?.contains("Enter a tag first"));
+    Ok(())
+}
+
+fn write_repo_with_origin(root: &Path, rel: &str, name: &str, origin: &str) {
+    let dir = root.join(rel);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("repo.json"),
+        format!(
+            r#"{{"forge":"generic","name":"{name}","added":"2025-01-01T00:00:00Z","default_branch":"master","origin":"{origin}"}}"#
+        ),
+    )
+    .unwrap();
+}
+
+/// Bulk refresh must actually queue the jobs and archive each repo.
+#[tokio::test]
+async fn bulk_refresh_archives_every_selected_repo() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    let remote = make_remote(tmp.path(), "bulkproj");
+    let origin = format!("file://{}", remote.display());
+    write_repo_with_origin(&root, "owner-a", "a", &origin);
+    write_repo_with_origin(&root, "owner-b", "b", &origin);
+    let (base, _st) = spawn_server(test_cfg(&root)).await;
+    let client = reqwest::Client::new();
+
+    let rels = serde_json::json!(["owner-a", "owner-b"]).to_string();
+    let resp = client
+        .post(format!("{base}/repos/bulk"))
+        .form(&[("action", "refresh"), ("repos", rels.as_str())])
+        .send()
+        .await?;
+    let body = resp.text().await?;
+    assert!(body.contains("Refresh queued for 2 repositories"), "{body}");
+
+    // Wait for the (real) clones to produce snapshots.
+    for _ in 0..200 {
+        if root.join("owner-a/branch/master").is_dir() && root.join("owner-b/branch/master").is_dir() {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("bulk refresh did not archive both repos");
+}
+
+/// The bulk bar is buttons only; tag and move now live in modals.
+#[tokio::test]
+async fn bulk_modals_render() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    write_min_repo(&root, "owner-a", "a");
+    let (base, _st) = spawn_server(test_cfg(&root)).await;
+    let client = reqwest::Client::new();
+
+    let tag = client.get(format!("{base}/repos/bulk/tag")).send().await?.text().await?;
+    assert!(tag.contains("id=\"bulk-modal\""), "tag modal missing: {tag}");
+    assert!(tag.contains("id=\"bulk-tag-input\""));
+    assert!(tag.contains("tag_add") && tag.contains("tag_remove"));
+
+    let mv = client.get(format!("{base}/repos/bulk/move")).send().await?.text().await?;
+    assert!(mv.contains("id=\"bulk-modal\""), "move modal missing: {mv}");
+    assert!(mv.contains("id=\"bulk-move-folder\""));
+    assert!(mv.contains("action:\"move\""));
+
+    let page = client.get(format!("{base}/")).send().await?.text().await?;
+    assert!(!page.contains("id=\"bulk-tag\""), "bar should not carry an inline tag input");
+    assert!(!page.contains("id=\"bulk-folder\""), "bar should not carry an inline folder input");
+    assert!(page.contains("hx-get=\"/repos/bulk/tag\""), "Tag button missing");
+    assert!(page.contains("hx-get=\"/repos/bulk/move\""), "Move button missing");
     Ok(())
 }

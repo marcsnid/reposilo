@@ -71,6 +71,27 @@
         values: { rel: rel, folder: ev.currentTarget.dataset.folder || '' }
       });
     }
+    // bulk selection: checkboxes across the repo grid drive the bulk bar
+    function selectedRepos() {
+      return Array.prototype.map.call(document.querySelectorAll('.bulk-check:checked'), function (c) { return c.value; });
+    }
+    function updateBulkBar() {
+      var checks = document.querySelectorAll('.bulk-check');
+      var selected = document.querySelectorAll('.bulk-check:checked').length;
+      var bar = document.getElementById('bulk-bar');
+      if (bar) bar.classList.toggle('active', selected > 0);
+      var count = document.getElementById('bulk-count');
+      if (count) count.textContent = selected + ' selected';
+      var all = document.getElementById('bulk-all');
+      if (all) {
+        all.checked = selected > 0 && selected === checks.length;
+        all.indeterminate = selected > 0 && selected < checks.length;
+      }
+    }
+    function toggleAllChecks(on) {
+      Array.prototype.forEach.call(document.querySelectorAll('.bulk-check'), function (c) { c.checked = on; });
+      updateBulkBar();
+    }
   </script>
   <link rel="stylesheet" href="/assets/style.css">
   <script src="/assets/htmx.min.js" defer></script>
@@ -141,8 +162,11 @@
       document.body.addEventListener('htmx:afterSwap', schedule);
       document.body.addEventListener('htmx:oobAfterSwap', schedule);
       document.body.addEventListener('htmx:afterSwap', syncViewButtons);
+      document.body.addEventListener('htmx:afterSwap', updateBulkBar);
+      document.body.addEventListener('htmx:oobAfterSwap', updateBulkBar);
       schedule();
       syncViewButtons();
+      updateBulkBar();
     })();
   </script>
   {% block content %}{% endblock %}

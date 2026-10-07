@@ -51,6 +51,19 @@
   </aside>
 
   <main class="main">
+    <div id="bulk-bar" class="bulk-bar">
+      <label class="bulk-all"><input type="checkbox" id="bulk-all" onchange="toggleAllChecks(this.checked)"> Select all</label>
+      <span id="bulk-count" class="dim">0 selected</span>
+      <div class="bulk-actions">
+        <button type="button" class="chip" hx-post="/repos/bulk" hx-target="#toast" hx-swap="innerHTML"
+                hx-vals='js:{action:"refresh", repos: JSON.stringify(selectedRepos())}'>Refresh</button>
+        <button type="button" class="chip" hx-get="/repos/bulk/tag" hx-target="#modal-root" hx-swap="innerHTML">Tag</button>
+        <button type="button" class="chip" hx-get="/repos/bulk/move" hx-target="#modal-root" hx-swap="innerHTML">Move</button>
+        <button type="button" class="chip danger" hx-post="/repos/bulk" hx-target="#toast" hx-swap="innerHTML"
+                hx-confirm="Delete the selected repositories from the index? Archive files are kept."
+                hx-vals='js:{action:"delete", repos: JSON.stringify(selectedRepos())}'>Delete</button>
+      </div>
+    </div>
     {% if ctx.repos.is_empty() %}
     <div class="empty">
       <h2>No repositories match</h2>
@@ -61,6 +74,7 @@
       {% for r in ctx.repos %}
       <div class="card{% if !r.color.is_empty() %} tinted{% endif %}"{% if !r.color.is_empty() %} data-color="{{ r.color }}"{% endif %} draggable="true" data-rel="{{ r.rel }}" ondragstart="dragRepo(event)">
         <div class="card-head">
+          <input type="checkbox" class="bulk-check" value="{{ r.rel }}" onclick="event.stopPropagation(); updateBulkBar()" aria-label="select {{ r.name }}">
           {% if r.has_icon %}<img class="repo-icon" src="/repo-icon/{{ r.rel }}" alt="" width="20" height="20" loading="lazy">{% endif %}
           <a class="card-title" href="/repos/{{ r.rel }}">{{ r.name }}</a>
           <span class="badge forge-{{ r.forge }}">{{ r.forge }}</span>
