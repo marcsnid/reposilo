@@ -216,6 +216,7 @@ url = "http://192.168.0.1:11434/v1"  # any OpenAI-compatible endpoint
 # interval_secs = 60                   # metrics export interval
 # logs = true                          # bridge tracing logs to OTLP
 # metrics = true                       # export archive metrics
+# traces = true                        # export spans (HTTP requests, add/refresh/verify jobs)
 ```
 
 ### Stats and monitoring
@@ -235,9 +236,11 @@ collector: **metrics** (the same totals and counters, storage gauges
 `reposilo.storage.release_bytes`, `reposilo.storage.asset_bytes`, per-host
 rate-limit counters `reposilo.remote.rate_limited` and
 `reposilo.remote.requests_skipped`, and cache gauges `reposilo.http.cache_hits` /
-`reposilo.http.cache_misses`) and **logs** (everything
-`tracing` emits, bridged through the OpenTelemetry log appender). Logs and
-metrics can be toggled independently. Both are optional and best-effort, and
+`reposilo.http.cache_misses`), **logs** (everything
+`tracing` emits, bridged through the OpenTelemetry log appender), and
+**traces** (one span per HTTP request, plus spans for add, refresh, and
+integrity check jobs). Logs, metrics, and traces can be toggled independently.
+All are optional and best-effort, and
 log records from the exporter's own HTTP stack are filtered out to avoid a
 feedback loop.
 
@@ -289,6 +292,10 @@ stage and mount your keys. The container sets `REPOSILO_BIND=0.0.0.0:8765`
 
 ## Roadmap
 
+- **Full-text content search**: index the contents of files inside the
+  archived zips so you can search code and text, not just repo names,
+  descriptions, and tags. This is the biggest capability still missing for a
+  self-hosted archive.
 - **git bundle archives**: a full-history bundle saved alongside the
   snapshot, so a dead repo can be re-established (re-cloned, re-pushed),
   not just browsed

@@ -22,6 +22,7 @@ use serde_json::{json, Value};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
+use tracing::Instrument;
 
 use crate::archiver::{now_rfc3339, Archiver};
 use crate::importer;
@@ -1593,6 +1594,22 @@ async fn otel_loop(st: Arc<AppState>) {
 
 // ---------- router & serve ----------
 
+/// One span per HTTP request (method, path, final status). Exported as an OTLP
+/// trace when `[otel] traces` is on.
+async fn trace_request(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+    let span = tracing::info_span!(
+        "http.request",
+        http.method = %method,
+        http.path = %path,
+        http.status = tracing::field::Empty,
+    );
+    let response = next.run(req).instrument(span.clone()).await;
+    span.record("http.status", response.status().as_u16());
+    response
+}
+
 pub fn router(st: Arc<AppState>) -> Router {
     // auth middleware runs on everything except /login, /logout, /assets
     let st2 = st.clone();
@@ -1618,6 +1635,7 @@ pub fn router(st: Arc<AppState>) -> Router {
         .route("/logout", axum::routing::post(crate::auth::logout))
         .merge(crate::web::router())
         .layer(auth_layer)
+        .layer(axum::middleware::from_fn(trace_request))
         .with_state(st)
 }
 

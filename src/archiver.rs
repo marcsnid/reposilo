@@ -252,6 +252,7 @@ impl Archiver {
     /// slug, wherever it lives). On any failure the partially-created repo
     /// directory is removed, so a retry starts clean instead of tripping over
     /// an orphaned `repo.json`.
+    #[tracing::instrument(skip(self, notes))]
     pub async fn add_repo(&self, url: &str, tags: &[String], notes: Option<String>) -> Result<PathBuf> {
         let info = forge::detect(url)?;
         let root = Path::new(&self.cfg.archive.root);
@@ -768,6 +769,7 @@ impl Archiver {
     /// Refresh one repo against its remote: re-snapshot the default branch if
     /// it moved, archive a newer semver release if one exists, prune per
     /// retention, and record the check time
+    #[tracing::instrument(skip(self))]
     pub async fn refresh_repo(&self, repo_dir: &Path) -> Result<RefreshSummary> {
         let manifest_path = repo_dir.join("repo.json");
         let mut manifest: RepoManifest = crate::types::read_json(&manifest_path)

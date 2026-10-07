@@ -8,11 +8,13 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use opentelemetry::metrics::{Counter, Histogram, Meter, MeterProvider};
+use opentelemetry::trace::TracerProvider;
 use opentelemetry::KeyValue;
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
-use opentelemetry_otlp::{LogExporter, MetricExporter, WithExportConfig};
+use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider, Temporality};
+use opentelemetry_sdk::trace::SdkTracerProvider;
 use opentelemetry_sdk::Resource;
 
 use crate::config::Config;
@@ -94,6 +96,7 @@ pub struct Telemetry {
     meter: Option<Meter>,
     counters: Option<Counters>,
     verify_duration: Option<Histogram<f64>>,
+    tracer_provider: Option<SdkTracerProvider>,
 }
 
 impl Telemetry {
@@ -104,6 +107,7 @@ impl Telemetry {
             meter: None,
             counters: None,
             verify_duration: None,
+            tracer_provider: None,
         }
     }
 
@@ -111,8 +115,17 @@ impl Telemetry {
         self.logger.as_ref()
     }
 
+    /// A tracer for the OpenTelemetry subscriber layer, when traces are on.
+    pub fn tracer(&self) -> Option<opentelemetry_sdk::trace::Tracer> {
+        self.tracer_provider.as_ref().map(|p| p.tracer("reposilo"))
+    }
+
+    pub fn traces_enabled(&self) -> bool {
+        self.tracer_provider.is_some()
+    }
+
     pub fn enabled(&self) -> bool {
-        self.logger.is_some() || self.meter.is_some()
+        self.logger.is_some() || self.meter.is_some() || self.tracer_provider.is_some()
     }
 
     /// Flush and close the providers. Idempotent.
@@ -121,6 +134,9 @@ impl Telemetry {
             let _ = p.shutdown();
         }
         if let Some(p) = &self.meter_provider {
+            let _ = p.shutdown();
+        }
+        if let Some(p) = &self.tracer_provider {
             let _ = p.shutdown();
         }
     }
@@ -272,6 +288,22 @@ fn build(cfg: &Config) -> Result<Telemetry> {
         None
     };
 
+    let tracer_provider = if cfg.otel.traces {
+        let exporter = SpanExporter::builder()
+            .with_http()
+            .with_endpoint(format!("{base}/v1/traces"))
+            .build()
+            .context("build OTLP span exporter")?;
+        Some(
+            SdkTracerProvider::builder()
+                .with_resource(resource.clone())
+                .with_batch_exporter(exporter)
+                .build(),
+        )
+    } else {
+        None
+    };
+
     let (meter_provider, meter, counters, verify_duration) = if cfg.otel.metrics {
         let exporter = MetricExporter::builder()
             .with_http()
@@ -297,7 +329,14 @@ fn build(cfg: &Config) -> Result<Telemetry> {
         (None, None, None, None)
     };
 
-    Ok(Telemetry { logger, meter_provider, meter, counters, verify_duration })
+    Ok(Telemetry {
+        logger,
+        meter_provider,
+        meter,
+        counters,
+        verify_duration,
+        tracer_provider,
+    })
 }
 
 /// Install the global tracing subscriber, bridging records into the logger
@@ -309,23 +348,53 @@ pub fn install_subscriber(telemetry: &Telemetry) {
     let fmt_filter = || {
         EnvFilter::from_default_env().add_directive("info".parse().expect("valid filter directive"))
     };
+    // Prevent a telemetry-induced-telemetry loop: records from the HTTP stack
+    // the exporters themselves use would otherwise feed back in.
+    let otel_filter = || {
+        EnvFilter::new("info")
+            .add_directive("hyper=off".parse().expect("valid"))
+            .add_directive("tonic=off".parse().expect("valid"))
+            .add_directive("h2=off".parse().expect("valid"))
+            .add_directive("reqwest=off".parse().expect("valid"))
+    };
 
-    match telemetry.logger() {
-        Some(provider) => {
-            // Prevent a telemetry-induced-telemetry loop: logs from the HTTP
-            // stack the exporter itself uses would otherwise feed back in.
-            let otel_filter = EnvFilter::new("info")
-                .add_directive("hyper=off".parse().expect("valid"))
-                .add_directive("tonic=off".parse().expect("valid"))
-                .add_directive("h2=off".parse().expect("valid"))
-                .add_directive("reqwest=off".parse().expect("valid"));
-            let otel_layer = OpenTelemetryTracingBridge::new(provider).with_filter(otel_filter);
-            let fmt_layer = tracing_subscriber::fmt::layer().with_filter(fmt_filter());
-            tracing_subscriber::registry().with(otel_layer).with(fmt_layer).init();
-        }
-        None => {
-            let fmt_layer = tracing_subscriber::fmt::layer().with_filter(fmt_filter());
-            tracing_subscriber::registry().with(fmt_layer).init();
-        }
+    let log_layer = telemetry
+        .logger()
+        .map(|provider| OpenTelemetryTracingBridge::new(provider).with_filter(otel_filter()));
+    let trace_layer = telemetry
+        .tracer()
+        .map(|tracer| tracing_opentelemetry::OpenTelemetryLayer::new(tracer).with_filter(otel_filter()));
+
+    tracing_subscriber::registry()
+        .with(log_layer)
+        .with(trace_layer)
+        .with(tracing_subscriber::fmt::layer().with_filter(fmt_filter()))
+        .init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `[otel] traces` must control whether a tracer is built. The exporter
+    /// is only constructed (no connection is made at build time).
+    #[test]
+    fn traces_toggle_controls_the_tracer() {
+        let mut cfg = Config::default();
+        cfg.otel.enabled = true;
+        cfg.otel.endpoint = "http://127.0.0.1:9".into();
+        cfg.otel.logs = false;
+        cfg.otel.metrics = false;
+
+        cfg.otel.traces = true;
+        let on = init(&cfg);
+        assert!(on.traces_enabled(), "traces=true must build a tracer");
+        on.shutdown();
+
+        cfg.otel.traces = false;
+        let off = init(&cfg);
+        assert!(!off.traces_enabled(), "traces=false must not build a tracer");
+        assert!(!off.enabled());
+        off.shutdown();
     }
 }

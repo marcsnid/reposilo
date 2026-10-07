@@ -149,6 +149,8 @@ pub struct OtelCfg {
     pub logs: bool,
     /// Export metrics.
     pub metrics: bool,
+    /// Export traces (spans) over OTLP.
+    pub traces: bool,
 }
 
 impl Default for OtelCfg {
@@ -160,6 +162,7 @@ impl Default for OtelCfg {
             interval_secs: 60,
             logs: true,
             metrics: true,
+            traces: true,
         }
     }
 }
@@ -434,6 +437,17 @@ mod tests {
         // Omitting the section keeps the default.
         let cfg: Config = toml::from_str("[archive]\nroot = \".\"\n").unwrap();
         assert!(cfg.cache.conditional);
+    }
+
+    #[test]
+    fn otel_traces_defaults_and_parses() {
+        assert!(Config::default().otel.traces, "traces are on by default within otel");
+        let cfg: Config = toml::from_str("[otel]\nenabled = true\ntraces = false\n").unwrap();
+        assert!(cfg.otel.enabled);
+        assert!(!cfg.otel.traces);
+        // Omitting [otel] keeps the defaults.
+        let cfg: Config = toml::from_str("[archive]\nroot = \".\"\n").unwrap();
+        assert!(cfg.otel.traces);
     }
 
     #[test]

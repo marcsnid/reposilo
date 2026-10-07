@@ -25,9 +25,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 opentelemetry = "0.33"
-opentelemetry_sdk = { version = "0.33", features = ["logs", "metrics"] }
-opentelemetry-otlp = { version = "0.33", default-features = false, features = ["logs", "metrics", "http-proto", "reqwest-blocking-client", "tls-ring", "tls-webpki-roots"] }
+opentelemetry_sdk = { version = "0.33", features = ["logs", "metrics", "trace"] }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["logs", "metrics", "trace", "http-proto", "reqwest-blocking-client", "tls-ring", "tls-webpki-roots"] }
 opentelemetry-appender-tracing = "0.33"
+tracing-opentelemetry = "0.34"
 askama = "0.14"
 pulldown-cmark = "0.13"
 zip = "4"
