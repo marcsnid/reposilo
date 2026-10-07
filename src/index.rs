@@ -20,7 +20,7 @@ pub struct SnapshotEntry {
 pub struct RepoEntry {
     /// Absolute path of the repo directory in the archive tree.
     pub dir: PathBuf,
-    /// Path relative to the archive root, e.g. "decompals/sm64".
+    /// Path relative to the archive root, e.g. "tools/ripgrep".
     pub rel: String,
     pub manifest: RepoManifest,
     /// Newest first.
@@ -37,7 +37,7 @@ pub struct RepoEntry {
 #[derive(Debug, Clone)]
 pub struct FolderEntry {
     pub dir: PathBuf,
-    /// Path relative to the archive root, e.g. "games/decomp".
+    /// Path relative to the archive root, e.g. "tools/cli".
     pub rel: String,
     pub manifest: FolderManifest,
 }

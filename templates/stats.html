@@ -6,7 +6,7 @@
   {% if ctx.otel_enabled %}
   <div class="job-status ok">Exporting to OpenTelemetry: {{ ctx.otel_endpoint }}</div>
   {% endif %}
-  <p class="note">Metrics since {{ ctx.started_at }}. Daily counters are kept for 90 days.</p>
+  <p class="note">Metrics since {{ ctx.started_at }}. Daily counters are kept for 90 days.{% if !ctx.last_verified_at.is_empty() %} Last integrity check: {{ ctx.last_verified_at }}.{% endif %}</p>
 
   <section class="panel">
     <h2>Archive</h2>
@@ -21,6 +21,27 @@
   </section>
 
   <section class="panel">
+    <h2>Storage</h2>
+    <div class="stat-grid">
+      <div class="stat-card"><div class="stat-num">{{ ctx.archive_size }}</div><div class="stat-label">archive total</div></div>
+      <div class="stat-card"><div class="stat-num">{{ ctx.snapshot_size }}</div><div class="stat-label">branch snapshots</div></div>
+      <div class="stat-card"><div class="stat-num">{{ ctx.release_size }}</div><div class="stat-label">releases</div></div>
+      <div class="stat-card"><div class="stat-num">{{ ctx.asset_size }}</div><div class="stat-label">release assets</div></div>
+    </div>
+    {% if !ctx.largest_repos.is_empty() %}
+    <h3>Largest repositories</h3>
+    <table class="stats-table">
+      <thead><tr><th>Repository</th><th>Size</th></tr></thead>
+      <tbody>
+      {% for r in ctx.largest_repos %}
+        <tr><td><a href="/repos/{{ r.rel }}">{{ r.name }}</a></td><td>{{ r.size_human }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </section>
+
+  <section class="panel">
     <h2>Activity</h2>
     <div class="stat-grid">
       <div class="stat-card"><div class="stat-num">{{ ctx.refresh_ok }}</div><div class="stat-label">refreshes ok</div></div>
@@ -29,6 +50,11 @@
       <div class="stat-card"><div class="stat-num">{{ ctx.new_releases }}</div><div class="stat-label">new releases</div></div>
       <div class="stat-card"><div class="stat-num">{{ ctx.new_snapshots }}</div><div class="stat-label">new snapshots</div></div>
       <div class="stat-card"><div class="stat-num">{{ ctx.remote_gone }}</div><div class="stat-label">remote-gone events</div></div>
+      <div class="stat-card"><div class="stat-num">{{ ctx.verify_runs }}</div><div class="stat-label">integrity checks</div></div>
+      <div class="stat-card{% if ctx.verify_problems > 0 %} stat-bad{% endif %}"><div class="stat-num">{{ ctx.verify_problems }}</div><div class="stat-label">integrity problems</div></div>
+      <div class="stat-card{% if ctx.verify_fail > 0 %} stat-bad{% endif %}"><div class="stat-num">{{ ctx.verify_fail }}</div><div class="stat-label">check failures</div></div>
+      <div class="stat-card"><div class="stat-num">{{ ctx.cache_hits }}</div><div class="stat-label">API revalidations</div></div>
+      <div class="stat-card"><div class="stat-num">{{ ctx.cache_misses }}</div><div class="stat-label">API fetches</div></div>
     </div>
 
     <h3>Last 7 days</h3>
@@ -50,7 +76,7 @@
     {% else %}
     <h3>Recent days</h3>
     <table class="stats-table">
-      <thead><tr><th>Date</th><th>Refreshes</th><th>Failures</th><th>Adds</th><th>Releases</th><th>Snapshots</th></tr></thead>
+      <thead><tr><th>Date</th><th>Refreshes</th><th>Failures</th><th>Adds</th><th>Releases</th><th>Snapshots</th><th>Checks</th><th>Problems</th></tr></thead>
       <tbody>
       {% for d in ctx.days %}
         <tr>
@@ -60,7 +86,29 @@
           <td>{{ d.adds }}{% if d.adds_fail > 0 %} <span class="bad">({{ d.adds_fail }} failed)</span>{% endif %}</td>
           <td>{{ d.releases }}</td>
           <td>{{ d.snapshots }}</td>
+          <td>{{ d.verify_runs }}</td>
+          <td>{% if d.verify_problems > 0 %}<span class="bad">{{ d.verify_problems }}</span>{% else %}0{% endif %}</td>
         </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </section>
+
+  <section class="panel">
+    <h2>Remote rate limits</h2>
+    <div class="stat-grid">
+      <div class="stat-card"><div class="stat-num">{{ ctx.rate_limited }}</div><div class="stat-label">rate-limit pauses</div></div>
+      <div class="stat-card"><div class="stat-num">{{ ctx.requests_skipped }}</div><div class="stat-label">requests skipped</div></div>
+    </div>
+    {% if ctx.paused_hosts.is_empty() %}
+    <p class="note">No hosts are paused right now.</p>
+    {% else %}
+    <table class="stats-table">
+      <thead><tr><th>Host</th><th>Paused for</th></tr></thead>
+      <tbody>
+      {% for h in ctx.paused_hosts %}
+        <tr><td>{{ h.host }}</td><td>{{ h.paused }}</td></tr>
       {% endfor %}
       </tbody>
     </table>

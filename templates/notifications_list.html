@@ -17,7 +17,7 @@
   <div class="panel notification {% if n.kind == "new_release" %}new-release{% endif %}">
     <div class="notif-head">
       <b>{{ n.title }}</b>
-      <span class="dim"><span title="{{ n.at_exact }}">{{ n.at }}</span> · <a href="/repos/{{ n.repo }}">{{ n.repo }}</a></span>
+      <span class="dim"><span title="{{ n.at_exact }}">{{ n.at }}</span>{% if !n.repo.is_empty() %} · <a href="/repos/{{ n.repo }}">{{ n.repo }}</a>{% endif %}</span>
     </div>
     {% if !n.changelog_html.is_empty() %}
     {% if n.kind == "new_snapshot" %}

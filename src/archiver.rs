@@ -5,6 +5,7 @@
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
@@ -15,6 +16,7 @@ use time::OffsetDateTime;
 
 use crate::config::Config;
 use crate::forge::{self};
+use crate::ratelimit::RemoteGovernor;
 use crate::types::{RepoManifest, SnapshotSidecar, ZipInfo};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,9 +75,9 @@ fn render_branch_changelog(info: &crate::forgeapi::CompareInfo) -> String {
 
 /// Best-effort changelog for a release: GitHub release notes, or the
 /// matching section of CHANGELOG.md at the tag.
-async fn fetch_changelog(cfg: &Config, origin: &str, git_dir: &Path, tag: &str, version: Option<&str>) -> Option<String> {
+async fn fetch_changelog(cfg: &Config, gov: &RemoteGovernor, cache: &std::sync::Mutex<crate::httpcache::HttpCache>, origin: &str, git_dir: &Path, tag: &str, version: Option<&str>) -> Option<String> {
     // 1. forge release notes (GitHub only for now)
-    if let Some(body) = crate::forgeapi::github_release_body(cfg, origin, tag).await {
+    if let Some(body) = crate::forgeapi::github_release_body(cfg, gov, cache, origin, tag).await {
         return Some(body);
     }
     // 2. CHANGELOG.md in the tree at the tag
@@ -206,13 +208,42 @@ pub fn latest_semver_tag(tags: &[String]) -> Option<String> {
         .map(|(_, t)| t)
 }
 
+/// The pacing host for a git remote, or `None` when there is nothing to pace:
+/// a local path, `file://`, or an SSH remote, none of which are subject to
+/// the forge's HTTP rate limits.
+fn git_host(url: &str) -> Option<String> {
+    let u = url.trim();
+    (u.starts_with("http://") || u.starts_with("https://"))
+        .then(|| crate::ratelimit::host_key(u))
+}
+
 pub struct Archiver {
     pub cfg: Config,
+    /// Per-host request governor. CLI construction makes a private one; the
+    /// server passes its process-wide governor to `with_governor_and_cache` so
+    /// jobs share pacing state.
+    pub governor: Arc<RemoteGovernor>,
+    /// Conditional-request cache for forge API responses. Shared by the server
+    /// across jobs, or loaded from the archive root by the CLI.
+    pub http_cache: Arc<std::sync::Mutex<crate::httpcache::HttpCache>>,
 }
 
 impl Archiver {
     pub fn new(cfg: Config) -> Self {
-        Self { cfg }
+        let cache = crate::httpcache::HttpCache::load(Path::new(&cfg.archive.root));
+        Self {
+            cfg,
+            governor: Arc::new(RemoteGovernor::new()),
+            http_cache: Arc::new(std::sync::Mutex::new(cache)),
+        }
+    }
+
+    pub fn with_governor_and_cache(
+        cfg: Config,
+        governor: Arc<RemoteGovernor>,
+        http_cache: Arc<std::sync::Mutex<crate::httpcache::HttpCache>>,
+    ) -> Self {
+        Self { cfg, governor, http_cache }
     }
 
     /// Add a repo: shallow-bare clone, manifest, initial snapshots.
@@ -221,6 +252,7 @@ impl Archiver {
     /// slug, wherever it lives). On any failure the partially-created repo
     /// directory is removed, so a retry starts clean instead of tripping over
     /// an orphaned `repo.json`.
+    #[tracing::instrument(skip(self, notes))]
     pub async fn add_repo(&self, url: &str, tags: &[String], notes: Option<String>) -> Result<PathBuf> {
         let info = forge::detect(url)?;
         let root = Path::new(&self.cfg.archive.root);
@@ -300,7 +332,7 @@ impl Archiver {
             .ok()
             .and_then(|tree| crate::files::detect_language(&tree));
         // forge enrichment (GitHub: stars, topics → suggested tags, description)
-        let (stars, suggested_tags, avatar_url) = match crate::forgeapi::github_repo_meta(&self.cfg, url).await {
+        let (stars, suggested_tags, avatar_url) = match crate::forgeapi::github_repo_meta(&self.cfg, &self.governor, &self.http_cache, url).await {
             Some(meta) => {
                 if description.is_none() {
                     description = meta.description;
@@ -343,7 +375,7 @@ impl Archiver {
         // store the owner avatar locally so the repo icon survives the remote
         if self.cfg.github.fetch_avatars {
             if let Some(avatar) = avatar_url {
-                if let Some(bytes) = crate::forgeapi::fetch_avatar(&avatar).await {
+                if let Some(bytes) = crate::forgeapi::fetch_avatar(&self.cfg, &self.governor, &avatar).await {
                     let _ = fs::write(repo_dir.join("icon"), bytes);
                 }
             }
@@ -380,7 +412,24 @@ impl Archiver {
         Ok(())
     }
 
+    /// Pace a network git operation through the shared governor. Local and
+    /// `file://` remotes have no rate limit and are left alone. Returns an
+    /// error when the host is paused longer than `[remote] max_wait_secs`, so
+    /// the job fails and retries on the next scheduler pass instead of piling
+    /// on more requests.
+    async fn pace_remote(&self, url: &str) -> Result<()> {
+        let Some(host) = git_host(url) else {
+            return Ok(());
+        };
+        if self.governor.acquire(&host, &self.cfg.remote).await {
+            return Ok(());
+        }
+        tracing::warn!(host = %host, "git remote is rate-limited; skipping this operation");
+        bail!("host {host} is rate-limited; try again later")
+    }
+
     async fn clone_shallow(&self, url: &str, dest: &Path) -> Result<()> {
+        self.pace_remote(url).await?;
         let depth = self.cfg.git.depth.to_string();
         let mut args: Vec<&str> = vec!["clone", "--bare"];
         if self.cfg.git.depth > 0 {
@@ -400,7 +449,8 @@ impl Archiver {
     }
 
     /// Fetch a tag shallowly into the local repo; returns its commit sha.
-    async fn fetch_tag(&self, shallow: &Path, _url: &str, tag: &str) -> Result<String> {
+    async fn fetch_tag(&self, shallow: &Path, url: &str, tag: &str) -> Result<String> {
+        self.pace_remote(url).await?;
         let depth = self.cfg.git.depth.to_string();
         let refspec = format!("refs/tags/{tag}:refs/tags/{tag}");
         let mut args: Vec<&str> = vec!["fetch"];
@@ -419,6 +469,7 @@ impl Archiver {
 
     /// List all tags on the remote and pick the newest semver one.
     async fn latest_release_tag(&self, url: &str) -> Result<Option<String>> {
+        self.pace_remote(url).await?;
         let out = git(self.cfg.git.timeout_secs, &["ls-remote", "--tags", url], None)
             .await
             .with_context(|| format!("ls-remote of {url} failed"))?;
@@ -483,7 +534,7 @@ impl Archiver {
         let changelog = if let Some(c) = changelog_override {
             Some(c.chars().take(32 * 1024).collect::<String>())
         } else if matches!(kind, SnapshotKind::Release) {
-            fetch_changelog(&self.cfg, origin, git_dir, label, version)
+            fetch_changelog(&self.cfg, &self.governor, &self.http_cache, origin, git_dir, label, version)
                 .await
                 .map(|c| c.chars().take(32 * 1024).collect::<String>())
         } else {
@@ -623,7 +674,7 @@ impl Archiver {
             return Ok(0);
         }
         let Some(release) =
-            crate::releaseapi::fetch_release(&self.cfg, &sidecar.origin, &sidecar.r#ref).await
+            crate::releaseapi::fetch_release(&self.cfg, &self.governor, &self.http_cache, &sidecar.origin, &sidecar.r#ref).await
         else {
             // transient (rate limit, network): leave assets_filters untouched so
             // the next poll retries instead of caching the miss
@@ -676,6 +727,7 @@ impl Archiver {
 
             match crate::releaseapi::download_asset(
                 &self.cfg,
+                &self.governor,
                 &sidecar.origin,
                 asset,
                 &dest,
@@ -717,6 +769,7 @@ impl Archiver {
     /// Refresh one repo against its remote: re-snapshot the default branch if
     /// it moved, archive a newer semver release if one exists, prune per
     /// retention, and record the check time
+    #[tracing::instrument(skip(self))]
     pub async fn refresh_repo(&self, repo_dir: &Path) -> Result<RefreshSummary> {
         let manifest_path = repo_dir.join("repo.json");
         let mut manifest: RepoManifest = crate::types::read_json(&manifest_path)
@@ -744,10 +797,10 @@ impl Archiver {
             && !repo_dir.join("icon").exists()
             && matches!(crate::forge::detect(&origin), Ok(info) if info.kind == crate::forge::ForgeKind::GitHub)
         {
-            if let Some(meta) = crate::forgeapi::github_repo_meta(&self.cfg, &origin).await {
+            if let Some(meta) = crate::forgeapi::github_repo_meta(&self.cfg, &self.governor, &self.http_cache, &origin).await {
                 match meta.avatar_url {
                     Some(url) => {
-                        if let Some(bytes) = crate::forgeapi::fetch_avatar(&url).await {
+                        if let Some(bytes) = crate::forgeapi::fetch_avatar(&self.cfg, &self.governor, &url).await {
                             let _ = fs::write(repo_dir.join("icon"), bytes);
                         }
                     }
@@ -760,6 +813,7 @@ impl Archiver {
 
         // Probe the remote first (cheap). If it's gone entirely, record that
         // state on the manifest and keep the local archive untouched.
+        self.pace_remote(&origin).await?;
         let head_out = git(self.cfg.git.timeout_secs, &["ls-remote", "--symref", &origin, "HEAD"], None).await;
         let Ok(head_out) = head_out else {
             summary.remote_unavailable = true;
@@ -803,6 +857,7 @@ impl Archiver {
         // the truth in both modes; keep one code path)
         let local_sha = latest_branch_commit(repo_dir, &branch).unwrap_or_default();
 
+        self.pace_remote(&origin).await?;
         let remote_branch_sha = git(self.cfg.git.timeout_secs, &["ls-remote", &origin, &branch_ref], None)
             .await
             .ok()
@@ -872,7 +927,7 @@ impl Archiver {
         // compare the previous and new commits (GitHub only for now)
         if branch_changed {
             let changelog = if !local_sha.is_empty() && !remote_branch_sha.is_empty() {
-                match crate::forgeapi::github_compare(&self.cfg, &origin, &local_sha, &remote_branch_sha).await {
+                match crate::forgeapi::github_compare(&self.cfg, &self.governor, &self.http_cache, &origin, &local_sha, &remote_branch_sha).await {
                     Some(info) => {
                         summary.branch_commits = Some(info.total_commits);
                         Some(render_branch_changelog(&info))
@@ -912,6 +967,7 @@ impl Archiver {
     }
 
     async fn fetch_branch(&self, shallow: &Path, origin: &str, branch: &str) -> Result<()> {
+        self.pace_remote(origin).await?;
         let depth = self.cfg.git.depth.to_string();
         // '+' forces the update in case the branch was force-pushed.
         let refspec = format!("+refs/heads/{branch}:refs/heads/{branch}");
@@ -1092,6 +1148,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn git_host_only_paces_http_remotes() {
+        assert_eq!(git_host("https://github.com/o/r").as_deref(), Some("github.com"));
+        assert_eq!(git_host("http://git.internal:8080/o/r").as_deref(), Some("git.internal:8080"));
+        assert!(git_host("file:///tmp/remote").is_none());
+        assert!(git_host("/tmp/local/repo").is_none());
+        assert!(git_host("git@github.com:o/r.git").is_none());
+    }
+
+    #[tokio::test]
+    async fn git_pacing_skips_local_and_spaces_network() {
+        let mut cfg = Config::default();
+        cfg.remote.min_interval_ms = 100_000;
+        cfg.remote.jitter_ms = 0;
+        cfg.remote.max_wait_secs = 1;
+        let archiver = Archiver::new(cfg);
+        // Local and file remotes are never paced.
+        assert!(archiver.pace_remote("file:///tmp/remote").await.is_ok());
+        assert!(archiver.pace_remote("/tmp/local").await.is_ok());
+        // A network origin is paced: the first call is fine, an immediate
+        // second one is skipped rather than waiting out the interval.
+        assert!(archiver.pace_remote("https://github.com/o/r").await.is_ok());
+        assert!(archiver.pace_remote("https://github.com/o/r").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn git_pacing_disabled_is_a_noop() {
+        let mut cfg = Config::default();
+        cfg.remote.enabled = false;
+        cfg.remote.min_interval_ms = 100_000;
+        let archiver = Archiver::new(cfg);
+        assert!(archiver.pace_remote("https://github.com/o/r").await.is_ok());
+        assert!(archiver.pace_remote("https://github.com/o/r").await.is_ok());
+    }
+
+    #[test]
     fn latest_semver_prefers_highest_and_tolerates_v() {
         let tags = vec!["0.9.0".into(), "v1.2.3".into(), "v1.10.0".into(), "nightly".into()];
         assert_eq!(latest_semver_tag(&tags).as_deref(), Some("v1.10.0"));
@@ -1106,7 +1197,7 @@ mod tests {
     #[test]
     fn sanitize_keeps_safe_chars() {
         assert_eq!(sanitize("feature/abc-def"), "feature_abc-def");
-        assert_eq!(sanitize("sm64"), "sm64");
+        assert_eq!(sanitize("ripgrep"), "ripgrep");
     }
 
     #[test]

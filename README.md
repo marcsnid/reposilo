@@ -27,7 +27,18 @@ goes away.
   or `CHANGELOG.md` at the tag); optional webhook for external alerts
 - **Verify** the archive on demand: hash every stored zip against the sha256
   in its sidecar, from `reposilo verify` or a Settings button, to catch missing
-  or corrupt files
+  or corrupt files. A scheduled check can be turned on in Settings (or with
+  `[verify] enabled = true`), and pushes a notification when something fails.
+  It is off by default because it reads every zip.
+- **Pace** outbound requests per host: API calls and git operations (clone,
+  fetch, ls-remote) are spaced, and API calls are paused when the forge reports
+  a rate limit, so refreshing many repos does not trip GitHub/GitLab/Forgejo
+  limits. Works with anonymous or token auth, is on by default, and can be
+  disabled.
+- **Revalidate** forge API responses with `ETag` / `If-None-Match`: an
+  unchanged answer comes back as a 304, which on GitHub does not count against
+  the rate limit, so repeat lookups are free. Cached bodies are kept under the
+  archive root (`http-cache.json`). On by default, can be disabled.
 - **Collect release binaries**: download the platform-specific assets attached
   to a release, filtered to the OS/arch you care about. Names like
   `foo-win64.zip`, `foo-x86_64-unknown-linux-gnu.tar.gz` and `Bar-1.0-arm64.dmg`
@@ -81,8 +92,8 @@ reposilo init --root /path/to/archive
 reposilo user add yourname --password <pw>   # optional: enable login
 
 # add + manage repos
-reposilo add https://github.com/n64decomp/sm64.git --tag decomps --tag n64
-reposilo list --tag decomps --tag n64
+reposilo add https://github.com/BurntSushi/ripgrep.git --tag cli --tag rust
+reposilo list --tag cli --tag rust
 reposilo refresh all                         # pull new snapshots/releases
 reposilo reindex --catalog                    # stats + catalog.json
 reposilo verify                               # hash every zip against its sidecar
@@ -103,6 +114,7 @@ reposilo serve --bind 0.0.0.0:8765           # or REPOSILO_BIND=0.0.0.0:8765
 #   - search, tag-filter, browse repos with rendered READMEs
 #   - create and manage folders (any nesting depth, emoji icons or colored dots);
 #     drag cards onto a folder to move repos between them
+#   - select repos with the checkboxes to refresh, tag, move or remove them in bulk
 #   - edit metadata (name, description, notes, origin, folder, tags) per repo
 #   - import zips from Settings; assign origins to _unknown repos
 #   - notifications with readable release changelogs
@@ -130,7 +142,7 @@ format = "zip"             # or "tar.zst" (zstd level 10 by default)
 keep_branch_snapshots = 1   # -1 keeps everything
 keep_releases = 1          # -1 keeps everything
 # [[retention.tag_rules]]  # per-tag overrides:
-# tag = "decomps"
+# tag = "cli"
 # keep_releases = -1
 
 [scheduler]
@@ -144,6 +156,33 @@ dead_after_days = 21       # stop checking after N days unreachable
 [git]
 # depth = 1                # 1 = shallow snapshot, 0 = full mirror
 # timeout_secs = 600       # hard kill for hung git subprocesses (network hangs)
+
+[remote]
+# Space outbound requests per host so a burst of repos does not trip a forge's
+# rate limiter, and honor the server's own backoff signals. Applies to API
+# calls and to git operations (clone, fetch, ls-remote) for every forge
+# (GitHub, GitLab, Forgejo/Codeberg, custom). Local and file:// remotes are
+# never paced. Set enabled = false to send immediately (the old behavior).
+enabled = true
+min_interval_ms = 500      # minimum gap between requests to the same host
+jitter_ms = 250            # extra random 0..N ms, to avoid lockstep bursts
+respect_rate_limits = true # honor Retry-After / X-RateLimit-* / RateLimit-*
+max_wait_secs = 30         # never block longer than this; skip and retry later
+max_cooldown_secs = 900    # cap on a single rate-limit pause
+
+[cache]
+# Revalidate API responses with ETag / If-None-Match. A 304 means the data is
+# unchanged and does not count against GitHub's primary rate limit. Cached
+# bodies live in http-cache.json under the archive root.
+conditional = true
+
+[verify]
+# Run a full hash check while serving (also a toggle in Settings). Off by
+# default because it reads every stored zip. When problems are found, one
+# notification is pushed and the run time is recorded so it does not repeat
+# until the interval elapses.
+enabled = false
+interval_days = 7
 
 [github]
 # token = "env:GITHUB_TOKEN"  # better rate limits for enrichment
@@ -177,20 +216,31 @@ url = "http://192.168.0.1:11434/v1"  # any OpenAI-compatible endpoint
 # interval_secs = 60                   # metrics export interval
 # logs = true                          # bridge tracing logs to OTLP
 # metrics = true                       # export archive metrics
+# traces = true                        # export spans (HTTP requests, add/refresh/verify jobs)
 ```
 
 ### Stats and monitoring
 
 Every instance has a built-in **Stats** page (`/stats`, also in the top bar)
 and a JSON API at `/api/stats`. It shows current totals (repos, snapshots,
-releases, dead/unavailable remotes, untagged) plus a per-day 7-day bar chart
-of refresh successes vs failures and a table of recent days. Counters are
+releases, dead/unavailable remotes, untagged), a storage breakdown (archive
+total, and the snapshot / release / release-asset split) with the ten largest
+repos, a per-day 7-day bar chart of refresh successes vs failures, integrity
+check counts, API cache revalidations and fetches, and live remote rate-limit
+status (pauses, requests skipped, and any hosts paused right now). Counters are
 persisted to `<archive>/metrics.json` for 90 days, so they survive restarts.
 
 Setting `[otel] enabled = true` additionally exports over OTLP/HTTP to a
-collector: **metrics** (the same totals and counters) and **logs** (everything
-`tracing` emits, bridged through the OpenTelemetry log appender). Logs and
-metrics can be toggled independently. Both are optional and best-effort, and
+collector: **metrics** (the same totals and counters, storage gauges
+`reposilo.storage.bytes`, `reposilo.storage.snapshot_bytes`,
+`reposilo.storage.release_bytes`, `reposilo.storage.asset_bytes`, per-host
+rate-limit counters `reposilo.remote.rate_limited` and
+`reposilo.remote.requests_skipped`, and cache gauges `reposilo.http.cache_hits` /
+`reposilo.http.cache_misses`), **logs** (everything
+`tracing` emits, bridged through the OpenTelemetry log appender), and
+**traces** (one span per HTTP request, plus spans for add, refresh, and
+integrity check jobs). Logs, metrics, and traces can be toggled independently.
+All are optional and best-effort, and
 log records from the exporter's own HTTP stack are filtered out to avoid a
 feedback loop.
 
@@ -242,6 +292,10 @@ stage and mount your keys. The container sets `REPOSILO_BIND=0.0.0.0:8765`
 
 ## Roadmap
 
+- **Full-text content search**: index the contents of files inside the
+  archived zips so you can search code and text, not just repo names,
+  descriptions, and tags. This is the biggest capability still missing for a
+  self-hosted archive.
 - **git bundle archives**: a full-history bundle saved alongside the
   snapshot, so a dead repo can be re-established (re-cloned, re-pushed),
   not just browsed

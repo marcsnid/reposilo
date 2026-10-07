@@ -20,6 +20,7 @@ use sha2::{Digest, Sha256};
 
 use crate::config::Config;
 use crate::forge::{self, ForgeKind};
+use crate::ratelimit::{host_key, RemoteGovernor};
 
 #[derive(Debug, Clone)]
 pub struct RemoteAsset {
@@ -149,16 +150,6 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Short-timeout client for metadata lookups.
-fn api_client() -> Option<reqwest::Client> {
-    reqwest::Client::builder()
-        .user_agent("reposilo")
-        .connect_timeout(Duration::from_secs(15))
-        .timeout(Duration::from_secs(20))
-        .build()
-        .ok()
-}
-
 /// Client for large downloads: a per-read timeout so a stalled socket cannot
 /// hang a scheduler slot, plus a generous overall deadline as a backstop so a
 /// malicious/slow endpoint cannot hold a repo lock forever.
@@ -172,65 +163,33 @@ fn download_client() -> Result<reqwest::Client> {
         .context("build download http client")
 }
 
-/// Send a request, retrying transient failures (network errors, 429, 5xx) a
-/// couple of times with a short backoff. `Retry-After` is honored up to a cap
-/// so a background job cannot stall for minutes.
-async fn send_retry<F>(mut build: F) -> Option<reqwest::Response>
-where
-    F: FnMut() -> reqwest::RequestBuilder,
-{
-    const ATTEMPTS: u32 = 3;
-    let mut backoff = Duration::from_millis(500);
-    for attempt in 0..ATTEMPTS {
-        let resp = match build().send().await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::debug!(error = %e, "release API request failed");
-                if attempt + 1 == ATTEMPTS {
-                    return None;
-                }
-                tokio::time::sleep(backoff).await;
-                backoff *= 2;
-                continue;
-            }
-        };
-        let status = resp.status();
-        if status.is_success() {
-            return Some(resp);
-        }
-        let retryable = status.is_server_error() || status.as_u16() == 429;
-        if !retryable || attempt + 1 == ATTEMPTS {
-            tracing::debug!(%status, "release API request not successful");
-            return None;
-        }
-        let wait = resp
-            .headers()
-            .get(reqwest::header::RETRY_AFTER)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.trim().parse::<u64>().ok())
-            .map(|s| Duration::from_secs(s.min(5)))
-            .unwrap_or(backoff);
-        tokio::time::sleep(wait).await;
-        backoff *= 2;
-    }
-    None
-}
-
 /// Look up one release by tag and return its downloadable assets. `None` when
 /// the forge is unsupported, the release is missing, or the API call fails.
-pub async fn fetch_release(cfg: &Config, origin: &str, tag: &str) -> Option<RemoteRelease> {
+pub async fn fetch_release(
+    cfg: &Config,
+    gov: &RemoteGovernor,
+    cache: &std::sync::Mutex<crate::httpcache::HttpCache>,
+    origin: &str,
+    tag: &str,
+) -> Option<RemoteRelease> {
     let info = forge::detect(origin).ok()?;
     match info.kind {
-        ForgeKind::GitHub => github(cfg, &info, tag).await,
-        ForgeKind::GitLab => gitlab(cfg, origin, tag).await,
-        ForgeKind::Forgejo => forgejo(cfg, origin, &info, tag).await,
+        ForgeKind::GitHub => github(cfg, gov, cache, &info, tag).await,
+        ForgeKind::GitLab => gitlab(cfg, gov, cache, origin, tag).await,
+        ForgeKind::Forgejo => forgejo(cfg, gov, cache, origin, &info, tag).await,
         ForgeKind::Generic => None,
     }
 }
 
-async fn github(cfg: &Config, info: &forge::ForgeInfo, tag: &str) -> Option<RemoteRelease> {
+async fn github(
+    cfg: &Config,
+    gov: &RemoteGovernor,
+    cache: &std::sync::Mutex<crate::httpcache::HttpCache>,
+    info: &forge::ForgeInfo,
+    tag: &str,
+) -> Option<RemoteRelease> {
     use reqwest::header::ACCEPT;
-    let client = api_client()?;
+    let client = crate::ratelimit::api_client();
     let token = cfg.github.resolved_token();
     let url = format!(
         "https://api.github.com/repos/{}/{}/releases/tags/{}",
@@ -238,15 +197,16 @@ async fn github(cfg: &Config, info: &forge::ForgeInfo, tag: &str) -> Option<Remo
         info.name,
         percent_encode(tag)
     );
-    let resp = send_retry(|| {
+    let body = crate::httpcache::conditional_get(cfg, gov, cache, &url, || {
         let mut req = client.get(&url).header(ACCEPT, "application/vnd.github+json");
         if let Some(tok) = token.as_deref() {
             req = req.bearer_auth(tok);
         }
         req
     })
-    .await?;
-    let v: Value = resp.json().await.ok()?;
+    .await?
+    .body;
+    let v: Value = serde_json::from_str(&body).ok()?;
     let assets = v["assets"]
         .as_array()?
         .iter()
@@ -270,9 +230,15 @@ async fn github(cfg: &Config, info: &forge::ForgeInfo, tag: &str) -> Option<Remo
     Some(RemoteRelease { tag: tag.to_string(), assets })
 }
 
-async fn gitlab(cfg: &Config, origin: &str, tag: &str) -> Option<RemoteRelease> {
+async fn gitlab(
+    cfg: &Config,
+    gov: &RemoteGovernor,
+    cache: &std::sync::Mutex<crate::httpcache::HttpCache>,
+    origin: &str,
+    tag: &str,
+) -> Option<RemoteRelease> {
     let origin = parse_origin(origin)?;
-    let client = api_client()?;
+    let client = crate::ratelimit::api_client();
     let token = cfg.gitlab.resolved_token();
     let url = format!(
         "{}/api/v4/projects/{}/releases/{}",
@@ -280,15 +246,16 @@ async fn gitlab(cfg: &Config, origin: &str, tag: &str) -> Option<RemoteRelease> 
         percent_encode(&origin.path),
         percent_encode(tag)
     );
-    let resp = send_retry(|| {
+    let body = crate::httpcache::conditional_get(cfg, gov, cache, &url, || {
         let mut req = client.get(&url);
         if let Some(tok) = token.as_deref() {
             req = req.header("PRIVATE-TOKEN", tok);
         }
         req
     })
-    .await?;
-    let v: Value = resp.json().await.ok()?;
+    .await?
+    .body;
+    let v: Value = serde_json::from_str(&body).ok()?;
     let assets = v["assets"]["links"]
         .as_array()?
         .iter()
@@ -306,9 +273,16 @@ async fn gitlab(cfg: &Config, origin: &str, tag: &str) -> Option<RemoteRelease> 
     Some(RemoteRelease { tag: tag.to_string(), assets })
 }
 
-async fn forgejo(cfg: &Config, origin: &str, info: &forge::ForgeInfo, tag: &str) -> Option<RemoteRelease> {
+async fn forgejo(
+    cfg: &Config,
+    gov: &RemoteGovernor,
+    cache: &std::sync::Mutex<crate::httpcache::HttpCache>,
+    origin: &str,
+    info: &forge::ForgeInfo,
+    tag: &str,
+) -> Option<RemoteRelease> {
     let origin = parse_origin(origin)?;
-    let client = api_client()?;
+    let client = crate::ratelimit::api_client();
     let token = cfg.forgejo.resolved_token();
     let url = format!(
         "{}/api/v1/repos/{}/{}/releases/tags/{}",
@@ -317,15 +291,16 @@ async fn forgejo(cfg: &Config, origin: &str, info: &forge::ForgeInfo, tag: &str)
         info.name,
         percent_encode(tag)
     );
-    let resp = send_retry(|| {
+    let body = crate::httpcache::conditional_get(cfg, gov, cache, &url, || {
         let mut req = client.get(&url);
         if let Some(tok) = token.as_deref() {
             req = req.header(reqwest::header::AUTHORIZATION, format!("token {tok}"));
         }
         req
     })
-    .await?;
-    let v: Value = resp.json().await.ok()?;
+    .await?
+    .body;
+    let v: Value = serde_json::from_str(&body).ok()?;
     let assets = v["assets"]
         .as_array()?
         .iter()
@@ -357,6 +332,7 @@ enum DownloadError {
 /// forge sha256 is checked before the rename.
 pub async fn download_asset(
     cfg: &Config,
+    gov: &RemoteGovernor,
     origin: &str,
     asset: &RemoteAsset,
     dest: &Path,
@@ -364,10 +340,21 @@ pub async fn download_asset(
 ) -> Result<(u64, String)> {
     let client = download_client()?;
     let kind = forge::detect(origin).map(|i| i.kind).unwrap_or(ForgeKind::Generic);
+    // Downloads are paced on the asset host, which is usually a CDN and a
+    // different bucket from the API lookup that found it.
+    let host = host_key(&asset.url);
     const ATTEMPTS: u32 = 3;
     let mut last: Option<anyhow::Error> = None;
     for attempt in 0..ATTEMPTS {
-        match try_download(&client, cfg, kind, asset, dest, max_bytes).await {
+        // Re-check pacing each attempt so a 429 on this host is waited out (or
+        // skipped) rather than retried immediately.
+        if !gov.acquire(&host, &cfg.remote).await {
+            bail!(
+                "host {host} is rate-limited; skipping download of {}",
+                asset.name
+            );
+        }
+        match try_download(&client, gov, cfg, kind, &host, asset, dest, max_bytes).await {
             Ok(v) => return Ok(v),
             Err(DownloadError::Permanent(e)) => return Err(e),
             Err(DownloadError::Transient(e)) => {
@@ -382,10 +369,13 @@ pub async fn download_asset(
     Err(last.unwrap_or_else(|| anyhow::anyhow!("download failed")))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn try_download(
     client: &reqwest::Client,
+    gov: &RemoteGovernor,
     cfg: &Config,
     kind: ForgeKind,
+    host: &str,
     asset: &RemoteAsset,
     dest: &Path,
     max_bytes: u64,
@@ -414,6 +404,7 @@ async fn try_download(
         .send()
         .await
         .map_err(|e| transient(e.into()))?;
+    gov.observe(host, &resp, &cfg.remote).await;
 
     // GitHub: the public browser URL is preferred (it redirects to the CDN and
     // does not consume API rate limit). For private repos it 404s, so fall back
@@ -429,6 +420,7 @@ async fn try_download(
                 .send()
                 .await
                 .map_err(|e| transient(e.into()))?;
+            gov.observe(&host_key(api), &resp, &cfg.remote).await;
         }
     }
 
@@ -614,7 +606,7 @@ mod tests {
         a.size = Some(body.len() as u64);
         a.digest = Some(format!("sha256:{sha}"));
         let cfg = Config::default();
-        let (n, got) = download_asset(&cfg, &format!("{base}/o/r"), &a, &dest, 0)
+        let (n, got) = download_asset(&cfg, &RemoteGovernor::new(), &format!("{base}/o/r"), &a, &dest, 0)
             .await
             .unwrap();
         assert_eq!(n, body.len() as u64);
@@ -633,7 +625,7 @@ mod tests {
         let mut a = asset("f-linux-x64.bin", &format!("{base}/f.bin"));
         a.digest = Some(format!("sha256:{}", "0".repeat(64)));
         let cfg = Config::default();
-        let err = download_asset(&cfg, &format!("{base}/o/r"), &a, &dest, 0)
+        let err = download_asset(&cfg, &RemoteGovernor::new(), &format!("{base}/o/r"), &a, &dest, 0)
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("sha256 mismatch"));

@@ -288,8 +288,8 @@ mod tests {
 
     #[test]
     fn first_paragraph_skips_headings_and_badges() {
-        let md = "# Title\n\n[![build](x)](y)\n\nThis is a **sm64** decompilation.\nMore here.\n\nLater para.";
-        assert_eq!(first_paragraph(md).as_deref(), Some("This is a **sm64** decompilation. More here."));
+        let md = "# Title\n\n[![build](x)](y)\n\nThis is a **sample** README.\nMore here.\n\nLater para.";
+        assert_eq!(first_paragraph(md).as_deref(), Some("This is a **sample** README. More here."));
     }
 
     #[test]

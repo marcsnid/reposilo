@@ -22,11 +22,13 @@ use serde_json::{json, Value};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
+use tracing::Instrument;
 
 use crate::archiver::{now_rfc3339, Archiver};
 use crate::importer;
 use crate::config::Config;
 use crate::index::{Index, RepoEntry, SnapshotEntry};
+use crate::ratelimit::RemoteGovernor;
 use crate::types::write_json;
 
 /// Cap on retained job / job-note entries (long-running memory bound).
@@ -95,6 +97,15 @@ pub struct AppState {
     pub listing_cache: Mutex<HashMap<String, (std::time::Instant, Arc<crate::files::ArchiveIndex>)>>,
     /// Runtime + per-day stats for the built-in stats page and OTLP.
     pub metrics: Mutex<crate::metrics::Metrics>,
+    /// Process-wide request governor shared by every add and refresh job.
+    pub governor: Arc<RemoteGovernor>,
+    /// Conditional-request cache for forge API responses.
+    pub http_cache: Arc<std::sync::Mutex<crate::httpcache::HttpCache>>,
+    /// Bounds concurrent refresh jobs, shared by the scheduler and bulk actions.
+    pub refresh_sem: Arc<Semaphore>,
+    /// True while a full-archive integrity check is running, so the scheduled
+    /// loop does not start one on top of a manual check.
+    pub verify_active: std::sync::atomic::AtomicBool,
     next_job_id: AtomicU64,
     next_scan_id: AtomicU64,
 }
@@ -110,6 +121,7 @@ impl AppState {
             cfg.archive.root = c.to_string_lossy().into_owned();
         }
         let index = Index::load(&root)?;
+        let refresh_sem = Arc::new(Semaphore::new(cfg.scheduler.max_concurrent.max(1)));
         let notifications: Vec<Notification> = crate::types::read_json::<NotificationsFile>(&root.join("notifications.json"))
             .map(|f| f.items)
             .unwrap_or_default();
@@ -126,6 +138,10 @@ impl AppState {
             telemetry: std::sync::OnceLock::new(),
             listing_cache: Mutex::new(HashMap::new()),
             metrics: Mutex::new(crate::metrics::Metrics::load(&root)),
+            governor: Arc::new(RemoteGovernor::new()),
+            http_cache: Arc::new(std::sync::Mutex::new(crate::httpcache::HttpCache::load(&root))),
+            refresh_sem,
+            verify_active: std::sync::atomic::AtomicBool::new(false),
             users: std::sync::Mutex::new(crate::auth::Users::load(&root)),
             sessions: crate::auth::SessionStore::new(),
             next_job_id: AtomicU64::new(1),
@@ -191,6 +207,15 @@ impl AppState {
             }
         }
         id
+    }
+
+    /// Record the completion time of a full integrity check.
+    pub async fn mark_verified(&self) {
+        let root = self.root().await;
+        let mut m = self.metrics.lock().await;
+        m.last_verified_at = Some(now_rfc3339());
+        m.prune();
+        m.save(&root);
     }
 
     /// Record a human summary for a job, keeping `job_notes` bounded too.
@@ -382,10 +407,46 @@ impl AppState {
         }
     }
 
+    /// Bump one counter by `n`. Used for counts that are not one per event,
+    /// such as the number of integrity problems in a single run.
+    pub async fn record_count(&self, field: &str, n: u64) {
+        if n == 0 {
+            return;
+        }
+        let root = self.root().await;
+        let mut m = self.metrics.lock().await;
+        m.bump_by(field, n);
+        m.prune();
+        m.save(&root);
+        if let Some(telemetry) = self.telemetry.get() {
+            telemetry.record_event_count(field, n);
+        }
+    }
+
     /// Current index-derived gauges (repos, snapshots, dead/unavailable...).
     pub async fn totals(&self) -> crate::metrics::Totals {
+        let (cache_hits, cache_misses) = self.http_cache.lock().unwrap().stats();
+        let (rate_limited, requests_skipped) = self.governor.counters();
+        let paused_hosts = self
+            .governor
+            .status()
+            .await
+            .into_iter()
+            .map(|h| crate::metrics::HostLimit {
+                host: h.host,
+                paused_for_secs: h.paused_for_secs,
+            })
+            .collect();
         let index = self.index.read().await;
-        let mut t = crate::metrics::Totals::default();
+        let mut t = crate::metrics::Totals {
+            cache_hits,
+            cache_misses,
+            rate_limited,
+            requests_skipped,
+            paused_hosts,
+            ..Default::default()
+        };
+        let mut sizes: Vec<crate::metrics::RepoSize> = Vec::new();
         for r in &index.repos {
             t.repos += 1;
             t.snapshots += r.branch_snapshots.len() as u64;
@@ -398,7 +459,28 @@ impl AppState {
             if r.manifest.tags.is_empty() {
                 t.untagged += 1;
             }
+            let snapshot: u64 = r.branch_snapshots.iter().map(|e| e.sidecar.zip.bytes).sum();
+            let release: u64 = r.releases.iter().map(|e| e.sidecar.zip.bytes).sum();
+            let assets: u64 = r
+                .releases
+                .iter()
+                .flat_map(|e| e.sidecar.assets.iter())
+                .map(|a| a.bytes)
+                .sum();
+            t.snapshot_bytes += snapshot;
+            t.release_bytes += release;
+            t.asset_bytes += assets;
+            let total = snapshot + release + assets;
+            t.archive_bytes += total;
+            sizes.push(crate::metrics::RepoSize {
+                rel: r.rel.clone(),
+                name: r.manifest.name.clone(),
+                bytes: total,
+            });
         }
+        sizes.sort_by_key(|s| std::cmp::Reverse(s.bytes));
+        sizes.truncate(10);
+        t.largest_repos = sizes;
         t
     }
 
@@ -785,7 +867,13 @@ pub async fn spawn_add_job(
     tokio::spawn(async move {
         // RAII: release the slug lock even if the job panics or returns early.
         let _lock = lock_key.as_deref().map(|k| RepoLockGuard::new(st2.clone(), k));
-        let result = Archiver::new(st2.cfg().await).add_repo(&url, &tags, notes).await;
+        let result = Archiver::with_governor_and_cache(
+            st2.cfg().await,
+            st2.governor.clone(),
+            st2.http_cache.clone(),
+        )
+        .add_repo(&url, &tags, notes)
+        .await;
         match result {
             Ok(dir) => {
                 tracing::info!(repo = ?dir, "add finished");
@@ -958,7 +1046,15 @@ pub async fn spawn_refresh_job(
         let _permit = permit;
         let dir = { st.index.read().await.find(&rel).cloned().map(|r| r.dir) };
         let result = match dir {
-            Some(dir) => Archiver::new(st.cfg().await).refresh_repo(&dir).await,
+            Some(dir) => {
+                Archiver::with_governor_and_cache(
+                    st.cfg().await,
+                    st.governor.clone(),
+                    st.http_cache.clone(),
+                )
+                .refresh_repo(&dir)
+                .await
+            }
             None => Err(anyhow::anyhow!("repo disappeared from index")),
         };
         match result {
@@ -991,13 +1087,21 @@ pub async fn spawn_refresh_job(
     id
 }
 
-/// Spawn a full-archive verify job. Progress and the final report live in
-/// `AppState::verify_jobs`; the Settings page polls `/settings/verify/{id}`.
+/// Spawn a full-archive verify job (manual, from the Settings page).
 pub async fn spawn_verify_job(st: &Arc<AppState>) -> u64 {
-    let id = st.create_job("verify", None).await;
+    spawn_verify_job_inner(st, false).await
+}
+
+/// Shared verify job. A scheduled run also records the completion time and
+/// pushes one notification when problems are found.
+async fn spawn_verify_job_inner(st: &Arc<AppState>, scheduled: bool) -> u64 {
+    let kind = if scheduled { "scheduled-verify" } else { "verify" };
+    let id = st.create_job(kind, None).await;
     let root = st.root().await;
     let st2 = st.clone();
     tokio::spawn(async move {
+        st2.verify_active.store(true, Ordering::Relaxed);
+        tracing::info!(scheduled, job = id, "integrity check started");
         let progress = Arc::new(std::sync::Mutex::new(crate::verify::VerifyProgress::default()));
         let progress_cb = progress.clone();
         let mut handle = tokio::task::spawn_blocking(move || {
@@ -1007,24 +1111,60 @@ pub async fn spawn_verify_job(st: &Arc<AppState>) -> u64 {
                 }
             })
         });
-        loop {
+        let outcome = loop {
             tokio::select! {
                 res = &mut handle => {
-                    match res {
-                        Ok(Ok(report)) => {
-                            st2.set_job_note(id, report.summary()).await;
-                            st2.set_verify_report(id, report).await;
-                            st2.finish_job(id, None).await;
-                        }
-                        Ok(Err(e)) => st2.finish_job(id, Some(format!("{e:#}"))).await,
-                        Err(e) => st2.finish_job(id, Some(format!("verify task panicked: {e}"))).await,
-                    }
-                    break;
+                    break match res {
+                        Ok(Ok(report)) => Ok(report),
+                        Ok(Err(e)) => Err(format!("{e:#}")),
+                        Err(e) => Err(format!("verify task panicked: {e}")),
+                    };
                 }
                 _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
                     let p = progress.lock().map(|g| g.clone()).unwrap_or_default();
                     st2.set_verify_progress(id, p).await;
                 }
+            }
+        };
+        st2.verify_active.store(false, Ordering::Relaxed);
+        match outcome {
+            Ok(report) => {
+                st2.set_job_note(id, report.summary()).await;
+                st2.record_count("verify_runs", 1).await;
+                let problems = report.problems.len() as u64;
+                if problems > 0 {
+                    st2.record_count("verify_problems", problems).await;
+                }
+                // Any completed check counts, so a manual run also defers the
+                // next scheduled one.
+                st2.mark_verified().await;
+                if scheduled && problems > 0 {
+                    let title = format!("integrity check found {problems} problem(s)");
+                    let body = integrity_body(&report);
+                    st2.push_notification("corrupt", "", title, Some(body)).await;
+                }
+                tracing::info!(
+                    scheduled,
+                    job = id,
+                    snapshots = report.snapshots,
+                    problems,
+                    elapsed_ms = report.elapsed_ms,
+                    "integrity check finished"
+                );
+                if let Some(t) = st2.telemetry.get() {
+                    t.record_verify_duration(report.elapsed_ms);
+                }
+                st2.set_verify_report(id, report).await;
+                st2.finish_job(id, None).await;
+            }
+            Err(e) => {
+                st2.record_count("verify_fail", 1).await;
+                if scheduled {
+                    // Do not re-run the check on every loop tick after a failure.
+                    st2.mark_verified().await;
+                }
+                tracing::warn!(scheduled, job = id, error = %e, "integrity check failed");
+                st2.finish_job(id, Some(e)).await;
             }
         }
     });
@@ -1316,6 +1456,7 @@ async fn stats(State(st): State<Arc<AppState>>) -> Result<Response, ApiError> {
         .collect();
     Ok(ok_json(json!({
         "started_at": m.started_at,
+        "last_verified_at": m.last_verified_at,
         "totals": totals,
         "days": days,
     })))
@@ -1355,9 +1496,39 @@ async fn compute_due(st: &Arc<AppState>) -> Vec<String> {
         .collect()
 }
 
+/// A scheduled check is due when it has never run or the last run is older
+/// than `interval_days`.
+fn verify_is_due(last_verified: Option<&str>, interval_days: u32) -> bool {
+    match last_verified.and_then(hours_since_rfc3339) {
+        Some(h) => h >= f64::from(interval_days) * 24.0,
+        None => true,
+    }
+}
+
+/// Markdown summary of a verify report, grouped by repo. Used as the body of
+/// the notification pushed after a scheduled check.
+fn integrity_body(report: &crate::verify::VerifyReport) -> String {
+    let mut by_repo: BTreeMap<&str, Vec<&crate::verify::VerifyProblem>> = BTreeMap::new();
+    for p in &report.problems {
+        by_repo.entry(p.repo.as_str()).or_default().push(p);
+    }
+    let mut body = String::new();
+    for (repo, problems) in &by_repo {
+        body.push_str(&format!("**{repo}** ({} problem(s))\n\n", problems.len()));
+        for p in problems.iter().take(10) {
+            body.push_str(&format!("- `{}`: {} ({})\n", p.file, p.detail, p.kind));
+        }
+        if problems.len() > 10 {
+            body.push_str(&format!("- ...and {} more\n", problems.len() - 10));
+        }
+        body.push('\n');
+    }
+    body
+}
+
 async fn scheduler_loop(st: Arc<AppState>) {
     let poll_secs = st.cfg().await.scheduler.poll_every_secs.max(60);
-    let sem = Arc::new(Semaphore::new(st.cfg().await.scheduler.max_concurrent.max(1)));
+    let sem = st.refresh_sem.clone();
     tracing::info!(poll_every_secs = poll_secs, "scheduler started");
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(poll_secs as u64)).await;
@@ -1378,6 +1549,26 @@ async fn scheduler_loop(st: Arc<AppState>) {
     }
 }
 
+/// Periodically run an integrity check when `[verify] enabled = true` and the
+/// configured interval has elapsed. Shares the scheduler's on/off switch.
+async fn verify_loop(st: Arc<AppState>) {
+    const CHECK_SECS: u64 = 600;
+    tracing::info!("integrity check loop started");
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(CHECK_SECS)).await;
+        let cfg = st.cfg().await;
+        if !cfg.verify.enabled || st.verify_active.load(Ordering::Relaxed) {
+            continue;
+        }
+        let last = st.metrics.lock().await.last_verified_at.clone();
+        if !verify_is_due(last.as_deref(), cfg.verify.interval_days) {
+            continue;
+        }
+        tracing::info!("scheduled integrity check starting");
+        spawn_verify_job_inner(&st, true).await;
+    }
+}
+
 /// Periodically record a metrics snapshot for the OTel meter provider. The
 /// provider's periodic reader does the export. Always running so the setting
 /// can be toggled live; a no-op timer when telemetry is disabled.
@@ -1388,6 +1579,8 @@ async fn otel_loop(st: Arc<AppState>) {
             let totals = st.totals().await;
             if let Some(telemetry) = st.telemetry.get() {
                 telemetry.record_snapshot(&totals);
+                let last = st.metrics.lock().await.last_verified_at.clone();
+                telemetry.record_verify_age(last.as_deref());
             }
         }
         let secs = if cfg.otel.enabled {
@@ -1400,6 +1593,22 @@ async fn otel_loop(st: Arc<AppState>) {
 }
 
 // ---------- router & serve ----------
+
+/// One span per HTTP request (method, path, final status). Exported as an OTLP
+/// trace when `[otel] traces` is on.
+async fn trace_request(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+    let span = tracing::info_span!(
+        "http.request",
+        http.method = %method,
+        http.path = %path,
+        http.status = tracing::field::Empty,
+    );
+    let response = next.run(req).instrument(span.clone()).await;
+    span.record("http.status", response.status().as_u16());
+    response
+}
 
 pub fn router(st: Arc<AppState>) -> Router {
     // auth middleware runs on everything except /login, /logout, /assets
@@ -1426,6 +1635,7 @@ pub fn router(st: Arc<AppState>) -> Router {
         .route("/logout", axum::routing::post(crate::auth::logout))
         .merge(crate::web::router())
         .layer(auth_layer)
+        .layer(axum::middleware::from_fn(trace_request))
         .with_state(st)
 }
 
@@ -1436,11 +1646,20 @@ pub async fn serve(
     telemetry: crate::telemetry::Telemetry,
 ) -> Result<()> {
     let st = Arc::new(AppState::new(cfg, config_path).await?);
+    st.governor.attach(telemetry.clone());
     let _ = st.telemetry.set(telemetry);
-    if !no_scheduler && st.cfg().await.scheduler.enabled {
-        tokio::spawn(scheduler_loop(st.clone()));
+    // `--no-scheduler` turns off all background loops. Otherwise the refresh
+    // loop follows `[scheduler] enabled` while the verify loop follows its own
+    // `[verify] enabled`, so either can be toggled independently in Settings.
+    if no_scheduler {
+        tracing::info!("scheduler and integrity checks disabled");
     } else {
-        tracing::info!("scheduler disabled");
+        if st.cfg().await.scheduler.enabled {
+            tokio::spawn(scheduler_loop(st.clone()));
+        } else {
+            tracing::info!("scheduler disabled");
+        }
+        tokio::spawn(verify_loop(st.clone()));
     }
     tokio::spawn(otel_loop(st.clone()));
     let bind = st.cfg().await.server.bind.clone();
@@ -1463,6 +1682,145 @@ mod tests {
         assert_eq!(snapshot_notification_title(None), "new branch snapshot archived");
         assert_eq!(snapshot_notification_title(Some(1)), "1 new commit on the default branch");
         assert_eq!(snapshot_notification_title(Some(17)), "17 new commits on the default branch");
+    }
+
+    #[test]
+    fn verify_due_tracks_the_interval() {
+        assert!(verify_is_due(None, 7), "never checked is due");
+        assert!(!verify_is_due(Some(&rfc_days_ago(0)), 7));
+        assert!(!verify_is_due(Some(&rfc_days_ago(6)), 7));
+        assert!(verify_is_due(Some(&rfc_days_ago(8)), 7));
+    }
+
+    /// `totals()` must sum stored bytes from the sidecars and rank the repos.
+    #[tokio::test]
+    async fn totals_summarize_storage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let repo = root.join("owner-demo");
+        std::fs::create_dir_all(repo.join("branch/main")).unwrap();
+        std::fs::create_dir_all(repo.join("releases/v1.0.0")).unwrap();
+        std::fs::write(
+            repo.join("repo.json"),
+            r#"{"forge":"generic","name":"demo","added":"2025-01-01T00:00:00Z","default_branch":"main"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("branch/main/demo-main@2025-01-01_abc.json"),
+            r#"{"kind":"branch-snapshot","repo":"owner-demo","origin":"file:///r/demo","ref":"main","commit":"abc","archived_at":"2025-01-01T00:00:00Z","format":"zip","zip":{"file":"demo-main@2025-01-01_abc.zip","bytes":100,"sha256":"a"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("releases/v1.0.0/demo-v1.0.0.json"),
+            r#"{"kind":"release","repo":"owner-demo","origin":"file:///r/demo","ref":"v1.0.0","version":"1.0.0","commit":"def","archived_at":"2025-01-02T00:00:00Z","format":"zip","assets":[{"name":"a.bin","platform":"all","url":"u","bytes":50,"sha256":"b","downloaded_at":"2025-01-02T00:00:00Z"}],"zip":{"file":"demo-v1.0.0.zip","bytes":250,"sha256":"c"}}"#,
+        )
+        .unwrap();
+
+        let mut cfg = Config::default();
+        cfg.archive.root = root.to_string_lossy().into_owned();
+        let st = AppState::new(cfg, None).await.unwrap();
+        let t = st.totals().await;
+        assert_eq!(t.snapshot_bytes, 100);
+        assert_eq!(t.release_bytes, 250);
+        assert_eq!(t.asset_bytes, 50);
+        assert_eq!(t.archive_bytes, 400);
+        assert_eq!(t.largest_repos.len(), 1);
+        assert_eq!(t.largest_repos[0].rel, "owner-demo");
+        assert_eq!(t.largest_repos[0].name, "demo");
+        assert_eq!(t.largest_repos[0].bytes, 400);
+        assert_eq!(t.rate_limited, 0);
+        assert!(t.paused_hosts.is_empty());
+    }
+
+    #[test]
+    fn integrity_body_groups_by_repo() {
+        let report = crate::verify::VerifyReport {
+            repos: 1,
+            snapshots: 2,
+            ok: 0,
+            problems: vec![
+                crate::verify::VerifyProblem {
+                    repo: "o/a".into(),
+                    file: "a.zip".into(),
+                    kind: "sha256".into(),
+                    detail: "expected x, got y".into(),
+                },
+                crate::verify::VerifyProblem {
+                    repo: "o/a".into(),
+                    file: "b.zip".into(),
+                    kind: "missing".into(),
+                    detail: "file not found".into(),
+                },
+            ],
+            elapsed_ms: 5,
+        };
+        let body = integrity_body(&report);
+        assert!(body.contains("**o/a** (2 problem(s))"));
+        assert!(body.contains("a.zip"));
+        assert!(body.contains("missing"));
+    }
+
+    /// A corrupt archive must make a scheduled run record its completion time
+    /// and push exactly one corruption notification.
+    #[tokio::test]
+    async fn scheduled_verify_marks_time_and_notifies_on_corruption() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let repo = root.join("owner-demo");
+        let rel = repo.join("releases").join("v1.0.0");
+        std::fs::create_dir_all(&rel).unwrap();
+        let m = manifest(Some("file:///r/demo"), Some(rfc_days_ago(0)), None);
+        crate::types::write_json(&repo.join("repo.json"), &m).unwrap();
+
+        let zip = rel.join("demo-v1.0.0.zip");
+        std::fs::write(&zip, b"tampered").unwrap();
+        let sidecar = crate::types::SnapshotSidecar {
+            kind: "release".into(),
+            repo: "owner-demo".into(),
+            origin: "file:///r/demo".into(),
+            r#ref: "v1.0.0".into(),
+            version: Some("1.0.0".into()),
+            commit: "abc".into(),
+            committed_at: None,
+            archived_at: "2025-01-02T00:00:00Z".into(),
+            archiver_version: "test".into(),
+            imported: None,
+            imported_from: None,
+            format: Some("zip".into()),
+            changelog: None,
+            assets: vec![],
+            assets_filters: vec![],
+            assets_max_mb: 0,
+            zip: crate::types::ZipInfo {
+                file: "demo-v1.0.0.zip".into(),
+                bytes: 999,
+                sha256: "0".repeat(64),
+            },
+        };
+        crate::types::write_json(&rel.join("demo-v1.0.0.json"), &sidecar).unwrap();
+
+        let mut cfg = Config::default();
+        cfg.archive.root = root.to_string_lossy().into_owned();
+        let st = Arc::new(AppState::new(cfg, None).await.unwrap());
+
+        let id = spawn_verify_job_inner(&st, true).await;
+        for _ in 0..200 {
+            if st.job(id).await.map(|j| j.status != "running").unwrap_or(false) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        assert!(st.metrics.lock().await.last_verified_at.is_some());
+        let sums = st.metrics.lock().await.sums();
+        assert_eq!(sums.verify_runs, 1, "one completed check");
+        assert!(sums.verify_problems >= 1, "corruption must be counted");
+        let notes = st.notifications.lock().await;
+        assert!(
+            notes.iter().any(|n| n.kind == "corrupt"),
+            "expected a corruption notification, got {:?}",
+            notes.iter().map(|n| n.kind.clone()).collect::<Vec<_>>()
+        );
     }
 
     fn manifest(origin: Option<&str>, last_checked: Option<String>, remote_state: Option<&str>) -> RepoManifest {

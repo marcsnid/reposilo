@@ -69,6 +69,7 @@ fn short(hex: &str) -> String {
 
 /// Hash every stored zip and compare it to its sidecar. `only` limits the run
 /// to a single repo (path relative to the archive root).
+#[tracing::instrument(skip(only, on_progress))]
 pub fn verify_archive(
     root: &Path,
     only: Option<&str>,

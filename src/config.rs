@@ -18,6 +18,9 @@ pub struct Config {
     pub gitlab: ForgeTokenCfg,
     pub forgejo: ForgeTokenCfg,
     pub releases: ReleasesCfg,
+    pub remote: RemoteCfg,
+    pub cache: CacheCfg,
+    pub verify: VerifyCfg,
     pub llm: LlmCfg,
     pub otel: OtelCfg,
     pub tags: TagsCfg,
@@ -146,6 +149,8 @@ pub struct OtelCfg {
     pub logs: bool,
     /// Export metrics.
     pub metrics: bool,
+    /// Export traces (spans) over OTLP.
+    pub traces: bool,
 }
 
 impl Default for OtelCfg {
@@ -157,6 +162,7 @@ impl Default for OtelCfg {
             interval_secs: 60,
             logs: true,
             metrics: true,
+            traces: true,
         }
     }
 }
@@ -225,6 +231,73 @@ pub struct ForgeTokenCfg {
 impl ForgeTokenCfg {
     pub fn resolved_token(&self) -> Option<String> {
         resolve_token(self.token.as_deref())
+    }
+}
+
+/// Outbound request pacing shared by every forge path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RemoteCfg {
+    /// Space outbound HTTP requests per host so a burst of repos does not trip
+    /// a forge's rate limiter. `false` sends immediately.
+    pub enabled: bool,
+    /// Minimum spacing between requests to the same host, in milliseconds.
+    pub min_interval_ms: u64,
+    /// Extra random delay (0..jitter_ms) added to each spacing, to spread a
+    /// fleet of repos instead of firing in lockstep.
+    pub jitter_ms: u64,
+    /// Honor `Retry-After` and rate-limit-reset headers by pausing the host.
+    pub respect_rate_limits: bool,
+    /// Never block longer than this for a paused host; requests that would
+    /// wait longer are skipped and retried on the next scheduler pass.
+    pub max_wait_secs: u64,
+    /// Cap on a single rate-limit cooldown, in seconds.
+    pub max_cooldown_secs: u64,
+}
+
+impl Default for RemoteCfg {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_interval_ms: 500,
+            jitter_ms: 250,
+            respect_rate_limits: true,
+            max_wait_secs: 30,
+            max_cooldown_secs: 900,
+        }
+    }
+}
+
+/// Conditional-request cache for forge API responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CacheCfg {
+    /// Revalidate API responses with `ETag` / `If-None-Match`. A 304 means the
+    /// data did not change and, on GitHub, does not count against the primary
+    /// rate limit. Turn off to always refetch.
+    pub conditional: bool,
+}
+
+impl Default for CacheCfg {
+    fn default() -> Self {
+        Self { conditional: true }
+    }
+}
+
+/// Scheduled archive integrity checks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VerifyCfg {
+    /// Run a full hash check on a schedule while serving. Off by default
+    /// because hashing every stored zip is I/O heavy.
+    pub enabled: bool,
+    /// Minimum days between scheduled checks.
+    pub interval_days: u32,
+}
+
+impl Default for VerifyCfg {
+    fn default() -> Self {
+        Self { enabled: false, interval_days: 7 }
     }
 }
 
@@ -318,6 +391,64 @@ pub fn default_config_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verify_cfg_defaults_and_parses() {
+        let d = Config::default();
+        assert!(!d.verify.enabled, "scheduled checks are opt-in");
+        assert_eq!(d.verify.interval_days, 7);
+
+        let cfg: Config =
+            toml::from_str("[verify]\nenabled = true\ninterval_days = 30\n").unwrap();
+        assert!(cfg.verify.enabled);
+        assert_eq!(cfg.verify.interval_days, 30);
+
+        // Omitting the section keeps the defaults.
+        let cfg: Config = toml::from_str("[archive]\nroot = \".\"\n").unwrap();
+        assert!(!cfg.verify.enabled);
+        assert_eq!(cfg.verify.interval_days, 7);
+    }
+
+    #[test]
+    fn remote_cfg_defaults_and_parses() {
+        let d = Config::default();
+        assert!(d.remote.enabled, "pacing is on by default");
+        assert_eq!(d.remote.min_interval_ms, 500);
+        assert!(d.remote.respect_rate_limits);
+
+        // A partial section keeps the other defaults.
+        let cfg: Config =
+            toml::from_str("[remote]\nenabled = false\nmin_interval_ms = 0\n").unwrap();
+        assert!(!cfg.remote.enabled);
+        assert_eq!(cfg.remote.min_interval_ms, 0);
+        assert_eq!(cfg.remote.max_wait_secs, 30);
+        assert_eq!(cfg.remote.max_cooldown_secs, 900);
+
+        // Omitting the section entirely also yields the defaults (fallback).
+        let cfg: Config = toml::from_str("[archive]\nroot = \".\"\n").unwrap();
+        assert!(cfg.remote.enabled);
+    }
+
+    #[test]
+    fn cache_cfg_defaults_and_parses() {
+        assert!(Config::default().cache.conditional, "conditional requests are on by default");
+        let cfg: Config = toml::from_str("[cache]\nconditional = false\n").unwrap();
+        assert!(!cfg.cache.conditional);
+        // Omitting the section keeps the default.
+        let cfg: Config = toml::from_str("[archive]\nroot = \".\"\n").unwrap();
+        assert!(cfg.cache.conditional);
+    }
+
+    #[test]
+    fn otel_traces_defaults_and_parses() {
+        assert!(Config::default().otel.traces, "traces are on by default within otel");
+        let cfg: Config = toml::from_str("[otel]\nenabled = true\ntraces = false\n").unwrap();
+        assert!(cfg.otel.enabled);
+        assert!(!cfg.otel.traces);
+        // Omitting [otel] keeps the defaults.
+        let cfg: Config = toml::from_str("[archive]\nroot = \".\"\n").unwrap();
+        assert!(cfg.otel.traces);
+    }
 
     #[test]
     fn releases_cfg_roundtrips_toml() {

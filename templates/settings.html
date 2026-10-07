@@ -63,6 +63,15 @@
     </section>
 
     <section class="panel">
+      <h2>Scheduled checks</h2>
+      <p class="note">Hash every stored zip against its sidecar hash on a schedule to catch missing or corrupt files. Off by default: a check reads the whole archive, so skip it if your storage already guards against bitrot (ZFS, btrfs, and similar).</p>
+      <div class="settings-row"><label>Enabled</label>
+        <input type="checkbox" name="verify_enabled" value="1" {% if ctx.verify_enabled %}checked{% endif %}></div>
+      <div class="settings-row"><label>Check interval (days)</label>
+        <input type="number" name="verify_interval_days" value="{{ ctx.verify_interval_days }}" min="1"></div>
+    </section>
+
+    <section class="panel">
       <h2>llama.cpp</h2>
       <p class="note">Any OpenAI-compatible endpoint. Used for <b>auto-tagging</b> and <b>import review</b>.</p>
       <div class="settings-row"><label>Enabled</label>

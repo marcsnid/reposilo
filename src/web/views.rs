@@ -99,6 +99,15 @@ pub fn human_bytes(b: u64) -> String {
     }
 }
 
+/// A short duration label, e.g. "45s" or "2m 05s".
+fn human_secs(secs: u64) -> String {
+    if secs >= 60 {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
 /// Relative "time ago" for an RFC3339 timestamp, plus its exact `YYYY-MM-DD`
 /// date (for a `title` tooltip). e.g. `("3d ago", "2026-10-03")`.
 pub fn humanize_ago(ts: &str) -> Option<(String, String)> {
@@ -951,6 +960,9 @@ pub struct SettingsCtx {
     pub poll_hours: String,
     pub poll_every: String,
     pub dead_after: String,
+    // scheduled integrity checks
+    pub verify_enabled: bool,
+    pub verify_interval_days: String,
     // read-only info
     pub bind: String,
     pub archive_root: String,
@@ -1023,6 +1035,8 @@ pub fn settings_ctx_from(cfg: &crate::config::Config, saved: bool) -> SettingsCt
         poll_hours: cfg.scheduler.release_poll_hours.to_string(),
         poll_every: cfg.scheduler.poll_every_secs.to_string(),
         dead_after: cfg.scheduler.dead_after_days.to_string(),
+        verify_enabled: cfg.verify.enabled,
+        verify_interval_days: cfg.verify.interval_days.to_string(),
         bind: cfg.server.bind.clone(),
         archive_root: cfg.archive.root.clone(),
         llm_enabled: cfg.llm.enabled,
@@ -1163,8 +1177,25 @@ pub struct DayView {
     pub adds: u64,
     pub adds_fail: u64,
     pub remote_gone: u64,
+    pub verify_runs: u64,
+    pub verify_problems: u64,
     pub ok_h: u32,   // 0..100 for the chart
     pub fail_h: u32, // 0..100
+}
+
+/// One row of the largest-repos storage table.
+#[derive(Debug, Clone)]
+pub struct StatRepoView {
+    pub rel: String,
+    pub name: String,
+    pub size_human: String,
+}
+
+/// A host currently paused by a rate-limit signal.
+#[derive(Debug, Clone)]
+pub struct HostLimitView {
+    pub host: String,
+    pub paused: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1183,6 +1214,20 @@ pub struct StatsCtx {
     pub new_releases: u64,
     pub new_snapshots: u64,
     pub remote_gone: u64,
+    pub verify_runs: u64,
+    pub verify_problems: u64,
+    pub verify_fail: u64,
+    pub last_verified_at: String,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub archive_size: String,
+    pub snapshot_size: String,
+    pub release_size: String,
+    pub asset_size: String,
+    pub largest_repos: Vec<StatRepoView>,
+    pub rate_limited: u64,
+    pub requests_skipped: u64,
+    pub paused_hosts: Vec<HostLimitView>,
     pub success_pct: String,
     pub week: Vec<DayView>,
     pub days: Vec<DayView>,
@@ -1229,6 +1274,8 @@ pub fn stats_ctx_from(
             adds: s.add_ok,
             adds_fail: s.add_fail,
             remote_gone: s.remote_gone,
+            verify_runs: s.verify_runs,
+            verify_problems: s.verify_problems,
             ok_h: pct(s.refresh_ok),
             fail_h: pct(s.refresh_fail),
         }
@@ -1252,7 +1299,9 @@ pub fn stats_ctx_from(
         .iter()
         .rev()
         .filter(|(_, s)| {
-            s.refresh_ok + s.refresh_fail + s.add_ok + s.add_fail + s.new_releases + s.new_snapshots + s.remote_gone > 0
+            s.refresh_ok + s.refresh_fail + s.add_ok + s.add_fail + s.new_releases + s.new_snapshots + s.remote_gone
+                + s.verify_runs + s.verify_problems + s.verify_fail
+                > 0
         })
         .map(|(k, s)| day_view(k.clone(), s, dmax))
         .collect();
@@ -1281,6 +1330,35 @@ pub fn stats_ctx_from(
         new_releases: sums.new_releases,
         new_snapshots: sums.new_snapshots,
         remote_gone: sums.remote_gone,
+        verify_runs: sums.verify_runs,
+        verify_problems: sums.verify_problems,
+        verify_fail: sums.verify_fail,
+        last_verified_at: metrics.last_verified_at.clone().unwrap_or_default(),
+        cache_hits: totals.cache_hits,
+        cache_misses: totals.cache_misses,
+        archive_size: human_bytes(totals.archive_bytes),
+        snapshot_size: human_bytes(totals.snapshot_bytes),
+        release_size: human_bytes(totals.release_bytes),
+        asset_size: human_bytes(totals.asset_bytes),
+        largest_repos: totals
+            .largest_repos
+            .iter()
+            .map(|r| StatRepoView {
+                rel: r.rel.clone(),
+                name: if r.name.trim().is_empty() { r.rel.clone() } else { r.name.clone() },
+                size_human: human_bytes(r.bytes),
+            })
+            .collect(),
+        rate_limited: totals.rate_limited,
+        requests_skipped: totals.requests_skipped,
+        paused_hosts: totals
+            .paused_hosts
+            .iter()
+            .map(|h| HostLimitView {
+                host: h.host.clone(),
+                paused: human_secs(h.paused_for_secs),
+            })
+            .collect(),
         success_pct,
         week,
         days,
@@ -1291,8 +1369,72 @@ pub fn stats_ctx_from(
 
 #[cfg(test)]
 mod tests {
-    use super::humanize_ago_from;
+    use super::{humanize_ago_from, settings_ctx_from, stats_ctx_from};
     use time::macros::datetime;
+
+    #[test]
+    fn settings_ctx_includes_verify_toggle() {
+        let mut cfg = crate::config::Config::default();
+        let ctx = settings_ctx_from(&cfg, false);
+        assert!(!ctx.verify_enabled, "scheduled checks default to off");
+        assert_eq!(ctx.verify_interval_days, "7");
+
+        cfg.verify.enabled = true;
+        cfg.verify.interval_days = 30;
+        let ctx = settings_ctx_from(&cfg, false);
+        assert!(ctx.verify_enabled);
+        assert_eq!(ctx.verify_interval_days, "30");
+    }
+
+    #[test]
+    fn stats_ctx_includes_verify_metrics() {
+        let mut m = crate::metrics::Metrics::default();
+        m.bump("verify_runs");
+        m.bump_by("verify_problems", 2);
+        m.last_verified_at = Some("2025-01-02T00:00:00Z".into());
+        let ctx = stats_ctx_from(
+            &m,
+            &crate::metrics::Totals::default(),
+            &crate::config::Config::default(),
+        );
+        assert_eq!(ctx.verify_runs, 1);
+        assert_eq!(ctx.verify_problems, 2);
+        assert_eq!(ctx.last_verified_at, "2025-01-02T00:00:00Z");
+    }
+
+    #[test]
+    fn stats_ctx_includes_storage_and_rate_limits() {
+        let m = crate::metrics::Metrics::default();
+        let totals = crate::metrics::Totals {
+            archive_bytes: 3 * 1024 * 1024,
+            snapshot_bytes: 2 * 1024 * 1024,
+            release_bytes: 1024 * 1024,
+            asset_bytes: 0,
+            largest_repos: vec![crate::metrics::RepoSize {
+                rel: "tools/ripgrep".into(),
+                name: "ripgrep".into(),
+                bytes: 3 * 1024 * 1024,
+            }],
+            rate_limited: 4,
+            requests_skipped: 2,
+            paused_hosts: vec![crate::metrics::HostLimit {
+                host: "api.github.com".into(),
+                paused_for_secs: 125,
+            }],
+            ..Default::default()
+        };
+        let ctx = stats_ctx_from(&m, &totals, &crate::config::Config::default());
+        assert_eq!(ctx.archive_size, "3.0 MB");
+        assert_eq!(ctx.snapshot_size, "2.0 MB");
+        assert_eq!(ctx.release_size, "1.0 MB");
+        assert_eq!(ctx.largest_repos.len(), 1);
+        assert_eq!(ctx.largest_repos[0].name, "ripgrep");
+        assert_eq!(ctx.largest_repos[0].size_human, "3.0 MB");
+        assert_eq!(ctx.rate_limited, 4);
+        assert_eq!(ctx.requests_skipped, 2);
+        assert_eq!(ctx.paused_hosts[0].host, "api.github.com");
+        assert_eq!(ctx.paused_hosts[0].paused, "2m 05s");
+    }
 
     #[test]
     fn humanizes_relative_time() {

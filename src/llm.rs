@@ -188,12 +188,12 @@ mod tests {
 
     #[test]
     fn parses_results_object() {
-        let c = r#"{"results":[{"name":"sm64","tags":["decomps","n64"]},{"name":"oot","tags":["Decomps","zelda"]}]}"#;
+        let c = r#"{"results":[{"name":"ripgrep","tags":["cli","rust"]},{"name":"fd","tags":["Cli","tools"]}]}"#;
         let r = parse_llm_tags(c).unwrap();
         assert_eq!(r.len(), 2);
-        assert_eq!(r[0].name, "sm64");
-        assert_eq!(r[0].tags, vec!["decomps", "n64"]);
-        assert_eq!(r[1].tags, vec!["decomps", "zelda"]); // lowercased
+        assert_eq!(r[0].name, "ripgrep");
+        assert_eq!(r[0].tags, vec!["cli", "rust"]);
+        assert_eq!(r[1].tags, vec!["cli", "tools"]); // lowercased
     }
 
     #[test]
@@ -262,9 +262,9 @@ mod identify_tests {
 
     #[test]
     fn parses_identify_output() {
-        let c = r#"{"name":"Super Mario 64", "queries":["sm64 decompilation", "n64 decomp mario"]}"#;
+        let c = r#"{"name":"ripgrep", "queries":["ripgrep source", "rust cli search"]}"#;
         let r = parse_llm_identify(c);
-        assert_eq!(r.name.as_deref(), Some("Super Mario 64"));
+        assert_eq!(r.name.as_deref(), Some("ripgrep"));
         assert_eq!(r.queries.len(), 2);
     }
 
