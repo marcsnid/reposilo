@@ -98,6 +98,9 @@ pub struct AppState {
     pub metrics: Mutex<crate::metrics::Metrics>,
     /// Process-wide request governor shared by every add and refresh job.
     pub governor: Arc<RemoteGovernor>,
+    /// True while a full-archive integrity check is running, so the scheduled
+    /// loop does not start one on top of a manual check.
+    pub verify_active: std::sync::atomic::AtomicBool,
     next_job_id: AtomicU64,
     next_scan_id: AtomicU64,
 }
@@ -130,6 +133,7 @@ impl AppState {
             listing_cache: Mutex::new(HashMap::new()),
             metrics: Mutex::new(crate::metrics::Metrics::load(&root)),
             governor: Arc::new(RemoteGovernor::new()),
+            verify_active: std::sync::atomic::AtomicBool::new(false),
             users: std::sync::Mutex::new(crate::auth::Users::load(&root)),
             sessions: crate::auth::SessionStore::new(),
             next_job_id: AtomicU64::new(1),
@@ -195,6 +199,15 @@ impl AppState {
             }
         }
         id
+    }
+
+    /// Record the completion time of a full integrity check.
+    pub async fn mark_verified(&self) {
+        let root = self.root().await;
+        let mut m = self.metrics.lock().await;
+        m.last_verified_at = Some(now_rfc3339());
+        m.prune();
+        m.save(&root);
     }
 
     /// Record a human summary for a job, keeping `job_notes` bounded too.
@@ -383,6 +396,22 @@ impl AppState {
         // per-day store (which resets at midnight).
         if let Some(telemetry) = self.telemetry.get() {
             telemetry.record_events(fields);
+        }
+    }
+
+    /// Bump one counter by `n`. Used for counts that are not one per event,
+    /// such as the number of integrity problems in a single run.
+    pub async fn record_count(&self, field: &str, n: u64) {
+        if n == 0 {
+            return;
+        }
+        let root = self.root().await;
+        let mut m = self.metrics.lock().await;
+        m.bump_by(field, n);
+        m.prune();
+        m.save(&root);
+        if let Some(telemetry) = self.telemetry.get() {
+            telemetry.record_event_count(field, n);
         }
     }
 
@@ -995,13 +1024,21 @@ pub async fn spawn_refresh_job(
     id
 }
 
-/// Spawn a full-archive verify job. Progress and the final report live in
-/// `AppState::verify_jobs`; the Settings page polls `/settings/verify/{id}`.
+/// Spawn a full-archive verify job (manual, from the Settings page).
 pub async fn spawn_verify_job(st: &Arc<AppState>) -> u64 {
-    let id = st.create_job("verify", None).await;
+    spawn_verify_job_inner(st, false).await
+}
+
+/// Shared verify job. A scheduled run also records the completion time and
+/// pushes one notification when problems are found.
+async fn spawn_verify_job_inner(st: &Arc<AppState>, scheduled: bool) -> u64 {
+    let kind = if scheduled { "scheduled-verify" } else { "verify" };
+    let id = st.create_job(kind, None).await;
     let root = st.root().await;
     let st2 = st.clone();
     tokio::spawn(async move {
+        st2.verify_active.store(true, Ordering::Relaxed);
+        tracing::info!(scheduled, job = id, "integrity check started");
         let progress = Arc::new(std::sync::Mutex::new(crate::verify::VerifyProgress::default()));
         let progress_cb = progress.clone();
         let mut handle = tokio::task::spawn_blocking(move || {
@@ -1011,24 +1048,60 @@ pub async fn spawn_verify_job(st: &Arc<AppState>) -> u64 {
                 }
             })
         });
-        loop {
+        let outcome = loop {
             tokio::select! {
                 res = &mut handle => {
-                    match res {
-                        Ok(Ok(report)) => {
-                            st2.set_job_note(id, report.summary()).await;
-                            st2.set_verify_report(id, report).await;
-                            st2.finish_job(id, None).await;
-                        }
-                        Ok(Err(e)) => st2.finish_job(id, Some(format!("{e:#}"))).await,
-                        Err(e) => st2.finish_job(id, Some(format!("verify task panicked: {e}"))).await,
-                    }
-                    break;
+                    break match res {
+                        Ok(Ok(report)) => Ok(report),
+                        Ok(Err(e)) => Err(format!("{e:#}")),
+                        Err(e) => Err(format!("verify task panicked: {e}")),
+                    };
                 }
                 _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
                     let p = progress.lock().map(|g| g.clone()).unwrap_or_default();
                     st2.set_verify_progress(id, p).await;
                 }
+            }
+        };
+        st2.verify_active.store(false, Ordering::Relaxed);
+        match outcome {
+            Ok(report) => {
+                st2.set_job_note(id, report.summary()).await;
+                st2.record_count("verify_runs", 1).await;
+                let problems = report.problems.len() as u64;
+                if problems > 0 {
+                    st2.record_count("verify_problems", problems).await;
+                }
+                // Any completed check counts, so a manual run also defers the
+                // next scheduled one.
+                st2.mark_verified().await;
+                if scheduled && problems > 0 {
+                    let title = format!("integrity check found {problems} problem(s)");
+                    let body = integrity_body(&report);
+                    st2.push_notification("corrupt", "", title, Some(body)).await;
+                }
+                tracing::info!(
+                    scheduled,
+                    job = id,
+                    snapshots = report.snapshots,
+                    problems,
+                    elapsed_ms = report.elapsed_ms,
+                    "integrity check finished"
+                );
+                if let Some(t) = st2.telemetry.get() {
+                    t.record_verify_duration(report.elapsed_ms);
+                }
+                st2.set_verify_report(id, report).await;
+                st2.finish_job(id, None).await;
+            }
+            Err(e) => {
+                st2.record_count("verify_fail", 1).await;
+                if scheduled {
+                    // Do not re-run the check on every loop tick after a failure.
+                    st2.mark_verified().await;
+                }
+                tracing::warn!(scheduled, job = id, error = %e, "integrity check failed");
+                st2.finish_job(id, Some(e)).await;
             }
         }
     });
@@ -1320,6 +1393,7 @@ async fn stats(State(st): State<Arc<AppState>>) -> Result<Response, ApiError> {
         .collect();
     Ok(ok_json(json!({
         "started_at": m.started_at,
+        "last_verified_at": m.last_verified_at,
         "totals": totals,
         "days": days,
     })))
@@ -1359,6 +1433,36 @@ async fn compute_due(st: &Arc<AppState>) -> Vec<String> {
         .collect()
 }
 
+/// A scheduled check is due when it has never run or the last run is older
+/// than `interval_days`.
+fn verify_is_due(last_verified: Option<&str>, interval_days: u32) -> bool {
+    match last_verified.and_then(hours_since_rfc3339) {
+        Some(h) => h >= f64::from(interval_days) * 24.0,
+        None => true,
+    }
+}
+
+/// Markdown summary of a verify report, grouped by repo. Used as the body of
+/// the notification pushed after a scheduled check.
+fn integrity_body(report: &crate::verify::VerifyReport) -> String {
+    let mut by_repo: BTreeMap<&str, Vec<&crate::verify::VerifyProblem>> = BTreeMap::new();
+    for p in &report.problems {
+        by_repo.entry(p.repo.as_str()).or_default().push(p);
+    }
+    let mut body = String::new();
+    for (repo, problems) in &by_repo {
+        body.push_str(&format!("**{repo}** ({} problem(s))\n\n", problems.len()));
+        for p in problems.iter().take(10) {
+            body.push_str(&format!("- `{}`: {} ({})\n", p.file, p.detail, p.kind));
+        }
+        if problems.len() > 10 {
+            body.push_str(&format!("- ...and {} more\n", problems.len() - 10));
+        }
+        body.push('\n');
+    }
+    body
+}
+
 async fn scheduler_loop(st: Arc<AppState>) {
     let poll_secs = st.cfg().await.scheduler.poll_every_secs.max(60);
     let sem = Arc::new(Semaphore::new(st.cfg().await.scheduler.max_concurrent.max(1)));
@@ -1382,6 +1486,26 @@ async fn scheduler_loop(st: Arc<AppState>) {
     }
 }
 
+/// Periodically run an integrity check when `[verify] enabled = true` and the
+/// configured interval has elapsed. Shares the scheduler's on/off switch.
+async fn verify_loop(st: Arc<AppState>) {
+    const CHECK_SECS: u64 = 600;
+    tracing::info!("integrity check loop started");
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(CHECK_SECS)).await;
+        let cfg = st.cfg().await;
+        if !cfg.verify.enabled || st.verify_active.load(Ordering::Relaxed) {
+            continue;
+        }
+        let last = st.metrics.lock().await.last_verified_at.clone();
+        if !verify_is_due(last.as_deref(), cfg.verify.interval_days) {
+            continue;
+        }
+        tracing::info!("scheduled integrity check starting");
+        spawn_verify_job_inner(&st, true).await;
+    }
+}
+
 /// Periodically record a metrics snapshot for the OTel meter provider. The
 /// provider's periodic reader does the export. Always running so the setting
 /// can be toggled live; a no-op timer when telemetry is disabled.
@@ -1392,6 +1516,8 @@ async fn otel_loop(st: Arc<AppState>) {
             let totals = st.totals().await;
             if let Some(telemetry) = st.telemetry.get() {
                 telemetry.record_snapshot(&totals);
+                let last = st.metrics.lock().await.last_verified_at.clone();
+                telemetry.record_verify_age(last.as_deref());
             }
         }
         let secs = if cfg.otel.enabled {
@@ -1440,11 +1566,20 @@ pub async fn serve(
     telemetry: crate::telemetry::Telemetry,
 ) -> Result<()> {
     let st = Arc::new(AppState::new(cfg, config_path).await?);
+    st.governor.attach(telemetry.clone());
     let _ = st.telemetry.set(telemetry);
-    if !no_scheduler && st.cfg().await.scheduler.enabled {
-        tokio::spawn(scheduler_loop(st.clone()));
+    // `--no-scheduler` turns off all background loops. Otherwise the refresh
+    // loop follows `[scheduler] enabled` while the verify loop follows its own
+    // `[verify] enabled`, so either can be toggled independently in Settings.
+    if no_scheduler {
+        tracing::info!("scheduler and integrity checks disabled");
     } else {
-        tracing::info!("scheduler disabled");
+        if st.cfg().await.scheduler.enabled {
+            tokio::spawn(scheduler_loop(st.clone()));
+        } else {
+            tracing::info!("scheduler disabled");
+        }
+        tokio::spawn(verify_loop(st.clone()));
     }
     tokio::spawn(otel_loop(st.clone()));
     let bind = st.cfg().await.server.bind.clone();
@@ -1467,6 +1602,105 @@ mod tests {
         assert_eq!(snapshot_notification_title(None), "new branch snapshot archived");
         assert_eq!(snapshot_notification_title(Some(1)), "1 new commit on the default branch");
         assert_eq!(snapshot_notification_title(Some(17)), "17 new commits on the default branch");
+    }
+
+    #[test]
+    fn verify_due_tracks_the_interval() {
+        assert!(verify_is_due(None, 7), "never checked is due");
+        assert!(!verify_is_due(Some(&rfc_days_ago(0)), 7));
+        assert!(!verify_is_due(Some(&rfc_days_ago(6)), 7));
+        assert!(verify_is_due(Some(&rfc_days_ago(8)), 7));
+    }
+
+    #[test]
+    fn integrity_body_groups_by_repo() {
+        let report = crate::verify::VerifyReport {
+            repos: 1,
+            snapshots: 2,
+            ok: 0,
+            problems: vec![
+                crate::verify::VerifyProblem {
+                    repo: "o/a".into(),
+                    file: "a.zip".into(),
+                    kind: "sha256".into(),
+                    detail: "expected x, got y".into(),
+                },
+                crate::verify::VerifyProblem {
+                    repo: "o/a".into(),
+                    file: "b.zip".into(),
+                    kind: "missing".into(),
+                    detail: "file not found".into(),
+                },
+            ],
+            elapsed_ms: 5,
+        };
+        let body = integrity_body(&report);
+        assert!(body.contains("**o/a** (2 problem(s))"));
+        assert!(body.contains("a.zip"));
+        assert!(body.contains("missing"));
+    }
+
+    /// A corrupt archive must make a scheduled run record its completion time
+    /// and push exactly one corruption notification.
+    #[tokio::test]
+    async fn scheduled_verify_marks_time_and_notifies_on_corruption() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let repo = root.join("owner-demo");
+        let rel = repo.join("releases").join("v1.0.0");
+        std::fs::create_dir_all(&rel).unwrap();
+        let m = manifest(Some("file:///r/demo"), Some(rfc_days_ago(0)), None);
+        crate::types::write_json(&repo.join("repo.json"), &m).unwrap();
+
+        let zip = rel.join("demo-v1.0.0.zip");
+        std::fs::write(&zip, b"tampered").unwrap();
+        let sidecar = crate::types::SnapshotSidecar {
+            kind: "release".into(),
+            repo: "owner-demo".into(),
+            origin: "file:///r/demo".into(),
+            r#ref: "v1.0.0".into(),
+            version: Some("1.0.0".into()),
+            commit: "abc".into(),
+            committed_at: None,
+            archived_at: "2025-01-02T00:00:00Z".into(),
+            archiver_version: "test".into(),
+            imported: None,
+            imported_from: None,
+            format: Some("zip".into()),
+            changelog: None,
+            assets: vec![],
+            assets_filters: vec![],
+            assets_max_mb: 0,
+            zip: crate::types::ZipInfo {
+                file: "demo-v1.0.0.zip".into(),
+                bytes: 999,
+                sha256: "0".repeat(64),
+            },
+        };
+        crate::types::write_json(&rel.join("demo-v1.0.0.json"), &sidecar).unwrap();
+
+        let mut cfg = Config::default();
+        cfg.archive.root = root.to_string_lossy().into_owned();
+        let st = Arc::new(AppState::new(cfg, None).await.unwrap());
+
+        let id = spawn_verify_job_inner(&st, true).await;
+        for _ in 0..200 {
+            if st.job(id).await.map(|j| j.status != "running").unwrap_or(false) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        assert!(st.metrics.lock().await.last_verified_at.is_some());
+        let sums = st.metrics.lock().await.sums();
+        assert_eq!(sums.verify_runs, 1, "one completed check");
+        assert!(sums.verify_problems >= 1, "corruption must be counted");
+        let notes = st.notifications.lock().await;
+        assert!(
+            notes.iter().any(|n| n.kind == "corrupt"),
+            "expected a corruption notification, got {:?}",
+            notes.iter().map(|n| n.kind.clone()).collect::<Vec<_>>()
+        );
     }
 
     fn manifest(origin: Option<&str>, last_checked: Option<String>, remote_state: Option<&str>) -> RepoManifest {

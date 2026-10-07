@@ -966,6 +966,8 @@ async fn settings_save(
     cfg.scheduler.release_poll_hours = num(&f, "poll_hours", cfg.scheduler.release_poll_hours).max(1);
     cfg.scheduler.poll_every_secs = num(&f, "poll_every", cfg.scheduler.poll_every_secs).max(60);
     cfg.scheduler.dead_after_days = num(&f, "dead_after", cfg.scheduler.dead_after_days);
+    cfg.verify.enabled = f.0.get("verify_enabled").map(|v| v == "1").unwrap_or(false);
+    cfg.verify.interval_days = num(&f, "verify_interval_days", cfg.verify.interval_days).max(1);
     cfg.llm.enabled = f.0.get("llm_enabled").map(|v| v == "1").unwrap_or(false);
     if let Some(url) = f.0.get("llm_url") {
         if !url.trim().is_empty() {

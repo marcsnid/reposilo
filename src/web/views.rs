@@ -951,6 +951,9 @@ pub struct SettingsCtx {
     pub poll_hours: String,
     pub poll_every: String,
     pub dead_after: String,
+    // scheduled integrity checks
+    pub verify_enabled: bool,
+    pub verify_interval_days: String,
     // read-only info
     pub bind: String,
     pub archive_root: String,
@@ -1023,6 +1026,8 @@ pub fn settings_ctx_from(cfg: &crate::config::Config, saved: bool) -> SettingsCt
         poll_hours: cfg.scheduler.release_poll_hours.to_string(),
         poll_every: cfg.scheduler.poll_every_secs.to_string(),
         dead_after: cfg.scheduler.dead_after_days.to_string(),
+        verify_enabled: cfg.verify.enabled,
+        verify_interval_days: cfg.verify.interval_days.to_string(),
         bind: cfg.server.bind.clone(),
         archive_root: cfg.archive.root.clone(),
         llm_enabled: cfg.llm.enabled,
@@ -1163,6 +1168,8 @@ pub struct DayView {
     pub adds: u64,
     pub adds_fail: u64,
     pub remote_gone: u64,
+    pub verify_runs: u64,
+    pub verify_problems: u64,
     pub ok_h: u32,   // 0..100 for the chart
     pub fail_h: u32, // 0..100
 }
@@ -1183,6 +1190,10 @@ pub struct StatsCtx {
     pub new_releases: u64,
     pub new_snapshots: u64,
     pub remote_gone: u64,
+    pub verify_runs: u64,
+    pub verify_problems: u64,
+    pub verify_fail: u64,
+    pub last_verified_at: String,
     pub success_pct: String,
     pub week: Vec<DayView>,
     pub days: Vec<DayView>,
@@ -1229,6 +1240,8 @@ pub fn stats_ctx_from(
             adds: s.add_ok,
             adds_fail: s.add_fail,
             remote_gone: s.remote_gone,
+            verify_runs: s.verify_runs,
+            verify_problems: s.verify_problems,
             ok_h: pct(s.refresh_ok),
             fail_h: pct(s.refresh_fail),
         }
@@ -1252,7 +1265,9 @@ pub fn stats_ctx_from(
         .iter()
         .rev()
         .filter(|(_, s)| {
-            s.refresh_ok + s.refresh_fail + s.add_ok + s.add_fail + s.new_releases + s.new_snapshots + s.remote_gone > 0
+            s.refresh_ok + s.refresh_fail + s.add_ok + s.add_fail + s.new_releases + s.new_snapshots + s.remote_gone
+                + s.verify_runs + s.verify_problems + s.verify_fail
+                > 0
         })
         .map(|(k, s)| day_view(k.clone(), s, dmax))
         .collect();
@@ -1281,6 +1296,10 @@ pub fn stats_ctx_from(
         new_releases: sums.new_releases,
         new_snapshots: sums.new_snapshots,
         remote_gone: sums.remote_gone,
+        verify_runs: sums.verify_runs,
+        verify_problems: sums.verify_problems,
+        verify_fail: sums.verify_fail,
+        last_verified_at: metrics.last_verified_at.clone().unwrap_or_default(),
         success_pct,
         week,
         days,
@@ -1291,8 +1310,38 @@ pub fn stats_ctx_from(
 
 #[cfg(test)]
 mod tests {
-    use super::humanize_ago_from;
+    use super::{humanize_ago_from, settings_ctx_from, stats_ctx_from};
     use time::macros::datetime;
+
+    #[test]
+    fn settings_ctx_includes_verify_toggle() {
+        let mut cfg = crate::config::Config::default();
+        let ctx = settings_ctx_from(&cfg, false);
+        assert!(!ctx.verify_enabled, "scheduled checks default to off");
+        assert_eq!(ctx.verify_interval_days, "7");
+
+        cfg.verify.enabled = true;
+        cfg.verify.interval_days = 30;
+        let ctx = settings_ctx_from(&cfg, false);
+        assert!(ctx.verify_enabled);
+        assert_eq!(ctx.verify_interval_days, "30");
+    }
+
+    #[test]
+    fn stats_ctx_includes_verify_metrics() {
+        let mut m = crate::metrics::Metrics::default();
+        m.bump("verify_runs");
+        m.bump_by("verify_problems", 2);
+        m.last_verified_at = Some("2025-01-02T00:00:00Z".into());
+        let ctx = stats_ctx_from(
+            &m,
+            &crate::metrics::Totals::default(),
+            &crate::config::Config::default(),
+        );
+        assert_eq!(ctx.verify_runs, 1);
+        assert_eq!(ctx.verify_problems, 2);
+        assert_eq!(ctx.last_verified_at, "2025-01-02T00:00:00Z");
+    }
 
     #[test]
     fn humanizes_relative_time() {

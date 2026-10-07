@@ -26,6 +26,12 @@ pub struct DayStats {
     pub new_releases: u64,
     pub new_snapshots: u64,
     pub remote_gone: u64,
+    /// Integrity checks that completed (clean or with problems).
+    pub verify_runs: u64,
+    /// Individual integrity problems found across runs.
+    pub verify_problems: u64,
+    /// Integrity checks that could not complete.
+    pub verify_fail: u64,
 }
 
 impl DayStats {
@@ -37,6 +43,9 @@ impl DayStats {
         self.new_releases += other.new_releases;
         self.new_snapshots += other.new_snapshots;
         self.remote_gone += other.remote_gone;
+        self.verify_runs += other.verify_runs;
+        self.verify_problems += other.verify_problems;
+        self.verify_fail += other.verify_fail;
     }
 }
 
@@ -44,13 +53,15 @@ impl DayStats {
 #[serde(default)]
 pub struct Metrics {
     pub started_at: String,
+    /// When the last full integrity check finished (RFC3339), if ever.
+    pub last_verified_at: Option<String>,
     /// "YYYY-MM-DD" -> counters (BTreeMap keeps them date-ordered).
     pub days: BTreeMap<String, DayStats>,
 }
 
 impl Default for Metrics {
     fn default() -> Self {
-        Self { started_at: now_rfc3339(), days: BTreeMap::new() }
+        Self { started_at: now_rfc3339(), last_verified_at: None, days: BTreeMap::new() }
     }
 }
 
@@ -86,15 +97,23 @@ impl Metrics {
 
     /// Bump one named counter (matches the `DayStats` fields).
     pub fn bump(&mut self, field: &str) {
+        self.bump_by(field, 1);
+    }
+
+    /// Bump one named counter by `n` (matches the `DayStats` fields).
+    pub fn bump_by(&mut self, field: &str, n: u64) {
         let d = self.today();
         match field {
-            "refresh_ok" => d.refresh_ok += 1,
-            "refresh_fail" => d.refresh_fail += 1,
-            "add_ok" => d.add_ok += 1,
-            "add_fail" => d.add_fail += 1,
-            "new_releases" => d.new_releases += 1,
-            "new_snapshots" => d.new_snapshots += 1,
-            "remote_gone" => d.remote_gone += 1,
+            "refresh_ok" => d.refresh_ok += n,
+            "refresh_fail" => d.refresh_fail += n,
+            "add_ok" => d.add_ok += n,
+            "add_fail" => d.add_fail += n,
+            "new_releases" => d.new_releases += n,
+            "new_snapshots" => d.new_snapshots += n,
+            "remote_gone" => d.remote_gone += n,
+            "verify_runs" => d.verify_runs += n,
+            "verify_problems" => d.verify_problems += n,
+            "verify_fail" => d.verify_fail += n,
             _ => {}
         }
     }
@@ -144,10 +163,16 @@ mod tests {
         m.bump("refresh_ok");
         m.bump("refresh_fail");
         m.bump("new_releases");
+        m.bump_by("verify_problems", 3);
+        m.bump("verify_runs");
+        m.bump("verify_fail");
         let s = m.sums();
         assert_eq!(s.refresh_ok, 2);
         assert_eq!(s.refresh_fail, 1);
         assert_eq!(s.new_releases, 1);
+        assert_eq!(s.verify_runs, 1);
+        assert_eq!(s.verify_problems, 3);
+        assert_eq!(s.verify_fail, 1);
 
         // prune keeps at most KEEP_DAYS, dropping the oldest
         for i in 0..(KEEP_DAYS + 10) {

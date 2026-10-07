@@ -23,6 +23,7 @@ use serde::Serialize;
 use tokio::sync::Mutex;
 
 use crate::config::RemoteCfg;
+use crate::telemetry::Telemetry;
 
 /// Per-host pacing state.
 #[derive(Debug, Default)]
@@ -41,14 +42,33 @@ pub struct HostStatus {
 }
 
 /// Shared, process-wide request governor.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct RemoteGovernor {
     hosts: Mutex<HashMap<String, HostState>>,
+    /// Set once by the server. CLI runs leave it unset and only log.
+    telemetry: OnceLock<Telemetry>,
 }
 
 impl RemoteGovernor {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Attach the process telemetry handle (idempotent; the first one wins).
+    pub fn attach(&self, telemetry: Telemetry) {
+        let _ = self.telemetry.set(telemetry);
+    }
+
+    fn note_rate_limited(&self, host: &str) {
+        if let Some(t) = self.telemetry.get() {
+            t.remote_rate_limited(host);
+        }
+    }
+
+    fn note_skipped(&self, host: &str) {
+        if let Some(t) = self.telemetry.get() {
+            t.remote_requests_skipped(host);
+        }
     }
 
     /// Wait for a pacing slot on `host`, returning `false` when the host is
@@ -81,6 +101,7 @@ impl RemoteGovernor {
                 earliest - now
             };
             if wait > Duration::from_secs(cfg.max_wait_secs) {
+                self.note_skipped(host);
                 return false;
             }
             tokio::time::sleep(wait).await;
@@ -121,6 +142,7 @@ impl RemoteGovernor {
             cooldown_secs = d.as_secs_f64(),
             "remote host rate-limited; pausing"
         );
+        self.note_rate_limited(host);
     }
 
     /// Hosts with an active cooldown right now.
@@ -411,6 +433,26 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert(RETRY_AFTER, "Wed, 21 Oct 2015 07:28:00 GMT".parse().unwrap());
         assert_eq!(retry_after(&h), None);
+    }
+
+    #[tokio::test]
+    async fn telemetry_hooks_are_optional() {
+        let gov = RemoteGovernor::new();
+        gov.attach(Telemetry::disabled());
+        let mut c = cfg();
+        c.max_wait_secs = 1;
+        {
+            let mut hosts = gov.hosts.lock().await;
+            hosts.insert(
+                "a.example".into(),
+                HostState {
+                    next_allowed: None,
+                    paused_until: Some(Instant::now() + Duration::from_secs(3600)),
+                },
+            );
+        }
+        // Must not panic when telemetry is disabled.
+        assert!(!gov.acquire("a.example", &c).await);
     }
 
     #[tokio::test]

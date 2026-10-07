@@ -27,7 +27,9 @@ goes away.
   or `CHANGELOG.md` at the tag); optional webhook for external alerts
 - **Verify** the archive on demand: hash every stored zip against the sha256
   in its sidecar, from `reposilo verify` or a Settings button, to catch missing
-  or corrupt files
+  or corrupt files. A scheduled check can be turned on in Settings (or with
+  `[verify] enabled = true`), and pushes a notification when something fails.
+  It is off by default because it reads every zip.
 - **Pace** outbound API calls per host: requests are spaced and paused when a
   forge reports a rate limit, so refreshing many repos does not trip
   GitHub/GitLab/Forgejo limits. Works with anonymous or token auth, is on by
@@ -161,6 +163,14 @@ respect_rate_limits = true # honor Retry-After / X-RateLimit-* / RateLimit-*
 max_wait_secs = 30         # never block longer than this; skip and retry later
 max_cooldown_secs = 900    # cap on a single rate-limit pause
 
+[verify]
+# Run a full hash check while serving (also a toggle in Settings). Off by
+# default because it reads every stored zip. When problems are found, one
+# notification is pushed and the run time is recorded so it does not repeat
+# until the interval elapses.
+enabled = false
+interval_days = 7
+
 [github]
 # token = "env:GITHUB_TOKEN"  # better rate limits for enrichment
 
@@ -200,11 +210,14 @@ url = "http://192.168.0.1:11434/v1"  # any OpenAI-compatible endpoint
 Every instance has a built-in **Stats** page (`/stats`, also in the top bar)
 and a JSON API at `/api/stats`. It shows current totals (repos, snapshots,
 releases, dead/unavailable remotes, untagged) plus a per-day 7-day bar chart
-of refresh successes vs failures and a table of recent days. Counters are
-persisted to `<archive>/metrics.json` for 90 days, so they survive restarts.
+of refresh successes vs failures and a table of recent days. The table also
+carries integrity check counts. Counters are persisted to
+`<archive>/metrics.json` for 90 days, so they survive restarts.
 
 Setting `[otel] enabled = true` additionally exports over OTLP/HTTP to a
-collector: **metrics** (the same totals and counters) and **logs** (everything
+collector: **metrics** (the same totals and counters, plus per-host rate-limit
+counters `reposilo.remote.rate_limited` and `reposilo.remote.requests_skipped`)
+and **logs** (everything
 `tracing` emits, bridged through the OpenTelemetry log appender). Logs and
 metrics can be toggled independently. Both are optional and best-effort, and
 log records from the exporter's own HTTP stack are filtered out to avoid a

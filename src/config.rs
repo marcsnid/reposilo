@@ -19,6 +19,7 @@ pub struct Config {
     pub forgejo: ForgeTokenCfg,
     pub releases: ReleasesCfg,
     pub remote: RemoteCfg,
+    pub verify: VerifyCfg,
     pub llm: LlmCfg,
     pub otel: OtelCfg,
     pub tags: TagsCfg,
@@ -263,6 +264,23 @@ impl Default for RemoteCfg {
     }
 }
 
+/// Scheduled archive integrity checks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VerifyCfg {
+    /// Run a full hash check on a schedule while serving. Off by default
+    /// because hashing every stored zip is I/O heavy.
+    pub enabled: bool,
+    /// Minimum days between scheduled checks.
+    pub interval_days: u32,
+}
+
+impl Default for VerifyCfg {
+    fn default() -> Self {
+        Self { enabled: false, interval_days: 7 }
+    }
+}
+
 /// Release binary/asset downloading.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -353,6 +371,23 @@ pub fn default_config_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verify_cfg_defaults_and_parses() {
+        let d = Config::default();
+        assert!(!d.verify.enabled, "scheduled checks are opt-in");
+        assert_eq!(d.verify.interval_days, 7);
+
+        let cfg: Config =
+            toml::from_str("[verify]\nenabled = true\ninterval_days = 30\n").unwrap();
+        assert!(cfg.verify.enabled);
+        assert_eq!(cfg.verify.interval_days, 30);
+
+        // Omitting the section keeps the defaults.
+        let cfg: Config = toml::from_str("[archive]\nroot = \".\"\n").unwrap();
+        assert!(!cfg.verify.enabled);
+        assert_eq!(cfg.verify.interval_days, 7);
+    }
 
     #[test]
     fn remote_cfg_defaults_and_parses() {

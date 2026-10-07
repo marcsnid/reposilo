@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use opentelemetry::metrics::{Counter, Meter, MeterProvider};
+use opentelemetry::metrics::{Counter, Histogram, Meter, MeterProvider};
 use opentelemetry::KeyValue;
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::{LogExporter, MetricExporter, WithExportConfig};
@@ -31,6 +31,11 @@ struct Counters {
     new_releases: Counter<u64>,
     new_snapshots: Counter<u64>,
     remote_gone: Counter<u64>,
+    verify_runs: Counter<u64>,
+    verify_problems: Counter<u64>,
+    verify_fail: Counter<u64>,
+    remote_rate_limited: Counter<u64>,
+    remote_requests_skipped: Counter<u64>,
 }
 
 impl Counters {
@@ -46,18 +51,36 @@ impl Counters {
             new_releases: counter("reposilo.releases.new", "New releases archived"),
             new_snapshots: counter("reposilo.snapshots.new", "New branch snapshots"),
             remote_gone: counter("reposilo.remote.gone", "Remotes observed unreachable"),
+            verify_runs: counter("reposilo.verify.runs", "Integrity checks completed"),
+            verify_problems: counter("reposilo.verify.problems", "Integrity problems detected"),
+            verify_fail: counter("reposilo.verify.failure", "Integrity checks that failed to run"),
+            remote_rate_limited: counter(
+                "reposilo.remote.rate_limited",
+                "Hosts paused by a rate-limit signal",
+            ),
+            remote_requests_skipped: counter(
+                "reposilo.remote.requests_skipped",
+                "Requests skipped because a host was rate-limited",
+            ),
         }
     }
 
     fn bump(&self, field: &str) {
+        self.bump_count(field, 1);
+    }
+
+    fn bump_count(&self, field: &str, n: u64) {
         match field {
-            "refresh_ok" => self.refresh_ok.add(1, &[]),
-            "refresh_fail" => self.refresh_fail.add(1, &[]),
-            "add_ok" => self.add_ok.add(1, &[]),
-            "add_fail" => self.add_fail.add(1, &[]),
-            "new_releases" => self.new_releases.add(1, &[]),
-            "new_snapshots" => self.new_snapshots.add(1, &[]),
-            "remote_gone" => self.remote_gone.add(1, &[]),
+            "refresh_ok" => self.refresh_ok.add(n, &[]),
+            "refresh_fail" => self.refresh_fail.add(n, &[]),
+            "add_ok" => self.add_ok.add(n, &[]),
+            "add_fail" => self.add_fail.add(n, &[]),
+            "new_releases" => self.new_releases.add(n, &[]),
+            "new_snapshots" => self.new_snapshots.add(n, &[]),
+            "remote_gone" => self.remote_gone.add(n, &[]),
+            "verify_runs" => self.verify_runs.add(n, &[]),
+            "verify_problems" => self.verify_problems.add(n, &[]),
+            "verify_fail" => self.verify_fail.add(n, &[]),
             _ => {}
         }
     }
@@ -70,11 +93,18 @@ pub struct Telemetry {
     meter_provider: Option<SdkMeterProvider>,
     meter: Option<Meter>,
     counters: Option<Counters>,
+    verify_duration: Option<Histogram<f64>>,
 }
 
 impl Telemetry {
     pub fn disabled() -> Self {
-        Self { logger: None, meter_provider: None, meter: None, counters: None }
+        Self {
+            logger: None,
+            meter_provider: None,
+            meter: None,
+            counters: None,
+            verify_duration: None,
+        }
     }
 
     pub fn logger(&self) -> Option<&SdkLoggerProvider> {
@@ -106,6 +136,54 @@ impl Telemetry {
         }
     }
 
+    /// Bump one counter by `n` for events that are not one-per-call.
+    pub fn record_event_count(&self, field: &str, n: u64) {
+        if let Some(counters) = &self.counters {
+            counters.bump_count(field, n);
+        }
+    }
+
+    /// Record how long an integrity check took.
+    pub fn record_verify_duration(&self, ms: u128) {
+        if let Some(h) = &self.verify_duration {
+            h.record(ms as f64, &[]);
+        }
+    }
+
+    /// Record how long ago the last integrity check finished, so a dashboard
+    /// can alert when checks stop happening.
+    pub fn record_verify_age(&self, last_verified: Option<&str>) {
+        let Some(meter) = &self.meter else {
+            return;
+        };
+        let Some(secs) = last_verified.and_then(verify_age_secs) else {
+            return;
+        };
+        meter
+            .f64_gauge("reposilo.verify.age_seconds")
+            .with_description("Seconds since the last completed integrity check")
+            .build()
+            .record(secs, &[]);
+    }
+
+    /// A host was paused by a rate-limit signal. Labelled by host so a
+    /// dashboard can show which forge is throttling.
+    pub fn remote_rate_limited(&self, host: &str) {
+        if let Some(counters) = &self.counters {
+            counters.remote_rate_limited.add(1, &[KeyValue::new("host", host.to_string())]);
+        }
+    }
+
+    /// A request was skipped because its host was rate-limited past the wait
+    /// limit (it will be retried on the next scheduler pass).
+    pub fn remote_requests_skipped(&self, host: &str) {
+        if let Some(counters) = &self.counters {
+            counters
+                .remote_requests_skipped
+                .add(1, &[KeyValue::new("host", host.to_string())]);
+        }
+    }
+
     /// Record the current index-derived gauges. Called on a timer by the
     /// server; the meter provider's periodic reader does the actual export.
     pub fn record_snapshot(&self, totals: &Totals) {
@@ -126,6 +204,13 @@ impl Telemetry {
         gauge("reposilo.repos.unavailable", "Repositories temporarily unreachable", totals.unavailable);
         gauge("reposilo.repos.untagged", "Repositories with no tags", totals.untagged);
     }
+}
+
+/// Seconds since an RFC3339 timestamp (None if it does not parse).
+fn verify_age_secs(rfc3339: &str) -> Option<f64> {
+    use time::format_description::well_known::Rfc3339;
+    let t = time::OffsetDateTime::parse(rfc3339, &Rfc3339).ok()?;
+    Some((time::OffsetDateTime::now_utc() - t).as_seconds_f64().max(0.0))
 }
 
 fn resource(cfg: &Config) -> Resource {
@@ -173,7 +258,7 @@ fn build(cfg: &Config) -> Result<Telemetry> {
         None
     };
 
-    let (meter_provider, meter, counters) = if cfg.otel.metrics {
+    let (meter_provider, meter, counters, verify_duration) = if cfg.otel.metrics {
         let exporter = MetricExporter::builder()
             .with_http()
             .with_endpoint(format!("{base}/v1/metrics"))
@@ -189,12 +274,16 @@ fn build(cfg: &Config) -> Result<Telemetry> {
             .build();
         let meter = provider.meter("reposilo");
         let counters = Counters::new(&meter);
-        (Some(provider), Some(meter), Some(counters))
+        let verify_duration = meter
+            .f64_histogram("reposilo.verify.duration_ms")
+            .with_description("Wall time of an integrity check")
+            .build();
+        (Some(provider), Some(meter), Some(counters), Some(verify_duration))
     } else {
-        (None, None, None)
+        (None, None, None, None)
     };
 
-    Ok(Telemetry { logger, meter_provider, meter, counters })
+    Ok(Telemetry { logger, meter_provider, meter, counters, verify_duration })
 }
 
 /// Install the global tracing subscriber, bridging records into the logger

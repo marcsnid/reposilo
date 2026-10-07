@@ -693,6 +693,49 @@ async fn settings_platform_filters_roundtrip() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn settings_verify_toggle_roundtrip() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let (base, st) = spawn_server(test_cfg(&tmp.path().join("archive"))).await;
+    let client = reqwest::Client::new();
+
+    // Off by default.
+    let html = client.get(format!("{base}/settings")).send().await?.text().await?;
+    assert!(html.contains("Scheduled checks"), "settings should offer the toggle");
+    assert!(
+        !html.contains("name=\"verify_enabled\" value=\"1\" checked"),
+        "scheduled checks must default to unchecked: {html}"
+    );
+
+    // Turn it on with an interval.
+    let resp = client
+        .post(format!("{base}/settings"))
+        .form(&[("verify_enabled", "1"), ("verify_interval_days", "30")])
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let cfg = st.cfg().await;
+    assert!(cfg.verify.enabled);
+    assert_eq!(cfg.verify.interval_days, 30);
+
+    // The page reflects the saved value.
+    let html2 = client.get(format!("{base}/settings")).send().await?.text().await?;
+    assert!(
+        html2.contains("name=\"verify_enabled\" value=\"1\" checked"),
+        "saved toggle should render checked: {html2}"
+    );
+
+    // Posting without the checkbox turns it back off.
+    let resp = client
+        .post(format!("{base}/settings"))
+        .form(&[("verify_interval_days", "30")])
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    assert!(!st.cfg().await.verify.enabled);
+    Ok(())
+}
+
 /// A release sidecar that already records a downloaded asset must show up on
 /// the repo page, in the API, and be downloadable straight from disk.
 #[tokio::test]
