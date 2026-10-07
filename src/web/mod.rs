@@ -61,11 +61,16 @@ fn html(s: String) -> Response {
 }
 
 /// Build the out-of-bounds app refresh (swaps #app in the grid after a job
-/// completes, so new repos/tags appear without a page reload).
+/// completes, so new repos/tags appear without a page reload). Also refreshes
+/// the topbar folder datalist, which lives outside #app and would otherwise
+/// keep the folder list it saw when the page first loaded.
 async fn oob_app_refresh(st: &Arc<AppState>) -> String {
     let ctx = views::build_list_ctx(st, &[], "", "").await;
     let inner = views::FragmentT { ctx }.render().unwrap_or_default();
-    format!(r#"<div id="app" class="app" hx-swap-oob="outerHTML">{inner}</div>"#)
+    let options = folder_options_html(st).await;
+    format!(
+        r#"<div id="app" class="app" hx-swap-oob="outerHTML">{inner}</div><datalist id="add-folder-list" hx-swap-oob="innerHTML">{options}</datalist>"#
+    )
 }
 
 /// Out-of-band success toast: drop a status message into the fixed #toast
@@ -683,12 +688,16 @@ fn html_escape(s: &str) -> String {
 /// GET /folders/options: <option> list for the topbar's folder datalist
 /// (the topbar has no template context, so it fetches its folder list itself).
 async fn folders_options(State(st): State<Arc<AppState>>) -> Response {
+    html(folder_options_html(&st).await)
+}
+
+/// The `<option>` markup for every folder path the index knows.
+async fn folder_options_html(st: &Arc<AppState>) -> String {
     let paths = { let index = st.index.read().await; views::all_folder_paths(&index) };
-    let opts: String = paths
+    paths
         .iter()
         .map(|p| format!("<option value=\"{}\"></option>", html_escape(p)))
-        .collect();
-    html(opts)
+        .collect()
 }
 
 #[derive(Deserialize, Default)]
@@ -1552,10 +1561,15 @@ async fn import_commit(
 
 
 async fn notifications_page(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    let items: Vec<crate::server::Notification> =
-        st.notifications.lock().await.iter().take(100).cloned().collect();
+    // Viewing the page reads everything: clear the bell for the current user
+    // (or the server-wide marker when accounts are not configured).
     let user = crate::auth::current_user(&st, &headers);
-    let can_mark_read = user.is_some();
+    match &user {
+        Some(u) => st.mark_notifications_seen_for(u).await,
+        None => st.mark_notifications_seen().await,
+    }
+    let items: Vec<crate::server::Notification> =
+        st.notifications.lock().await.items.iter().take(100).cloned().collect();
     let views: Vec<views::NotifView> = items
         .iter()
         .map(|n| {
@@ -1577,13 +1591,14 @@ async fn notifications_page(State(st): State<Arc<AppState>>, headers: HeaderMap)
             }
         })
         .collect();
-    let ctx = views::NotificationsCtx { items: views, can_mark_read };
+    let ctx = views::NotificationsCtx { items: views, can_mark_read: true };
     render(&views::NotificationsT { ctx })
 }
 
 async fn notifications_mark_read(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if let Some(user) = crate::auth::current_user(&st, &headers) {
-        let _ = crate::auth::set_last_seen(&st.root().await, &user);
+    match crate::auth::current_user(&st, &headers) {
+        Some(user) => st.mark_notifications_seen_for(&user).await,
+        None => st.mark_notifications_seen().await,
     }
     Response::builder()
         .status(StatusCode::SEE_OTHER)

@@ -95,6 +95,40 @@ async fn fetch_changelog(cfg: &Config, gov: &RemoteGovernor, cache: &std::sync::
     None
 }
 
+/// Rewrite the `repo` field of every snapshot sidecar under `repo_dir` to the
+/// fully scoped archive path. Called after a repo folder is moved so the
+/// on-disk metadata keeps matching the location the index reports. Writes only
+/// when the field actually changed.
+pub fn rewrite_sidecar_repo(repo_dir: &Path, rel: &str) -> Result<()> {
+    fn walk(dir: &Path, rel: &str) -> Result<()> {
+        let Ok(entries) = fs::read_dir(dir) else { return Ok(()) };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                // release assets live under releases/<tag>/assets and never
+                // hold sidecars
+                if p.file_name().and_then(|n| n.to_str()) == Some("assets")
+                    && dir.parent().and_then(|d| d.file_name()).and_then(|n| n.to_str()) == Some("releases")
+                {
+                    continue;
+                }
+                walk(&p, rel)?;
+            } else if p.extension().and_then(|x| x.to_str()) == Some("json") {
+                let Ok(mut sc) = crate::types::read_json::<SnapshotSidecar>(&p) else { continue };
+                if sc.repo != rel {
+                    sc.repo = rel.to_string();
+                    crate::types::write_json(&p, &sc)?;
+                }
+            }
+        }
+        Ok(())
+    }
+    for sub in ["branch", "releases"] {
+        walk(&repo_dir.join(sub), rel)?;
+    }
+    Ok(())
+}
+
 /// An existing snapshot file in this repo with the same commit (and format),
 /// for hard-link dedup. The same commit always yields the same archive content,
 /// so the two snapshots can share one inode even though their embedded metadata
@@ -197,13 +231,48 @@ pub(crate) fn sha256_file(path: &Path) -> Result<(u64, String)> {
     Ok((total, hex::encode(hasher.finalize())))
 }
 
-/// Pick the highest semver-looking tag ("v" prefix tolerated).
+/// Parse a git tag as a release version. Tolerates a leading `v`/`V`, a
+/// `release-`/`release/`/`release_` prefix, and a missing patch component
+/// (`1.2` becomes `1.2.0`). Returns `None` for tags that are not versions.
+pub fn release_version(tag: &str) -> Option<semver::Version> {
+    let mut t = tag.trim();
+    for prefix in ["release-", "release/", "release_"] {
+        if let Some(rest) = t.strip_prefix(prefix) {
+            t = rest;
+            break;
+        }
+    }
+    let t = t.trim_start_matches(['v', 'V']);
+    if t.is_empty() {
+        return None;
+    }
+    // normalize a missing patch so `1.2` parses; keep any pre-release/build
+    // suffix untouched
+    let core = t.split(['-', '+']).next().unwrap_or(t);
+    let normalized = if core.matches('.').count() == 1 {
+        match t.find(['-', '+']) {
+            Some(i) => format!("{}.0{}", &t[..i], &t[i..]),
+            None => format!("{t}.0"),
+        }
+    } else {
+        t.to_string()
+    };
+    semver::Version::parse(&normalized).ok()
+}
+
+/// The version string to display and store for a release tag. Semver tags
+/// become their canonical form; non-semver tags keep their raw name (minus a
+/// leading `v`).
+pub fn release_display_version(tag: &str) -> String {
+    release_version(tag)
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| tag.trim_start_matches(['v', 'V']).to_string())
+}
+
+/// Pick the highest semver-looking tag (`v` and `release-` prefixes tolerated).
 pub fn latest_semver_tag(tags: &[String]) -> Option<String> {
     tags.iter()
-        .filter_map(|t| {
-            let v = t.trim_start_matches(['v', 'V']);
-            semver::Version::parse(v).ok().map(|v| (v, t.clone()))
-        })
+        .filter_map(|t| release_version(t).map(|v| (v, t.clone())))
         .max_by(|a, b| a.0.cmp(&b.0))
         .map(|(_, t)| t)
 }
@@ -246,22 +315,50 @@ impl Archiver {
         Self { cfg, governor, http_cache }
     }
 
-    /// Add a repo: shallow-bare clone, manifest, initial snapshots.
+    /// Add a repo at the archive root. Convenience wrapper around
+    /// [`add_repo_in_folder`].
+    #[tracing::instrument(skip(self, notes))]
+    pub async fn add_repo(&self, url: &str, tags: &[String], notes: Option<String>) -> Result<PathBuf> {
+        self.add_repo_in_folder(url, tags, notes, None).await
+    }
+
+    /// Add a repo, optionally under a category folder. The archive path
+    /// (`folder/owner-repo`) is fixed before any snapshot is written, so the
+    /// sidecars record the fully scoped location from the start instead of
+    /// being moved after the fact.
     ///
     /// Fails if the repo is already archived (same URL or same owner-repo
     /// slug, wherever it lives). On any failure the partially-created repo
     /// directory is removed, so a retry starts clean instead of tripping over
     /// an orphaned `repo.json`.
     #[tracing::instrument(skip(self, notes))]
-    pub async fn add_repo(&self, url: &str, tags: &[String], notes: Option<String>) -> Result<PathBuf> {
+    pub async fn add_repo_in_folder(
+        &self,
+        url: &str,
+        tags: &[String],
+        notes: Option<String>,
+        folder: Option<&str>,
+    ) -> Result<PathBuf> {
         let info = forge::detect(url)?;
         let root = Path::new(&self.cfg.archive.root);
-        // flat "owner-repo" folder: fork collisions (same name, different
+        // flat "owner-repo" leaf: fork collisions (same name, different
         // owners) live side by side instead of under owner folders
         let owner = sanitize(&info.owner);
         let name = sanitize(&info.name);
         let slug = format!("{owner}-{name}");
-        let repo_dir = root.join(&slug);
+        let folder = folder
+            .map(|f| f.trim().trim_matches('/'))
+            .filter(|f| !f.is_empty());
+        if let Some(f) = folder {
+            if !f.split('/').all(crate::server::valid_folder_name) {
+                bail!("invalid folder path: {f}");
+            }
+        }
+        let rel = match folder {
+            Some(f) => format!("{f}/{slug}"),
+            None => slug.clone(),
+        };
+        let repo_dir = root.join(&rel);
         if repo_dir.join("repo.json").exists() {
             bail!("already archived: {} (use `refresh`)", repo_dir.display());
         }
@@ -270,8 +367,8 @@ impl Archiver {
         // same slug. Refuse duplicates with a cheap directory-name scan (no
         // sidecar parsing), so `add` stays cheap on a large archive.
         if let Some(existing) = crate::index::find_repo_by_slug(root, &slug) {
-            let rel = existing.strip_prefix(root).unwrap_or(&existing).to_string_lossy();
-            bail!("already archived as {rel} (use `refresh`)");
+            let existing = existing.strip_prefix(root).unwrap_or(&existing).to_string_lossy();
+            bail!("already archived as {existing} (use `refresh`)");
         }
 
         // Only auto-delete on failure if this add created the directory. If it
@@ -279,7 +376,7 @@ impl Archiver {
         // leave the on-disk snapshots alone rather than destroying user data.
         let pre_existing = repo_dir.exists();
         match self
-            .add_repo_inner(url, &info, &repo_dir, &slug, tags, notes)
+            .add_repo_inner(url, &info, &repo_dir, &rel, tags, notes)
             .await
         {
             Ok(()) => Ok(repo_dir),
@@ -389,9 +486,9 @@ impl Archiver {
             if let Some(tag) = self.latest_release_tag(url).await? {
                 match self.fetch_tag(git_dir, url, &tag).await {
                     Ok(_) => {
-                        let version = tag.trim_start_matches(['v', 'V']);
+                        let version = release_display_version(&tag);
                         let mut sc = self
-                            .snapshot_ref(repo_dir, git_dir, rel, &info.name, url, &tag, SnapshotKind::Release, Some(version), None, None)
+                            .snapshot_ref(repo_dir, git_dir, rel, &info.name, url, &tag, SnapshotKind::Release, Some(&version), None, None)
                             .await
                             .context("failed to archive release")?;
                         if let Err(e) = self.sync_release_assets(repo_dir, &mut sc).await {
@@ -468,7 +565,7 @@ impl Archiver {
     }
 
     /// List all tags on the remote and pick the newest semver one.
-    async fn latest_release_tag(&self, url: &str) -> Result<Option<String>> {
+    async fn ls_remote_latest_semver(&self, url: &str) -> Result<Option<String>> {
         self.pace_remote(url).await?;
         let out = git(self.cfg.git.timeout_secs, &["ls-remote", "--tags", url], None)
             .await
@@ -485,6 +582,23 @@ impl Archiver {
             }
         }
         Ok(latest_semver_tag(&tags))
+    }
+
+    /// The tag of the release to archive. Semver git tags stay the primary
+    /// source (offline, forge-agnostic). When a repo has no semver tag at all,
+    /// fall back to the forge's own "latest release" so projects that tag with
+    /// non-semver names (dates, codenames, `TDB...`) are archived too.
+    async fn latest_release_tag(&self, url: &str) -> Result<Option<String>> {
+        if let Some(tag) = self.ls_remote_latest_semver(url).await? {
+            return Ok(Some(tag));
+        }
+        Ok(crate::releaseapi::latest_release_tag(
+            &self.cfg,
+            &self.governor,
+            &self.http_cache,
+            url,
+        )
+        .await)
     }
 
     /// Snapshot a ref into a zip + JSON sidecar
@@ -869,12 +983,16 @@ impl Archiver {
         // releases check (before deciding to clone anything)
         let new_release_tag = self.latest_release_tag(&origin).await.ok().flatten();
         let release_needed = if let Some(tag) = &new_release_tag {
-            let new_version = semver::Version::parse(tag.trim_start_matches(['v', 'V'])).ok();
-            let old_version = archived_latest_release(repo_dir);
-            match (new_version, old_version) {
-                (Some(n), Some(o)) => n > o,
-                (Some(_), None) => true,
-                _ => false,
+            let archived = archived_release_tags(repo_dir);
+            if archived.iter().any(|t| t == tag) {
+                false
+            } else {
+                match (release_version(tag), archived_latest_release(repo_dir)) {
+                    (Some(n), Some(o)) => n > o,
+                    (Some(_), None) => true,
+                    // a non-semver tag: the forge's latest release is new
+                    (None, _) => true,
+                }
             }
         } else {
             false
@@ -947,14 +1065,14 @@ impl Archiver {
         if release_needed {
             if let Some(tag) = new_release_tag {
                 if self.fetch_tag(git_dir, &origin, &tag).await.is_ok() {
-                    let version = tag.trim_start_matches(['v', 'V']);
+                    let version = release_display_version(&tag);
                     let mut sc = self
-                        .snapshot_ref(repo_dir, git_dir, &rel, &name, &origin, &tag, SnapshotKind::Release, Some(version), None, None)
+                        .snapshot_ref(repo_dir, git_dir, &rel, &name, &origin, &tag, SnapshotKind::Release, Some(&version), None, None)
                         .await?;
                     if let Err(e) = self.sync_release_assets(repo_dir, &mut sc).await {
                         tracing::warn!(repo = %rel, error = %format!("{e:#}"), "release asset sync failed");
                     }
-                    summary.new_release = Some(version.to_string());
+                    summary.new_release = Some(version);
                 }
             }
         }
@@ -1057,7 +1175,7 @@ impl Archiver {
             let version = sc
                 .version
                 .as_deref()
-                .and_then(|s| semver::Version::parse(s).ok())
+                .and_then(release_version)
                 .unwrap_or(semver::Version::new(0, 0, 0));
             let label = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             found.push((version, sc.archived_at, label, p));
@@ -1102,6 +1220,23 @@ fn latest_release_sidecar(repo_dir: &Path) -> Option<SnapshotSidecar> {
     best
 }
 
+/// Tags of every release already archived (the sidecar `ref`), used to tell
+/// whether the remote's latest release is new even when its tag is not semver.
+fn archived_release_tags(repo_dir: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(entries) = fs::read_dir(repo_dir.join("releases")) else { return out };
+    for e in entries.flatten() {
+        let p = e.path();
+        if !p.is_dir() {
+            continue;
+        }
+        if let Some(sc) = find_sidecar(&p) {
+            out.push(sc.r#ref);
+        }
+    }
+    out
+}
+
 /// The newest semver version archived under releases/, if any.
 /// Newest archived commit of a branch, straight from the snapshot sidecars.
 fn latest_branch_commit(repo_dir: &Path, branch: &str) -> Option<String> {
@@ -1133,7 +1268,7 @@ fn archived_latest_release(repo_dir: &Path) -> Option<semver::Version> {
             continue;
         }
         if let Some(sc) = find_sidecar(&p) {
-            if let Some(v) = sc.version.as_deref().and_then(|s| semver::Version::parse(s).ok()) {
+            if let Some(v) = sc.version.as_deref().and_then(release_version) {
                 if best.as_ref().is_none_or(|b| v > *b) {
                     best = Some(v);
                 }
@@ -1192,6 +1327,77 @@ mod tests {
     fn latest_semver_ignores_garbage() {
         let tags = vec!["latest".into(), "main".into()];
         assert_eq!(latest_semver_tag(&tags), None);
+    }
+
+    #[test]
+    fn release_version_tolerates_common_tag_schemes() {
+        let parse = |t: &str| release_version(t).map(|v| v.to_string());
+        assert_eq!(parse("v1.2.3").as_deref(), Some("1.2.3"));
+        assert_eq!(parse("1.2.3").as_deref(), Some("1.2.3"));
+        assert_eq!(parse("release-1.2.3").as_deref(), Some("1.2.3"));
+        assert_eq!(parse("release/v1.2.3").as_deref(), Some("1.2.3"));
+        assert_eq!(parse("v1.2").as_deref(), Some("1.2.0"), "a missing patch is padded");
+        assert_eq!(parse("1.2").as_deref(), Some("1.2.0"));
+        assert_eq!(parse("2.0.0-rc.1").as_deref(), Some("2.0.0-rc.1"));
+        assert_eq!(parse("1.2-beta").as_deref(), Some("1.2.0-beta"));
+        assert!(parse("TDB335.24041").is_none());
+        assert!(parse("nightly").is_none());
+        assert!(parse("").is_none());
+    }
+
+    #[test]
+    fn latest_semver_accepts_release_prefix_and_two_part_versions() {
+        let tags = vec![
+            "release-1.2.3".into(),
+            "v1.10".into(),
+            "nightly".into(),
+        ];
+        assert_eq!(latest_semver_tag(&tags).as_deref(), Some("v1.10"));
+    }
+
+    #[test]
+    fn release_display_version_keeps_non_semver_names() {
+        assert_eq!(release_display_version("v1.2.3"), "1.2.3");
+        assert_eq!(release_display_version("release-1.2.3"), "1.2.3");
+        assert_eq!(release_display_version("TDB335.24041"), "TDB335.24041");
+        assert_eq!(release_display_version("vTDB"), "TDB");
+    }
+
+    #[test]
+    fn rewrite_sidecar_repo_updates_every_sidecar_and_skips_assets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("old-leaf");
+        let branch = repo.join("branch").join("master");
+        let release = repo.join("releases").join("v1.0.0");
+        std::fs::create_dir_all(release.join("assets")).unwrap();
+        std::fs::create_dir_all(&branch).unwrap();
+        let sidecar = |repo_field: &str, kind: &str| {
+            serde_json::json!({
+                "kind": kind,
+                "repo": repo_field,
+                "origin": "https://github.com/o/r",
+                "ref": "v1.0.0",
+                "commit": "abc",
+                "archived_at": "2025-01-01T00:00:00Z",
+                "archiver_version": "t",
+                "zip": { "file": "r-v1.0.0.zip", "bytes": 1, "sha256": "x" }
+            })
+            .to_string()
+        };
+        std::fs::write(branch.join("b.json"), sidecar("old-leaf", "branch-snapshot")).unwrap();
+        std::fs::write(release.join("r.json"), sidecar("old-leaf", "release")).unwrap();
+        // a decoy under assets/ must not be rewritten
+        std::fs::write(release.join("assets").join("decoy.json"), sidecar("old-leaf", "release")).unwrap();
+
+        rewrite_sidecar_repo(&repo, "tools/new-leaf").unwrap();
+
+        let b = crate::types::read_json::<SnapshotSidecar>(&branch.join("b.json")).unwrap();
+        let r = crate::types::read_json::<SnapshotSidecar>(&release.join("r.json")).unwrap();
+        assert_eq!(b.repo, "tools/new-leaf");
+        assert_eq!(r.repo, "tools/new-leaf");
+        let decoy: serde_json::Value =
+            crate::types::read_json(&release.join("assets").join("decoy.json")).unwrap();
+        assert_eq!(decoy["repo"], "old-leaf", "asset decoys are untouched");
     }
 
     #[test]

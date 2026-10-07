@@ -472,3 +472,58 @@ async fn failed_readd_over_orphan_preserves_snapshots() -> Result<()> {
     );
     Ok(())
 }
+
+/// Adding into a category folder must happen at create time, so the manifest
+/// and every sidecar record the fully scoped `folder/owner-repo` path.
+#[tokio::test]
+async fn add_into_a_folder_scopes_manifest_and_sidecars() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let archive = tmp.path().join("archive");
+    fs::create_dir_all(&archive)?;
+    let remote = make_remote(tmp.path(), "scoped");
+    push_tag(&tmp.path().join("work-scoped"), "v1.0.0");
+
+    let archiver = Archiver::new(test_cfg(&archive));
+    let repo_dir = archiver
+        .add_repo_in_folder(&file_url(&remote), &[], None, Some("tools/rust"))
+        .await?;
+    assert_eq!(repo_dir, archive.join("tools/rust/remotes-scoped"));
+
+    // every sidecar under the repo records the scoped path, not the leaf
+    for sub in ["branch/master", "releases/v1.0.0"] {
+        let dir = repo_dir.join(sub);
+        for e in fs::read_dir(&dir)?.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) != Some("json") {
+                continue;
+            }
+            let sc = read_json::<reposilo::types::SnapshotSidecar>(&p)?;
+            assert_eq!(sc.repo, "tools/rust/remotes-scoped", "sidecar {p:?}");
+        }
+    }
+
+    let index = Index::load(&archive)?;
+    assert_eq!(index.repos.len(), 1);
+    assert_eq!(index.repos[0].rel, "tools/rust/remotes-scoped");
+    Ok(())
+}
+
+/// A release tag that is not strict semver (`release-x.y.z`) is still
+/// recognized and archived at add time.
+#[tokio::test]
+async fn add_archives_a_release_prefixed_tag() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let archive = tmp.path().join("archive");
+    fs::create_dir_all(&archive)?;
+    let remote = make_remote(tmp.path(), "relpref");
+    push_tag(&tmp.path().join("work-relpref"), "release-2.1.0");
+
+    let repo_dir = Archiver::new(test_cfg(&archive))
+        .add_repo(&file_url(&remote), &[], None)
+        .await?;
+    let rel = repo_dir.join("releases").join("release-2.1.0");
+    assert!(rel.join("relpref-release-2.1.0.zip").exists(), "release zip missing");
+    let sc = read_json::<reposilo::types::SnapshotSidecar>(&rel.join("relpref-release-2.1.0.json"))?;
+    assert_eq!(sc.version.as_deref(), Some("2.1.0"), "the display version is canonical");
+    Ok(())
+}

@@ -218,6 +218,8 @@ pub struct FolderLink {
     pub indent: String,
     /// URL of the sidebar edit form for this folder.
     pub edit_url: String,
+    /// True when the folder has nested folders (show the collapse control).
+    pub has_children: bool,
 }
 
 /// Encode a slash-separated archive path for use in a URL path (slashes
@@ -429,18 +431,26 @@ pub async fn build_list_ctx(st: &Arc<AppState>, tags: &[String], q: &str, folder
     let mut flat = Vec::new();
     flatten_tree(&tree, "", 0, &mut flat);
     let folders: Vec<FolderLink> = flat
-        .into_iter()
-        .map(|(path, count, depth, icon, _explicit)| FolderLink {
-            name: path.rsplit('/').next().unwrap_or(&path).to_string(),
-            rel: path.clone(),
-            url: page_url(tags, q, &path),
-            count,
-            active: folder == path,
-            depth,
-            icon: icon.unwrap_or_default(),
-            dot_class: format!("dot-{}", folder_dot_color(&path) % 8),
-            indent: format!("{:.1}rem", depth as f32 * 0.75),
-            edit_url: format!("/folders/edit?rel={}", urlencode(&path)),
+        .iter()
+        .enumerate()
+        .map(|(i, (path, count, depth, icon, _explicit))| {
+            // A folder has children when the next tree entry is nested deeper.
+            let has_children = flat
+                .get(i + 1)
+                .is_some_and(|(_, _, next_depth, _, _)| *next_depth > *depth);
+            FolderLink {
+                name: path.rsplit('/').next().unwrap_or(path).to_string(),
+                rel: path.clone(),
+                url: page_url(tags, q, path),
+                count: *count,
+                active: folder == path.as_str(),
+                depth: *depth,
+                icon: icon.clone().unwrap_or_default(),
+                dot_class: format!("dot-{}", folder_dot_color(path) % 8),
+                indent: format!("{:.1}rem", *depth as f32 * 0.75),
+                edit_url: format!("/folders/edit?rel={}", urlencode(path)),
+                has_children,
+            }
         })
         .collect();
 
