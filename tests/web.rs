@@ -322,6 +322,10 @@ async fn folder_management_flow() -> Result<()> {
         created.contains("hx-swap-oob=\"delete\""),
         "a successful create must close the modal: {created}"
     );
+    assert!(
+        created.contains("id=\"add-folder-list\" hx-swap-oob=\"innerHTML\""),
+        "the topbar folder datalist must refresh on create: {created}"
+    );
     // folder.json on disk carries the icon
     let fm: serde_json::Value = serde_json::from_str(&fs::read_to_string(
         tmp.path().join("archive/games/folder.json"),
@@ -376,6 +380,15 @@ async fn folder_management_flow() -> Result<()> {
         .await?;
     assert_eq!(resp.status(), 200);
     assert!(tmp.path().join("archive/games/cli/folder.json").exists());
+
+    // a parent folder offers a collapse control and carries its path
+    let page = client.get(format!("{base}/")).send().await?.text().await?;
+    assert!(page.contains(r#"data-folder="games""#), "folder path attribute missing: {page}");
+    assert!(page.contains("class=\"fcollapse\""), "parent folder needs a collapse control: {page}");
+    assert!(
+        page.contains(r#"onclick="toggleFolder(event)""#),
+        "collapse control must call the toggle: {page}"
+    );
 
     // move the repo into games/cli via the metadata form
     let resp = client
@@ -480,6 +493,17 @@ async fn drag_move_and_add_with_folder() -> Result<()> {
     assert_eq!(resp.status(), 200);
     assert!(tmp.path().join("archive/tools/remotes-webproj/repo.json").exists());
     assert!(!tmp.path().join("archive/tools/cli/remotes-webproj").exists());
+
+    // the move rewrote the sidecar repo field to the new scoped path
+    let branch = tmp.path().join("archive/tools/remotes-webproj/branch/master");
+    let sidecar = fs::read_dir(&branch)?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.extension().and_then(|x| x.to_str()) == Some("json"))
+        .expect("a branch sidecar");
+    let sc: reposilo::types::SnapshotSidecar =
+        reposilo::types::read_json(&sidecar)?;
+    assert_eq!(sc.repo, "tools/remotes-webproj", "sidecar follows the move");
 
     // drop on "All repositories" (empty folder) moves back to the root
     let resp = client
@@ -1365,5 +1389,42 @@ async fn stats_report_storage_and_rate_limits() -> Result<()> {
     assert!(page.contains("Largest repositories"), "largest repos table missing");
     assert!(page.contains("Remote rate limits"), "rate-limit section missing");
     assert!(page.contains("No hosts are paused right now."));
+    Ok(())
+}
+
+/// Viewing /notifications reads everything: the bell count drops to zero and
+/// the marker survives a restart even when no user accounts are configured.
+#[tokio::test]
+async fn viewing_notifications_clears_the_bell_without_accounts() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    fs::create_dir_all(&root)?;
+    let (base, st) = spawn_server(test_cfg(&root)).await;
+    let client = reqwest::Client::new();
+
+    st.push_notification("new_release", "owner-demo", "new release 1.0.0".into(), None)
+        .await;
+    st.push_notification("new_snapshot", "owner-demo", "3 new commits".into(), None)
+        .await;
+
+    let bell = client.get(format!("{base}/api/bell")).send().await?.text().await?;
+    assert_eq!(bell, "2", "two unread notifications before viewing");
+
+    let page = client.get(format!("{base}/notifications")).send().await?.text().await?;
+    assert!(page.contains("new release 1.0.0"), "notification body missing");
+    assert!(page.contains("3 new commits"), "second notification missing");
+
+    let bell = client.get(format!("{base}/api/bell")).send().await?.text().await?;
+    assert!(bell.is_empty(), "bell must clear after viewing, got {bell:?}");
+
+    // a new notification after viewing shows up again (state advanced, not reset)
+    st.push_notification("remote_gone", "owner-demo", "remote gone".into(), None)
+        .await;
+    let bell = client.get(format!("{base}/api/bell")).send().await?.text().await?;
+    assert_eq!(bell, "1");
+
+    // the read marker is persisted: a fresh state over the same root stays clear
+    let st2 = Arc::new(AppState::new(test_cfg(&root), None).await?);
+    assert_eq!(st2.notification_count(None).await, 1, "only the post-read item is unread");
     Ok(())
 }

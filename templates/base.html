@@ -33,6 +33,71 @@
         btns[i].classList.toggle('active', btns[i].dataset.view === v);
       }
     }
+    // sidebar folders: remember which parents are collapsed, hide descendants
+    function collapsedFolders() {
+      try { return new Set(JSON.parse(localStorage.getItem('rs-collapsed-folders') || '[]')); }
+      catch (e) { return new Set(); }
+    }
+    function saveCollapsedFolders(set) {
+      try { localStorage.setItem('rs-collapsed-folders', JSON.stringify(Array.from(set))); } catch (e) {}
+    }
+    function applyFolderCollapse() {
+      var set = collapsedFolders();
+      var changed = false;
+      // keep the active folder visible by expanding its ancestors
+      var active = document.querySelector('.folders li a.active');
+      var activeLi = active && active.closest('li');
+      var activeRel = activeLi && activeLi.dataset.folder;
+      if (activeRel) {
+        var parts = activeRel.split('/');
+        var prefix = '';
+        for (var i = 0; i < parts.length - 1; i++) {
+          prefix = prefix ? prefix + '/' + parts[i] : parts[i];
+          if (set.delete(prefix)) changed = true;
+        }
+        if (changed) saveCollapsedFolders(set);
+      }
+      var lis = Array.prototype.slice.call(document.querySelectorAll('.folders li[data-folder]'));
+      lis.forEach(function (li) { li.classList.remove('collapsed', 'folder-hidden'); });
+      lis.forEach(function (li) {
+        var rel = li.dataset.folder;
+        if (!rel || !set.has(rel)) return;
+        li.classList.add('collapsed');
+        lis.forEach(function (other) {
+          var orel = other.dataset.folder;
+          if (orel && orel.indexOf(rel + '/') === 0) other.classList.add('folder-hidden');
+        });
+      });
+      Array.prototype.forEach.call(document.querySelectorAll('.fcollapse'), function (btn) {
+        var li = btn.closest('li');
+        var collapsed = !!(li && li.classList.contains('collapsed'));
+        btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+        btn.innerHTML = collapsed ? '&#9656;' : '&#9662;';
+      });
+    }
+    function toggleFolder(ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      var li = ev.currentTarget.closest('li');
+      if (!li) return;
+      var rel = li.dataset.folder;
+      if (!rel) return;
+      var set = collapsedFolders();
+      if (set.has(rel)) { set.delete(rel); } else { set.add(rel); }
+      saveCollapsedFolders(set);
+      applyFolderCollapse();
+    }
+    // The add-repo form lives in the top bar, so it has no server context.
+    // Mirror the active folder/tag filters into it when they change.
+    function syncAddForm() {
+      var form = document.querySelector('.add-panel form');
+      if (!form) return;
+      var p = new URLSearchParams(window.location.search || '');
+      var folder = form.querySelector('#add-folder');
+      var tags = form.querySelector('#add-tags');
+      if (folder && document.activeElement !== folder) folder.value = p.get('folder') || '';
+      if (tags && document.activeElement !== tags) tags.value = p.get('tags') || '';
+    }
     // Keep an icon field to a single visible character (emoji are graphemes
     // made of several code points, so this uses Intl.Segmenter when present).
     function oneGrapheme(s) {
@@ -164,9 +229,17 @@
       document.body.addEventListener('htmx:afterSwap', syncViewButtons);
       document.body.addEventListener('htmx:afterSwap', updateBulkBar);
       document.body.addEventListener('htmx:oobAfterSwap', updateBulkBar);
+      document.body.addEventListener('htmx:afterSwap', applyFolderCollapse);
+      document.body.addEventListener('htmx:oobAfterSwap', applyFolderCollapse);
+      document.body.addEventListener('htmx:afterSwap', syncAddForm);
+      document.body.addEventListener('htmx:oobAfterSwap', syncAddForm);
+      document.body.addEventListener('htmx:pushedIntoHistory', syncAddForm);
+      window.addEventListener('popstate', syncAddForm);
       schedule();
       syncViewButtons();
       updateBulkBar();
+      applyFolderCollapse();
+      syncAddForm();
     })();
   </script>
   {% block content %}{% endblock %}

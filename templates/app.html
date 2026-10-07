@@ -36,6 +36,9 @@
           <span class="ficon">{% if !f.icon.is_empty() %}{{ f.icon }}{% else %}<span class="fdot {{ f.dot_class }}"></span>{% endif %}</span>
           {{ f.name }} <span class="count">{{ f.count }}</span>
         </a>
+        {% if f.has_children %}
+        <button class="fcollapse" type="button" title="collapse or expand" aria-label="collapse or expand folder" aria-expanded="true" onclick="toggleFolder(event)">&#9662;</button>
+        {% endif %}
         <button class="fedit" title="edit folder" hx-get="{{ f.edit_url }}" hx-target="#modal-root">&#9998;</button>
       </li>
       {% endfor %}

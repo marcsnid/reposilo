@@ -342,6 +342,111 @@ fn parse_forgejo_assets(v: &Value) -> Option<Vec<RemoteAsset>> {
     )
 }
 
+/// The tag of the forge's own "latest release". Used as a fallback when a repo
+/// has no semver git tag, so releases named by date, codename or other scheme
+/// are still archived. `None` when the forge is unsupported, the repo has no
+/// releases, or the API call fails.
+pub async fn latest_release_tag(
+    cfg: &Config,
+    gov: &RemoteGovernor,
+    cache: &std::sync::Mutex<crate::httpcache::HttpCache>,
+    origin: &str,
+) -> Option<String> {
+    let info = forge::detect(origin).ok()?;
+    match info.kind {
+        ForgeKind::GitHub => {
+            github_latest_tag(crate::forgeapi::GITHUB_API, cfg, gov, cache, &info).await
+        }
+        ForgeKind::GitLab => gitlab_latest_tag(cfg, gov, cache, origin).await,
+        ForgeKind::Forgejo => forgejo_latest_tag(cfg, gov, cache, origin, &info).await,
+        ForgeKind::Generic => None,
+    }
+}
+
+/// Pull `tag_name` out of a GitHub/GitLab/Forgejo release payload.
+fn parse_tag_name(body: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(body).ok()?;
+    let tag = v["tag_name"].as_str()?.trim();
+    (!tag.is_empty()).then(|| tag.to_string())
+}
+
+/// `parse_tag_name` against a local server, so tests can exercise the GitHub
+/// endpoint selection without network access.
+async fn github_latest_tag(
+    base: &str,
+    cfg: &Config,
+    gov: &RemoteGovernor,
+    cache: &std::sync::Mutex<crate::httpcache::HttpCache>,
+    info: &forge::ForgeInfo,
+) -> Option<String> {
+    use reqwest::header::ACCEPT;
+    let client = crate::ratelimit::api_client()?;
+    let token = cfg.github.resolved_token();
+    let url = format!("{base}/repos/{}/{}/releases/latest", info.owner, info.name);
+    let body = crate::httpcache::conditional_get(cfg, gov, cache, &url, || {
+        let mut req = client.get(&url).header(ACCEPT, "application/vnd.github+json");
+        if let Some(tok) = token.as_deref() {
+            req = req.bearer_auth(tok);
+        }
+        req
+    })
+    .await?
+    .body;
+    parse_tag_name(&body)
+}
+
+async fn gitlab_latest_tag(
+    cfg: &Config,
+    gov: &RemoteGovernor,
+    cache: &std::sync::Mutex<crate::httpcache::HttpCache>,
+    origin: &str,
+) -> Option<String> {
+    let origin = parse_origin(origin)?;
+    let client = crate::ratelimit::api_client()?;
+    let token = cfg.gitlab.resolved_token();
+    let url = format!(
+        "{}/api/v4/projects/{}/releases/permalink/latest",
+        origin.base,
+        percent_encode(&origin.path)
+    );
+    let body = crate::httpcache::conditional_get(cfg, gov, cache, &url, || {
+        let mut req = client.get(&url);
+        if let Some(tok) = token.as_deref() {
+            req = req.header("PRIVATE-TOKEN", tok);
+        }
+        req
+    })
+    .await?
+    .body;
+    parse_tag_name(&body)
+}
+
+async fn forgejo_latest_tag(
+    cfg: &Config,
+    gov: &RemoteGovernor,
+    cache: &std::sync::Mutex<crate::httpcache::HttpCache>,
+    origin: &str,
+    info: &forge::ForgeInfo,
+) -> Option<String> {
+    let origin = parse_origin(origin)?;
+    let client = crate::ratelimit::api_client()?;
+    let token = cfg.forgejo.resolved_token();
+    let url = format!(
+        "{}/api/v1/repos/{}/{}/releases/latest",
+        origin.base, info.owner, info.name
+    );
+    let body = crate::httpcache::conditional_get(cfg, gov, cache, &url, || {
+        let mut req = client.get(&url);
+        if let Some(tok) = token.as_deref() {
+            req = req.header(reqwest::header::AUTHORIZATION, format!("token {tok}"));
+        }
+        req
+    })
+    .await?
+    .body;
+    parse_tag_name(&body)
+}
+
 /// Whether a failed attempt is worth retrying. Once bytes are streaming we
 /// stop retrying, so a large file is not re-downloaded on every hiccup.
 enum DownloadError {
@@ -790,4 +895,56 @@ mod tests {
         assert_eq!(server.paths(), vec!["/api/v1/repos/o/r/releases/tags/v1.0.0"]);
     }
 
+    #[test]
+    fn parse_tag_name_reads_the_field_and_rejects_blanks() {
+        assert_eq!(
+            parse_tag_name(r#"{"tag_name":"TDB335.24041"}"#).as_deref(),
+            Some("TDB335.24041")
+        );
+        assert_eq!(parse_tag_name(r#"{"tag_name":"  v2.0.0  "}"#).as_deref(), Some("v2.0.0"));
+        assert!(parse_tag_name(r#"{"tag_name":""}"#).is_none());
+        assert!(parse_tag_name(r#"{"other":1}"#).is_none());
+        assert!(parse_tag_name("not json").is_none());
+    }
+
+    #[tokio::test]
+    async fn github_latest_release_tag_end_to_end() {
+        let server = crate::testserver::spawn(200, r#"{"tag_name":"TDB335.24041"}"#).await;
+        let cfg = Config::default();
+        let gov = RemoteGovernor::new();
+        let cache = std::sync::Mutex::new(crate::httpcache::HttpCache::empty());
+        let info = forge::ForgeInfo {
+            kind: forge::ForgeKind::GitHub,
+            owner: "o".into(),
+            name: "r".into(),
+        };
+        let tag = super::github_latest_tag(&server.base, &cfg, &gov, &cache, &info)
+            .await
+            .unwrap();
+        assert_eq!(tag, "TDB335.24041");
+        assert_eq!(server.paths(), vec!["/repos/o/r/releases/latest"]);
+    }
+
+    #[tokio::test]
+    async fn gitlab_latest_release_tag_end_to_end() {
+        let server = crate::testserver::spawn(200, r#"{"tag_name":"release-3.1"}"#).await;
+        let cfg = Config::default();
+        let gov = RemoteGovernor::new();
+        let cache = std::sync::Mutex::new(crate::httpcache::HttpCache::empty());
+        let origin = format!("{}/group/proj", server.base);
+        let tag = super::gitlab_latest_tag(&cfg, &gov, &cache, &origin).await.unwrap();
+        assert_eq!(tag, "release-3.1");
+        assert_eq!(
+            server.paths(),
+            vec!["/api/v4/projects/group%2Fproj/releases/permalink/latest"]
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_forge_has_no_latest_release_tag() {
+        let cfg = Config::default();
+        let gov = RemoteGovernor::new();
+        let cache = std::sync::Mutex::new(crate::httpcache::HttpCache::empty());
+        assert!(super::latest_release_tag(&cfg, &gov, &cache, "file:///tmp/remote").await.is_none());
+    }
 }

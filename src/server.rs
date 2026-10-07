@@ -63,8 +63,47 @@ pub struct Notification {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct NotificationsFile {
+    #[serde(default)]
     next_id: u64,
+    /// Server-wide "read up to" marker, used when no user accounts are
+    /// configured (the single-user default). Per-user markers live in
+    /// `users.json`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    seen_at: Option<String>,
+    #[serde(default)]
     items: Vec<Notification>,
+}
+
+/// Durable notification list plus the server-wide read marker. Both live in
+/// one struct so a write always persists a consistent snapshot of the file.
+#[derive(Debug, Default)]
+pub struct NotificationStore {
+    pub seen_at: Option<String>,
+    pub items: Vec<Notification>,
+}
+
+impl NotificationStore {
+    fn from_file(f: NotificationsFile) -> Self {
+        Self { seen_at: f.seen_at, items: f.items }
+    }
+
+    fn to_file(&self) -> NotificationsFile {
+        NotificationsFile {
+            next_id: self.items.first().map(|i| i.id + 1).unwrap_or(1),
+            seen_at: self.seen_at.clone(),
+            items: self.items.clone(),
+        }
+    }
+
+    /// Count items newer than `since`; when `since` is empty, use the
+    /// server-wide marker, and when that is also empty, count everything.
+    fn unread(&self, since: Option<&str>) -> usize {
+        let since = since.filter(|s| !s.is_empty()).or(self.seen_at.as_deref());
+        match since {
+            Some(s) => self.items.iter().filter(|n| n.at.as_str() > s).count(),
+            None => self.items.len(),
+        }
+    }
 }
 
 pub struct AppState {
@@ -77,7 +116,7 @@ pub struct AppState {
     /// Repo keys (folder basenames) currently being worked on. A plain std
     /// mutex so a `RepoLockGuard` can release it from `Drop` (no await).
     pub running: std::sync::Mutex<HashSet<String>>,
-    pub notifications: Mutex<Vec<Notification>>,
+    pub notifications: Mutex<NotificationStore>,
     /// Stored import scans for the review UI (keyed by scan id).
     pub scans: Mutex<HashMap<u64, importer::ImportScan>>,
     /// User accounts (users.json in the archive root, reloaded on mtime).
@@ -122,8 +161,8 @@ impl AppState {
         }
         let index = Index::load(&root)?;
         let refresh_sem = Arc::new(Semaphore::new(cfg.scheduler.max_concurrent.max(1)));
-        let notifications: Vec<Notification> = crate::types::read_json::<NotificationsFile>(&root.join("notifications.json"))
-            .map(|f| f.items)
+        let notifications = crate::types::read_json::<NotificationsFile>(&root.join("notifications.json"))
+            .map(NotificationStore::from_file)
             .unwrap_or_default();
         Ok(Self {
             cfg: RwLock::new(cfg),
@@ -298,20 +337,32 @@ impl AppState {
         // Resolve the root before taking the notifications lock: `root()` awaits
         // the config lock, and we don't want to hold one lock across another.
         let notif_path = self.root().await.join("notifications.json");
-        let mut items = self.notifications.lock().await;
-        let id = items.first().map(|i| i.id + 1).unwrap_or(1);
+        let mut store = self.notifications.lock().await;
+        let id = store.items.first().map(|i| i.id + 1).unwrap_or(1);
         let n = Notification { id, ..n };
-        items.insert(0, n.clone());
-        if items.len() > 500 {
-            items.truncate(500);
+        store.items.insert(0, n.clone());
+        if store.items.len() > 500 {
+            store.items.truncate(500);
         }
-        let file = NotificationsFile {
-            next_id: id + 1,
-            items: items.clone(),
-        };
+        let file = store.to_file();
         let _ = write_json(&notif_path, &file);
-        drop(items);
+        drop(store);
         self.fire_webhook(&n).await;
+    }
+
+    /// Mark every notification as read for the single-user (no accounts) case.
+    /// Persisted so the bell stays clear across a restart.
+    pub async fn mark_notifications_seen(&self) {
+        let notif_path = self.root().await.join("notifications.json");
+        let mut store = self.notifications.lock().await;
+        store.seen_at = Some(now_rfc3339());
+        let file = store.to_file();
+        let _ = write_json(&notif_path, &file);
+    }
+
+    /// Mark every notification as read for a named account (auth enabled).
+    pub async fn mark_notifications_seen_for(&self, user: &str) {
+        let _ = crate::auth::set_last_seen(&self.root().await, user);
     }
 
     async fn fire_webhook(&self, n: &Notification) {
@@ -341,14 +392,7 @@ impl AppState {
     }
 
     pub async fn notification_count(&self, since: Option<&str>) -> usize {
-        let items = self.notifications.lock().await;
-        match since {
-            Some(s) if !s.is_empty() => items
-                .iter()
-                .filter(|n| n.at.as_str() > s)
-                .count(),
-            _ => items.len(),
-        }
+        self.notifications.lock().await.unread(since)
     }
 
     /// Get (building + caching if needed) the parsed listing for an archive.
@@ -817,7 +861,7 @@ async fn download_asset(
 
 async fn repo_notifications(st: &Arc<AppState>, rel: &str) -> Result<Response, ApiError> {
     let ns = st.notifications.lock().await;
-    let mine: Vec<&Notification> = ns.iter().filter(|n| n.repo == rel).collect();
+    let mine: Vec<&Notification> = ns.items.iter().filter(|n| n.repo == rel).collect();
     Ok(ok_json(json!({ "repo": rel, "notifications": mine })))
 }
 
@@ -884,36 +928,35 @@ pub async fn spawn_add_job(
     let st2 = st.clone();
     let url = job_url;
     let tags = tags.to_vec();
-    let folder = folder.filter(|f| !f.trim().is_empty());
+    let folder = folder
+        .map(|f| f.trim().trim_matches('/').to_string())
+        .filter(|f| !f.is_empty());
     tokio::spawn(async move {
         // RAII: release the slug lock even if the job panics or returns early.
         let _lock = lock_key.as_deref().map(|k| RepoLockGuard::new(st2.clone(), k));
+        if let Some(f) = &folder {
+            let ok = { let index = st2.index.read().await; valid_move_target(f, &index) };
+            if !ok {
+                st2.finish_job(id, Some(format!("invalid folder path: {f}"))).await;
+                st2.record(&["add_fail"]).await;
+                return;
+            }
+        }
         let result = Archiver::with_governor_and_cache(
             st2.cfg().await,
             st2.governor.clone(),
             st2.http_cache.clone(),
         )
-        .add_repo(&url, &tags, notes)
+        .add_repo_in_folder(&url, &tags, notes, folder.as_deref())
         .await;
         match result {
             Ok(dir) => {
-                tracing::info!(repo = ?dir, "add finished");
+                // Log the fully scoped archive path (folder included), not the
+                // bare owner-repo leaf, so it matches what the index shows.
+                let root = st2.root().await;
+                let rel = dir.strip_prefix(&root).unwrap_or(&dir).to_string_lossy().into_owned();
+                tracing::info!(repo = %rel, "add finished");
                 let _ = st2.reindex().await;
-                if let Some(folder) = &folder {
-                    let root = st2.root().await;
-                    let rel = dir.strip_prefix(&root).unwrap_or(&dir).to_string_lossy().into_owned();
-                    if let Some(repo) = st2.find_repo(&rel).await {
-                        match move_repo_to_folder(&st2, &repo, folder).await {
-                            Ok(_) => {
-                                let _ = st2.reindex().await;
-                            }
-                            Err(e) => {
-                                // the archive itself succeeded; only the placement failed
-                                tracing::warn!(repo = %rel, "folder move failed: {e}");
-                            }
-                        }
-                    }
-                }
                 st2.finish_job(id, None).await;
                 st2.record(&["add_ok"]).await;
             }
@@ -995,7 +1038,12 @@ pub async fn move_repo_to_folder(
     tokio::fs::rename(&repo.dir, &dest)
         .await
         .map_err(|e| format!("cannot move repo: {e}"))?;
-    Ok(dest.strip_prefix(&root).unwrap_or(&dest).to_string_lossy().into_owned())
+    let new_rel = dest.strip_prefix(&root).unwrap_or(&dest).to_string_lossy().into_owned();
+    // Keep the sidecars self-describing after the move.
+    if let Err(e) = crate::archiver::rewrite_sidecar_repo(&dest, &new_rel) {
+        tracing::warn!(repo = %new_rel, error = %format!("{e:#}"), "could not update snapshot sidecars after move");
+    }
+    Ok(new_rel)
 }
 
 async fn create_repo(
@@ -1227,6 +1275,10 @@ pub async fn assign_origin(st: &Arc<AppState>, repo: &RepoEntry, origin: &str) -
             .unwrap_or(&new_dir)
             .to_string_lossy()
             .into_owned();
+        // Sidecars must record the new fully scoped path too.
+        if let Err(e) = crate::archiver::rewrite_sidecar_repo(&new_dir, &new_rel) {
+            tracing::warn!(repo = %new_rel, error = %format!("{e:#}"), "could not update snapshot sidecars after origin change");
+        }
     }
 
     manifest.origin = Some(origin.to_string());
@@ -1403,7 +1455,7 @@ async fn list_jobs(State(st): State<Arc<AppState>>) -> Result<Response, ApiError
 
 async fn list_notifications(State(st): State<Arc<AppState>>) -> Result<Response, ApiError> {
     let ns = st.notifications.lock().await;
-    let list: Vec<Notification> = ns.iter().take(100).cloned().collect();
+    let list: Vec<Notification> = ns.items.iter().take(100).cloned().collect();
     Ok(ok_json(json!({ "notifications": list })))
 }
 
@@ -1865,9 +1917,9 @@ mod tests {
         assert!(sums.verify_problems >= 1, "corruption must be counted");
         let notes = st.notifications.lock().await;
         assert!(
-            notes.iter().any(|n| n.kind == "corrupt"),
+            notes.items.iter().any(|n| n.kind == "corrupt"),
             "expected a corruption notification, got {:?}",
-            notes.iter().map(|n| n.kind.clone()).collect::<Vec<_>>()
+            notes.items.iter().map(|n| n.kind.clone()).collect::<Vec<_>>()
         );
     }
 
