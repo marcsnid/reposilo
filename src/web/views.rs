@@ -99,6 +99,15 @@ pub fn human_bytes(b: u64) -> String {
     }
 }
 
+/// A short duration label, e.g. "45s" or "2m 05s".
+fn human_secs(secs: u64) -> String {
+    if secs >= 60 {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
 /// Relative "time ago" for an RFC3339 timestamp, plus its exact `YYYY-MM-DD`
 /// date (for a `title` tooltip). e.g. `("3d ago", "2026-10-03")`.
 pub fn humanize_ago(ts: &str) -> Option<(String, String)> {
@@ -1174,6 +1183,21 @@ pub struct DayView {
     pub fail_h: u32, // 0..100
 }
 
+/// One row of the largest-repos storage table.
+#[derive(Debug, Clone)]
+pub struct StatRepoView {
+    pub rel: String,
+    pub name: String,
+    pub size_human: String,
+}
+
+/// A host currently paused by a rate-limit signal.
+#[derive(Debug, Clone)]
+pub struct HostLimitView {
+    pub host: String,
+    pub paused: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct StatsCtx {
     pub started_at: String,
@@ -1196,6 +1220,14 @@ pub struct StatsCtx {
     pub last_verified_at: String,
     pub cache_hits: u64,
     pub cache_misses: u64,
+    pub archive_size: String,
+    pub snapshot_size: String,
+    pub release_size: String,
+    pub asset_size: String,
+    pub largest_repos: Vec<StatRepoView>,
+    pub rate_limited: u64,
+    pub requests_skipped: u64,
+    pub paused_hosts: Vec<HostLimitView>,
     pub success_pct: String,
     pub week: Vec<DayView>,
     pub days: Vec<DayView>,
@@ -1304,6 +1336,29 @@ pub fn stats_ctx_from(
         last_verified_at: metrics.last_verified_at.clone().unwrap_or_default(),
         cache_hits: totals.cache_hits,
         cache_misses: totals.cache_misses,
+        archive_size: human_bytes(totals.archive_bytes),
+        snapshot_size: human_bytes(totals.snapshot_bytes),
+        release_size: human_bytes(totals.release_bytes),
+        asset_size: human_bytes(totals.asset_bytes),
+        largest_repos: totals
+            .largest_repos
+            .iter()
+            .map(|r| StatRepoView {
+                rel: r.rel.clone(),
+                name: if r.name.trim().is_empty() { r.rel.clone() } else { r.name.clone() },
+                size_human: human_bytes(r.bytes),
+            })
+            .collect(),
+        rate_limited: totals.rate_limited,
+        requests_skipped: totals.requests_skipped,
+        paused_hosts: totals
+            .paused_hosts
+            .iter()
+            .map(|h| HostLimitView {
+                host: h.host.clone(),
+                paused: human_secs(h.paused_for_secs),
+            })
+            .collect(),
         success_pct,
         week,
         days,
@@ -1345,6 +1400,40 @@ mod tests {
         assert_eq!(ctx.verify_runs, 1);
         assert_eq!(ctx.verify_problems, 2);
         assert_eq!(ctx.last_verified_at, "2025-01-02T00:00:00Z");
+    }
+
+    #[test]
+    fn stats_ctx_includes_storage_and_rate_limits() {
+        let m = crate::metrics::Metrics::default();
+        let totals = crate::metrics::Totals {
+            archive_bytes: 3 * 1024 * 1024,
+            snapshot_bytes: 2 * 1024 * 1024,
+            release_bytes: 1024 * 1024,
+            asset_bytes: 0,
+            largest_repos: vec![crate::metrics::RepoSize {
+                rel: "tools/ripgrep".into(),
+                name: "ripgrep".into(),
+                bytes: 3 * 1024 * 1024,
+            }],
+            rate_limited: 4,
+            requests_skipped: 2,
+            paused_hosts: vec![crate::metrics::HostLimit {
+                host: "api.github.com".into(),
+                paused_for_secs: 125,
+            }],
+            ..Default::default()
+        };
+        let ctx = stats_ctx_from(&m, &totals, &crate::config::Config::default());
+        assert_eq!(ctx.archive_size, "3.0 MB");
+        assert_eq!(ctx.snapshot_size, "2.0 MB");
+        assert_eq!(ctx.release_size, "1.0 MB");
+        assert_eq!(ctx.largest_repos.len(), 1);
+        assert_eq!(ctx.largest_repos[0].name, "ripgrep");
+        assert_eq!(ctx.largest_repos[0].size_human, "3.0 MB");
+        assert_eq!(ctx.rate_limited, 4);
+        assert_eq!(ctx.requests_skipped, 2);
+        assert_eq!(ctx.paused_hosts[0].host, "api.github.com");
+        assert_eq!(ctx.paused_hosts[0].paused, "2m 05s");
     }
 
     #[test]

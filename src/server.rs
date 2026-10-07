@@ -425,8 +425,27 @@ impl AppState {
     /// Current index-derived gauges (repos, snapshots, dead/unavailable...).
     pub async fn totals(&self) -> crate::metrics::Totals {
         let (cache_hits, cache_misses) = self.http_cache.lock().unwrap().stats();
+        let (rate_limited, requests_skipped) = self.governor.counters();
+        let paused_hosts = self
+            .governor
+            .status()
+            .await
+            .into_iter()
+            .map(|h| crate::metrics::HostLimit {
+                host: h.host,
+                paused_for_secs: h.paused_for_secs,
+            })
+            .collect();
         let index = self.index.read().await;
-        let mut t = crate::metrics::Totals { cache_hits, cache_misses, ..Default::default() };
+        let mut t = crate::metrics::Totals {
+            cache_hits,
+            cache_misses,
+            rate_limited,
+            requests_skipped,
+            paused_hosts,
+            ..Default::default()
+        };
+        let mut sizes: Vec<crate::metrics::RepoSize> = Vec::new();
         for r in &index.repos {
             t.repos += 1;
             t.snapshots += r.branch_snapshots.len() as u64;
@@ -439,7 +458,28 @@ impl AppState {
             if r.manifest.tags.is_empty() {
                 t.untagged += 1;
             }
+            let snapshot: u64 = r.branch_snapshots.iter().map(|e| e.sidecar.zip.bytes).sum();
+            let release: u64 = r.releases.iter().map(|e| e.sidecar.zip.bytes).sum();
+            let assets: u64 = r
+                .releases
+                .iter()
+                .flat_map(|e| e.sidecar.assets.iter())
+                .map(|a| a.bytes)
+                .sum();
+            t.snapshot_bytes += snapshot;
+            t.release_bytes += release;
+            t.asset_bytes += assets;
+            let total = snapshot + release + assets;
+            t.archive_bytes += total;
+            sizes.push(crate::metrics::RepoSize {
+                rel: r.rel.clone(),
+                name: r.manifest.name.clone(),
+                bytes: total,
+            });
         }
+        sizes.sort_by_key(|s| std::cmp::Reverse(s.bytes));
+        sizes.truncate(10);
+        t.largest_repos = sizes;
         t
     }
 
@@ -1632,6 +1672,46 @@ mod tests {
         assert!(!verify_is_due(Some(&rfc_days_ago(0)), 7));
         assert!(!verify_is_due(Some(&rfc_days_ago(6)), 7));
         assert!(verify_is_due(Some(&rfc_days_ago(8)), 7));
+    }
+
+    /// `totals()` must sum stored bytes from the sidecars and rank the repos.
+    #[tokio::test]
+    async fn totals_summarize_storage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let repo = root.join("owner-demo");
+        std::fs::create_dir_all(repo.join("branch/main")).unwrap();
+        std::fs::create_dir_all(repo.join("releases/v1.0.0")).unwrap();
+        std::fs::write(
+            repo.join("repo.json"),
+            r#"{"forge":"generic","name":"demo","added":"2025-01-01T00:00:00Z","default_branch":"main"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("branch/main/demo-main@2025-01-01_abc.json"),
+            r#"{"kind":"branch-snapshot","repo":"owner-demo","origin":"file:///r/demo","ref":"main","commit":"abc","archived_at":"2025-01-01T00:00:00Z","format":"zip","zip":{"file":"demo-main@2025-01-01_abc.zip","bytes":100,"sha256":"a"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("releases/v1.0.0/demo-v1.0.0.json"),
+            r#"{"kind":"release","repo":"owner-demo","origin":"file:///r/demo","ref":"v1.0.0","version":"1.0.0","commit":"def","archived_at":"2025-01-02T00:00:00Z","format":"zip","assets":[{"name":"a.bin","platform":"all","url":"u","bytes":50,"sha256":"b","downloaded_at":"2025-01-02T00:00:00Z"}],"zip":{"file":"demo-v1.0.0.zip","bytes":250,"sha256":"c"}}"#,
+        )
+        .unwrap();
+
+        let mut cfg = Config::default();
+        cfg.archive.root = root.to_string_lossy().into_owned();
+        let st = AppState::new(cfg, None).await.unwrap();
+        let t = st.totals().await;
+        assert_eq!(t.snapshot_bytes, 100);
+        assert_eq!(t.release_bytes, 250);
+        assert_eq!(t.asset_bytes, 50);
+        assert_eq!(t.archive_bytes, 400);
+        assert_eq!(t.largest_repos.len(), 1);
+        assert_eq!(t.largest_repos[0].rel, "owner-demo");
+        assert_eq!(t.largest_repos[0].name, "demo");
+        assert_eq!(t.largest_repos[0].bytes, 400);
+        assert_eq!(t.rate_limited, 0);
+        assert!(t.paused_hosts.is_empty());
     }
 
     #[test]

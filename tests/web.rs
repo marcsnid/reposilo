@@ -1331,3 +1331,36 @@ async fn bulk_modals_render() -> Result<()> {
     assert!(page.contains("hx-get=\"/repos/bulk/move\""), "Move button missing");
     Ok(())
 }
+
+/// Storage totals and rate-limit status must appear in /api/stats and on /stats.
+#[tokio::test]
+async fn stats_report_storage_and_rate_limits() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    write_min_repo(&root, "owner-demo", "demo");
+    let branch = root.join("owner-demo/branch/main");
+    fs::create_dir_all(&branch)?;
+    fs::write(
+        branch.join("demo-main@2025-01-01_abc.json"),
+        r#"{"kind":"branch-snapshot","repo":"owner-demo","origin":"file:///r/demo","ref":"main","commit":"abc","archived_at":"2025-01-01T00:00:00Z","format":"zip","zip":{"file":"demo-main@2025-01-01_abc.zip","bytes":2048,"sha256":"a"}}"#,
+    )?;
+
+    let (base, _st) = spawn_server(test_cfg(&root)).await;
+    let client = reqwest::Client::new();
+
+    let stats: serde_json::Value =
+        client.get(format!("{base}/api/stats")).send().await?.json().await?;
+    assert_eq!(stats["totals"]["archive_bytes"], 2048, "{stats}");
+    assert_eq!(stats["totals"]["snapshot_bytes"], 2048, "{stats}");
+    assert_eq!(stats["totals"]["largest_repos"][0]["rel"], "owner-demo");
+    assert!(stats["totals"]["rate_limited"].is_number(), "{stats}");
+    assert!(stats["totals"]["requests_skipped"].is_number(), "{stats}");
+    assert!(stats["totals"]["paused_hosts"].is_array(), "{stats}");
+
+    let page = client.get(format!("{base}/stats")).send().await?.text().await?;
+    assert!(page.contains("Storage"), "storage section missing");
+    assert!(page.contains("Largest repositories"), "largest repos table missing");
+    assert!(page.contains("Remote rate limits"), "rate-limit section missing");
+    assert!(page.contains("No hosts are paused right now."));
+    Ok(())
+}

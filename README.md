@@ -222,17 +222,20 @@ url = "http://192.168.0.1:11434/v1"  # any OpenAI-compatible endpoint
 
 Every instance has a built-in **Stats** page (`/stats`, also in the top bar)
 and a JSON API at `/api/stats`. It shows current totals (repos, snapshots,
-releases, dead/unavailable remotes, untagged) plus a per-day 7-day bar chart
-of refresh successes vs failures and a table of recent days. The table also
-carries integrity check counts, and the page shows API cache revalidations and
-fetches. Counters are persisted to `<archive>/metrics.json` for 90 days, so
-they survive restarts.
+releases, dead/unavailable remotes, untagged), a storage breakdown (archive
+total, and the snapshot / release / release-asset split) with the ten largest
+repos, a per-day 7-day bar chart of refresh successes vs failures, integrity
+check counts, API cache revalidations and fetches, and live remote rate-limit
+status (pauses, requests skipped, and any hosts paused right now). Counters are
+persisted to `<archive>/metrics.json` for 90 days, so they survive restarts.
 
 Setting `[otel] enabled = true` additionally exports over OTLP/HTTP to a
-collector: **metrics** (the same totals and counters, plus per-host rate-limit
-counters `reposilo.remote.rate_limited` and `reposilo.remote.requests_skipped`,
-and http cache gauges `reposilo.http.cache_hits` / `reposilo.http.cache_misses`)
-and **logs** (everything
+collector: **metrics** (the same totals and counters, storage gauges
+`reposilo.storage.bytes`, `reposilo.storage.snapshot_bytes`,
+`reposilo.storage.release_bytes`, `reposilo.storage.asset_bytes`, per-host
+rate-limit counters `reposilo.remote.rate_limited` and
+`reposilo.remote.requests_skipped`, and cache gauges `reposilo.http.cache_hits` /
+`reposilo.http.cache_misses`) and **logs** (everything
 `tracing` emits, bridged through the OpenTelemetry log appender). Logs and
 metrics can be toggled independently. Both are optional and best-effort, and
 log records from the exporter's own HTTP stack are filtered out to avoid a

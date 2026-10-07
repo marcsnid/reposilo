@@ -47,6 +47,9 @@ pub struct RemoteGovernor {
     hosts: Mutex<HashMap<String, HostState>>,
     /// Set once by the server. CLI runs leave it unset and only log.
     telemetry: OnceLock<Telemetry>,
+    /// Process-lifetime counters, surfaced on the Stats page.
+    rate_limited: AtomicU64,
+    skipped: AtomicU64,
 }
 
 impl RemoteGovernor {
@@ -60,15 +63,23 @@ impl RemoteGovernor {
     }
 
     fn note_rate_limited(&self, host: &str) {
+        self.rate_limited.fetch_add(1, Ordering::Relaxed);
         if let Some(t) = self.telemetry.get() {
             t.remote_rate_limited(host);
         }
     }
 
     fn note_skipped(&self, host: &str) {
+        self.skipped.fetch_add(1, Ordering::Relaxed);
         if let Some(t) = self.telemetry.get() {
             t.remote_requests_skipped(host);
         }
+    }
+
+    /// `(hosts paused by a rate-limit signal, requests skipped)`, process
+    /// lifetime.
+    pub fn counters(&self) -> (u64, u64) {
+        (self.rate_limited.load(Ordering::Relaxed), self.skipped.load(Ordering::Relaxed))
     }
 
     /// Wait for a pacing slot on `host`, returning `false` when the host is

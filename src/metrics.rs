@@ -153,6 +153,33 @@ pub struct Totals {
     /// Conditional-request cache revalidations and fresh fetches this process.
     pub cache_hits: u64,
     pub cache_misses: u64,
+    /// Stored bytes: the archive total and its parts.
+    pub archive_bytes: u64,
+    pub snapshot_bytes: u64,
+    pub release_bytes: u64,
+    pub asset_bytes: u64,
+    /// Largest repos on disk (top 10), for the Stats page.
+    pub largest_repos: Vec<RepoSize>,
+    /// Outbound rate-limit events observed this process.
+    pub rate_limited: u64,
+    pub requests_skipped: u64,
+    /// Hosts currently paused by a rate-limit signal.
+    pub paused_hosts: Vec<HostLimit>,
+}
+
+/// One repo's stored size, for the largest-repos list.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RepoSize {
+    pub rel: String,
+    pub name: String,
+    pub bytes: u64,
+}
+
+/// A host currently paused by a rate-limit signal.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct HostLimit {
+    pub host: String,
+    pub paused_for_secs: u64,
 }
 
 #[cfg(test)]

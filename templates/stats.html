@@ -21,6 +21,27 @@
   </section>
 
   <section class="panel">
+    <h2>Storage</h2>
+    <div class="stat-grid">
+      <div class="stat-card"><div class="stat-num">{{ ctx.archive_size }}</div><div class="stat-label">archive total</div></div>
+      <div class="stat-card"><div class="stat-num">{{ ctx.snapshot_size }}</div><div class="stat-label">branch snapshots</div></div>
+      <div class="stat-card"><div class="stat-num">{{ ctx.release_size }}</div><div class="stat-label">releases</div></div>
+      <div class="stat-card"><div class="stat-num">{{ ctx.asset_size }}</div><div class="stat-label">release assets</div></div>
+    </div>
+    {% if !ctx.largest_repos.is_empty() %}
+    <h3>Largest repositories</h3>
+    <table class="stats-table">
+      <thead><tr><th>Repository</th><th>Size</th></tr></thead>
+      <tbody>
+      {% for r in ctx.largest_repos %}
+        <tr><td><a href="/repos/{{ r.rel }}">{{ r.name }}</a></td><td>{{ r.size_human }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </section>
+
+  <section class="panel">
     <h2>Activity</h2>
     <div class="stat-grid">
       <div class="stat-card"><div class="stat-num">{{ ctx.refresh_ok }}</div><div class="stat-label">refreshes ok</div></div>
@@ -68,6 +89,26 @@
           <td>{{ d.verify_runs }}</td>
           <td>{% if d.verify_problems > 0 %}<span class="bad">{{ d.verify_problems }}</span>{% else %}0{% endif %}</td>
         </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </section>
+
+  <section class="panel">
+    <h2>Remote rate limits</h2>
+    <div class="stat-grid">
+      <div class="stat-card"><div class="stat-num">{{ ctx.rate_limited }}</div><div class="stat-label">rate-limit pauses</div></div>
+      <div class="stat-card"><div class="stat-num">{{ ctx.requests_skipped }}</div><div class="stat-label">requests skipped</div></div>
+    </div>
+    {% if ctx.paused_hosts.is_empty() %}
+    <p class="note">No hosts are paused right now.</p>
+    {% else %}
+    <table class="stats-table">
+      <thead><tr><th>Host</th><th>Paused for</th></tr></thead>
+      <tbody>
+      {% for h in ctx.paused_hosts %}
+        <tr><td>{{ h.host }}</td><td>{{ h.paused }}</td></tr>
       {% endfor %}
       </tbody>
     </table>

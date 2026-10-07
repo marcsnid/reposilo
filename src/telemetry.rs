@@ -213,6 +213,10 @@ impl Telemetry {
             "Forge API responses fetched fresh",
             totals.cache_misses,
         );
+        gauge("reposilo.storage.bytes", "Total stored archive bytes", totals.archive_bytes);
+        gauge("reposilo.storage.snapshot_bytes", "Bytes in branch snapshots", totals.snapshot_bytes);
+        gauge("reposilo.storage.release_bytes", "Bytes in release archives", totals.release_bytes);
+        gauge("reposilo.storage.asset_bytes", "Bytes in downloaded release assets", totals.asset_bytes);
     }
 }
 
