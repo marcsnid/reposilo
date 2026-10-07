@@ -8,6 +8,8 @@
 //!   * GitHub and Gitea X-RateLimit-Remaining: 0 with an epoch reset
 //!   * GitLab RateLimit-Remaining: 0 with a seconds-from-now reset
 //!   * a cooldown longer than max_wait_secs is skipped, not blocked on
+//!   * git operations (a real `git ls-remote`) are paced, and the fallback
+//!     sends them back to back
 //!
 //! Assertions measure the gap between recorded request times instead of
 //! wall-clock totals, so they hold up under parallel test load.
@@ -15,8 +17,10 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use reposilo::config::RemoteCfg;
+use reposilo::archiver::Archiver;
+use reposilo::config::{Config, RemoteCfg};
 use reposilo::ratelimit::{send_with_pacing, RemoteGovernor};
+use reposilo::types::RepoManifest;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[derive(Clone)]
@@ -283,5 +287,77 @@ async fn respect_rate_limits_off_ignores_cooldown_headers() {
         gap(&hits) < Duration::from_millis(1000),
         "with respect_rate_limits=false only the normal spacing applies, gap was {:?}",
         gap(&hits)
+    );
+}
+
+/// Build an archive with one manifest pointing at a local HTTP server, then
+/// run two refreshes. Each refresh does one network git probe (`ls-remote`),
+/// the server answers 500 so git stops after a single request, and we return
+/// the time between the first and last request the server saw.
+async fn two_git_refresh_gap(min_interval_ms: u64, enabled: bool) -> (Duration, usize) {
+    let (base, hits) = spawn_server(vec![Resp::with(500, &[])]).await;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let repo = root.join("owner-repo");
+    std::fs::create_dir_all(&repo).unwrap();
+
+    let manifest = RepoManifest {
+        origin: Some(format!("{base}/owner/repo.git")),
+        forge: "generic".into(),
+        name: "repo".into(),
+        added: "2025-01-01T00:00:00Z".into(),
+        tags: vec![],
+        description: None,
+        language: None,
+        default_branch: "main".into(),
+        schedule: Default::default(),
+        retention: Default::default(),
+        last_checked: None,
+        notes: None,
+        remote_state: None,
+        unavailable_since: None,
+        suggested_tags: vec![],
+        stars: None,
+        color: None,
+        unidentified: false,
+    };
+    reposilo::types::write_json(&repo.join("repo.json"), &manifest).unwrap();
+
+    let mut cfg = Config::default();
+    cfg.archive.root = root.to_string_lossy().into_owned();
+    cfg.remote.enabled = enabled;
+    cfg.remote.min_interval_ms = min_interval_ms;
+    cfg.remote.jitter_ms = 0;
+    cfg.remote.max_wait_secs = 5;
+    let archiver = Archiver::new(cfg);
+
+    let _ = archiver.refresh_repo(&repo).await;
+    let _ = archiver.refresh_repo(&repo).await;
+
+    let h = hits.lock().unwrap().clone();
+    let gap = if h.len() >= 2 { h[h.len() - 1].duration_since(h[0]) } else { Duration::ZERO };
+    (gap, h.len())
+}
+
+/// The git call sites must actually be paced end to end, through a real git
+/// subprocess talking HTTP, not just in the governor's unit tests.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn git_operations_are_paced_end_to_end() {
+    let (gap, hits) = two_git_refresh_gap(800, true).await;
+    assert!(hits >= 2, "expected two git probes, got {hits}");
+    assert!(
+        gap >= Duration::from_millis(600),
+        "network git operations must be spaced, gap was {gap:?}"
+    );
+}
+
+/// And the fallback must send git operations back to back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn git_pacing_disabled_sends_back_to_back() {
+    let (gap, hits) = two_git_refresh_gap(800, false).await;
+    assert!(hits >= 2, "expected two git probes, got {hits}");
+    assert!(
+        gap < Duration::from_millis(400),
+        "disabled pacing must not delay git operations, gap was {gap:?}"
     );
 }

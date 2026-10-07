@@ -208,6 +208,15 @@ pub fn latest_semver_tag(tags: &[String]) -> Option<String> {
         .map(|(_, t)| t)
 }
 
+/// The pacing host for a git remote, or `None` when there is nothing to pace:
+/// a local path, `file://`, or an SSH remote, none of which are subject to
+/// the forge's HTTP rate limits.
+fn git_host(url: &str) -> Option<String> {
+    let u = url.trim();
+    (u.starts_with("http://") || u.starts_with("https://"))
+        .then(|| crate::ratelimit::host_key(u))
+}
+
 pub struct Archiver {
     pub cfg: Config,
     /// Per-host request governor. CLI construction makes a private one; the
@@ -390,7 +399,24 @@ impl Archiver {
         Ok(())
     }
 
+    /// Pace a network git operation through the shared governor. Local and
+    /// `file://` remotes have no rate limit and are left alone. Returns an
+    /// error when the host is paused longer than `[remote] max_wait_secs`, so
+    /// the job fails and retries on the next scheduler pass instead of piling
+    /// on more requests.
+    async fn pace_remote(&self, url: &str) -> Result<()> {
+        let Some(host) = git_host(url) else {
+            return Ok(());
+        };
+        if self.governor.acquire(&host, &self.cfg.remote).await {
+            return Ok(());
+        }
+        tracing::warn!(host = %host, "git remote is rate-limited; skipping this operation");
+        bail!("host {host} is rate-limited; try again later")
+    }
+
     async fn clone_shallow(&self, url: &str, dest: &Path) -> Result<()> {
+        self.pace_remote(url).await?;
         let depth = self.cfg.git.depth.to_string();
         let mut args: Vec<&str> = vec!["clone", "--bare"];
         if self.cfg.git.depth > 0 {
@@ -410,7 +436,8 @@ impl Archiver {
     }
 
     /// Fetch a tag shallowly into the local repo; returns its commit sha.
-    async fn fetch_tag(&self, shallow: &Path, _url: &str, tag: &str) -> Result<String> {
+    async fn fetch_tag(&self, shallow: &Path, url: &str, tag: &str) -> Result<String> {
+        self.pace_remote(url).await?;
         let depth = self.cfg.git.depth.to_string();
         let refspec = format!("refs/tags/{tag}:refs/tags/{tag}");
         let mut args: Vec<&str> = vec!["fetch"];
@@ -429,6 +456,7 @@ impl Archiver {
 
     /// List all tags on the remote and pick the newest semver one.
     async fn latest_release_tag(&self, url: &str) -> Result<Option<String>> {
+        self.pace_remote(url).await?;
         let out = git(self.cfg.git.timeout_secs, &["ls-remote", "--tags", url], None)
             .await
             .with_context(|| format!("ls-remote of {url} failed"))?;
@@ -771,6 +799,7 @@ impl Archiver {
 
         // Probe the remote first (cheap). If it's gone entirely, record that
         // state on the manifest and keep the local archive untouched.
+        self.pace_remote(&origin).await?;
         let head_out = git(self.cfg.git.timeout_secs, &["ls-remote", "--symref", &origin, "HEAD"], None).await;
         let Ok(head_out) = head_out else {
             summary.remote_unavailable = true;
@@ -814,6 +843,7 @@ impl Archiver {
         // the truth in both modes; keep one code path)
         let local_sha = latest_branch_commit(repo_dir, &branch).unwrap_or_default();
 
+        self.pace_remote(&origin).await?;
         let remote_branch_sha = git(self.cfg.git.timeout_secs, &["ls-remote", &origin, &branch_ref], None)
             .await
             .ok()
@@ -923,6 +953,7 @@ impl Archiver {
     }
 
     async fn fetch_branch(&self, shallow: &Path, origin: &str, branch: &str) -> Result<()> {
+        self.pace_remote(origin).await?;
         let depth = self.cfg.git.depth.to_string();
         // '+' forces the update in case the branch was force-pushed.
         let refspec = format!("+refs/heads/{branch}:refs/heads/{branch}");
@@ -1101,6 +1132,41 @@ fn archived_latest_release(repo_dir: &Path) -> Option<semver::Version> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_host_only_paces_http_remotes() {
+        assert_eq!(git_host("https://github.com/o/r").as_deref(), Some("github.com"));
+        assert_eq!(git_host("http://git.internal:8080/o/r").as_deref(), Some("git.internal:8080"));
+        assert!(git_host("file:///tmp/remote").is_none());
+        assert!(git_host("/tmp/local/repo").is_none());
+        assert!(git_host("git@github.com:o/r.git").is_none());
+    }
+
+    #[tokio::test]
+    async fn git_pacing_skips_local_and_spaces_network() {
+        let mut cfg = Config::default();
+        cfg.remote.min_interval_ms = 100_000;
+        cfg.remote.jitter_ms = 0;
+        cfg.remote.max_wait_secs = 1;
+        let archiver = Archiver::new(cfg);
+        // Local and file remotes are never paced.
+        assert!(archiver.pace_remote("file:///tmp/remote").await.is_ok());
+        assert!(archiver.pace_remote("/tmp/local").await.is_ok());
+        // A network origin is paced: the first call is fine, an immediate
+        // second one is skipped rather than waiting out the interval.
+        assert!(archiver.pace_remote("https://github.com/o/r").await.is_ok());
+        assert!(archiver.pace_remote("https://github.com/o/r").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn git_pacing_disabled_is_a_noop() {
+        let mut cfg = Config::default();
+        cfg.remote.enabled = false;
+        cfg.remote.min_interval_ms = 100_000;
+        let archiver = Archiver::new(cfg);
+        assert!(archiver.pace_remote("https://github.com/o/r").await.is_ok());
+        assert!(archiver.pace_remote("https://github.com/o/r").await.is_ok());
+    }
 
     #[test]
     fn latest_semver_prefers_highest_and_tolerates_v() {

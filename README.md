@@ -30,10 +30,11 @@ goes away.
   or corrupt files. A scheduled check can be turned on in Settings (or with
   `[verify] enabled = true`), and pushes a notification when something fails.
   It is off by default because it reads every zip.
-- **Pace** outbound API calls per host: requests are spaced and paused when a
-  forge reports a rate limit, so refreshing many repos does not trip
-  GitHub/GitLab/Forgejo limits. Works with anonymous or token auth, is on by
-  default, and can be disabled.
+- **Pace** outbound requests per host: API calls and git operations (clone,
+  fetch, ls-remote) are spaced, and API calls are paused when the forge reports
+  a rate limit, so refreshing many repos does not trip GitHub/GitLab/Forgejo
+  limits. Works with anonymous or token auth, is on by default, and can be
+  disabled.
 - **Collect release binaries**: download the platform-specific assets attached
   to a release, filtered to the OS/arch you care about. Names like
   `foo-win64.zip`, `foo-x86_64-unknown-linux-gnu.tar.gz` and `Bar-1.0-arm64.dmg`
@@ -153,9 +154,10 @@ dead_after_days = 21       # stop checking after N days unreachable
 
 [remote]
 # Space outbound requests per host so a burst of repos does not trip a forge's
-# rate limiter, and honor the server's own backoff signals. Applies to every
-# forge path (GitHub, GitLab, Forgejo/Codeberg, custom). Set enabled = false
-# to send immediately (the old behavior).
+# rate limiter, and honor the server's own backoff signals. Applies to API
+# calls and to git operations (clone, fetch, ls-remote) for every forge
+# (GitHub, GitLab, Forgejo/Codeberg, custom). Local and file:// remotes are
+# never paced. Set enabled = false to send immediately (the old behavior).
 enabled = true
 min_interval_ms = 500      # minimum gap between requests to the same host
 jitter_ms = 250            # extra random 0..N ms, to avoid lockstep bursts
