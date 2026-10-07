@@ -312,8 +312,29 @@ stage and mount your keys. The container sets `REPOSILO_BIND=0.0.0.0:8765`
 ```sh
 cargo build --release
 cargo test
-cargo clippy
+cargo clippy --all-targets -- -D warnings
 ```
+
+### Testing strategy
+
+`cargo test` runs everything, and nothing reaches the public internet. The
+layers are:
+
+- Unit tests sit next to the code: config parsing, payload parsers, the
+  governor and cache internals, view mapping, and the verify engine.
+- `tests/integration.rs` drives the archiver against real local `file://` git
+  remotes: add, refresh, retention, dedup, and asset handling.
+- `tests/import.rs` covers importing zip collections, including detection and
+  origin assignment.
+- `tests/web.rs` drives the HTTP UI and API against a real in-process server,
+  including bulk actions and a real local clone.
+- `tests/ratelimit.rs` runs the governor and conditional cache against a local
+  HTTP server: spacing, backoff, the rate-limit header families, ETag
+  revalidation, and git operation pacing.
+- `tests/traces.rs` exports a span to a mock OTLP collector.
+- `tests/api.rs` covers the JSON API.
+
+CI runs the same test suite plus `clippy -D warnings` and a dependency audit.
 
 Single binary (templates + CSS + htmx compiled in). No external services
 required except git and optionally a llama.cpp endpoint for AI tagging.

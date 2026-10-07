@@ -25,6 +25,25 @@ dead_after_days = 21
 depth = 1
 timeout_secs = 600
 
+[remote]
+# Space outbound requests per host and honor the server's backoff signals.
+# Applies to API calls and git operations (clone, fetch, ls-remote).
+enabled = true
+min_interval_ms = 500
+jitter_ms = 250
+respect_rate_limits = true
+max_wait_secs = 30
+max_cooldown_secs = 900
+
+[cache]
+# Revalidate API responses with ETag / If-None-Match (a 304 is free on GitHub).
+conditional = true
+
+[verify]
+# Scheduled integrity checks of every stored zip. Off by default.
+enabled = false
+interval_days = 7
+
 # Download release binaries for the platforms you want. Empty = none.
 [releases]
 platforms = ["darwin-arm64", "linux-x64"]
@@ -56,3 +75,4 @@ enabled = false
 # service_name = "reposilo"
 # logs = true
 # metrics = true
+# traces = true

@@ -1283,7 +1283,10 @@ async fn bulk_refresh_archives_every_selected_repo() -> Result<()> {
     let origin = format!("file://{}", remote.display());
     write_repo_with_origin(&root, "owner-a", "a", &origin);
     write_repo_with_origin(&root, "owner-b", "b", &origin);
-    let (base, _st) = spawn_server(test_cfg(&root)).await;
+    // One permit for two repos exercises the shared refresh semaphore.
+    let mut cfg = test_cfg(&root);
+    cfg.scheduler.max_concurrent = 1;
+    let (base, _st) = spawn_server(cfg).await;
     let client = reqwest::Client::new();
 
     let rels = serde_json::json!(["owner-a", "owner-b"]).to_string();

@@ -20,6 +20,8 @@ pub mod releaseapi;
 pub mod server;
 pub mod tagging;
 pub mod telemetry;
+#[cfg(test)]
+mod testserver;
 pub mod types;
 pub mod verify;
 pub mod web;
