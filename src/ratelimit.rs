@@ -197,7 +197,9 @@ where
         };
         gov.observe(host, &resp, cfg).await;
         let status = resp.status();
-        if status.is_success() {
+        // 304 is a valid answer to a conditional request (the caller serves
+        // the cached body); it must not be swallowed as a failure.
+        if status.is_success() || status.as_u16() == 304 {
             return Some(resp);
         }
         let retryable = status.is_server_error() || status.as_u16() == 429;

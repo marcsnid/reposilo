@@ -10,6 +10,8 @@
 //!   * a cooldown longer than max_wait_secs is skipped, not blocked on
 //!   * git operations (a real `git ls-remote`) are paced, and the fallback
 //!     sends them back to back
+//!   * a conditional GET revalidates with an ETag and serves the cached body
+//!     on a 304, while the disabled setting refetches
 //!
 //! Assertions measure the gap between recorded request times instead of
 //! wall-clock totals, so they hold up under parallel test load.
@@ -360,4 +362,94 @@ async fn git_pacing_disabled_sends_back_to_back() {
         gap < Duration::from_millis(400),
         "disabled pacing must not delay git operations, gap was {gap:?}"
     );
+}
+
+/// A server that serves `body` with an ETag, answers 304 when the client
+/// revalidates with a matching `If-None-Match`, and records per request
+/// whether it carried that header.
+async fn spawn_etag_server(
+    body: &'static str,
+    etag: &'static str,
+) -> (String, Arc<Mutex<Vec<bool>>>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let reqs: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
+    let reqs2 = reqs.clone();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { break };
+                let _ = sock.set_nodelay(true);
+                let mut buf = [0u8; 4096];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+                let conditional = req.contains("if-none-match");
+                reqs2.lock().unwrap().push(conditional);
+                let out = if conditional {
+                    b"HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n".to_vec()
+                } else {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: {etag}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .into_bytes()
+                };
+                let _ = sock.write_all(&out).await;
+                let _ = sock.flush().await;
+            }
+        });
+    });
+    (format!("http://{addr}"), reqs)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn conditional_get_revalidates_with_etag() {
+    use reposilo::httpcache::{conditional_get, HttpCache};
+    let (base, reqs) = spawn_etag_server("{\"ok\":true}", "\"v1\"").await;
+    let url = format!("{base}/x");
+    let mut cfg = Config::default();
+    cfg.remote.min_interval_ms = 0;
+    cfg.remote.jitter_ms = 0;
+    let gov = RemoteGovernor::new();
+    let cache = std::sync::Mutex::new(HttpCache::empty());
+    let client = reqwest::Client::new();
+
+    let first = conditional_get(&cfg, &gov, &cache, &url, || client.get(&url)).await.unwrap();
+    assert_eq!(first.body, "{\"ok\":true}");
+    assert!(!first.from_cache, "first call must hit the network");
+
+    let second = conditional_get(&cfg, &gov, &cache, &url, || client.get(&url)).await.unwrap();
+    assert_eq!(second.body, "{\"ok\":true}");
+    assert!(second.from_cache, "second call must be served from the cache");
+    assert_eq!(cache.lock().unwrap().stats(), (1, 1), "one hit, one miss");
+
+    let r = reqs.lock().unwrap();
+    assert_eq!(r.len(), 2);
+    assert!(!r[0], "first request must be unconditional");
+    assert!(r[1], "second request must carry If-None-Match");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn conditional_get_disabled_refetches() {
+    use reposilo::httpcache::{conditional_get, HttpCache};
+    let (base, reqs) = spawn_etag_server("{\"ok\":true}", "\"v1\"").await;
+    let url = format!("{base}/x");
+    let mut cfg = Config::default();
+    cfg.remote.min_interval_ms = 0;
+    cfg.remote.jitter_ms = 0;
+    cfg.cache.conditional = false;
+    let gov = RemoteGovernor::new();
+    let cache = std::sync::Mutex::new(HttpCache::empty());
+    let client = reqwest::Client::new();
+
+    let _ = conditional_get(&cfg, &gov, &cache, &url, || client.get(&url)).await.unwrap();
+    let second = conditional_get(&cfg, &gov, &cache, &url, || client.get(&url)).await.unwrap();
+    assert!(!second.from_cache, "disabled cache must refetch");
+    assert!(!reqs.lock().unwrap()[1], "disabled cache must not send If-None-Match");
 }

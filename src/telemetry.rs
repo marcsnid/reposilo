@@ -203,6 +203,16 @@ impl Telemetry {
         gauge("reposilo.repos.dead", "Repositories with a dead remote", totals.dead);
         gauge("reposilo.repos.unavailable", "Repositories temporarily unreachable", totals.unavailable);
         gauge("reposilo.repos.untagged", "Repositories with no tags", totals.untagged);
+        gauge(
+            "reposilo.http.cache_hits",
+            "Forge API responses revalidated from the conditional cache",
+            totals.cache_hits,
+        );
+        gauge(
+            "reposilo.http.cache_misses",
+            "Forge API responses fetched fresh",
+            totals.cache_misses,
+        );
     }
 }
 

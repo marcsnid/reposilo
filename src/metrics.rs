@@ -150,6 +150,9 @@ pub struct Totals {
     pub dead: u64,
     pub unavailable: u64,
     pub untagged: u64,
+    /// Conditional-request cache revalidations and fresh fetches this process.
+    pub cache_hits: u64,
+    pub cache_misses: u64,
 }
 
 #[cfg(test)]

@@ -19,6 +19,7 @@ pub struct Config {
     pub forgejo: ForgeTokenCfg,
     pub releases: ReleasesCfg,
     pub remote: RemoteCfg,
+    pub cache: CacheCfg,
     pub verify: VerifyCfg,
     pub llm: LlmCfg,
     pub otel: OtelCfg,
@@ -264,6 +265,22 @@ impl Default for RemoteCfg {
     }
 }
 
+/// Conditional-request cache for forge API responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CacheCfg {
+    /// Revalidate API responses with `ETag` / `If-None-Match`. A 304 means the
+    /// data did not change and, on GitHub, does not count against the primary
+    /// rate limit. Turn off to always refetch.
+    pub conditional: bool,
+}
+
+impl Default for CacheCfg {
+    fn default() -> Self {
+        Self { conditional: true }
+    }
+}
+
 /// Scheduled archive integrity checks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -407,6 +424,16 @@ mod tests {
         // Omitting the section entirely also yields the defaults (fallback).
         let cfg: Config = toml::from_str("[archive]\nroot = \".\"\n").unwrap();
         assert!(cfg.remote.enabled);
+    }
+
+    #[test]
+    fn cache_cfg_defaults_and_parses() {
+        assert!(Config::default().cache.conditional, "conditional requests are on by default");
+        let cfg: Config = toml::from_str("[cache]\nconditional = false\n").unwrap();
+        assert!(!cfg.cache.conditional);
+        // Omitting the section keeps the default.
+        let cfg: Config = toml::from_str("[archive]\nroot = \".\"\n").unwrap();
+        assert!(cfg.cache.conditional);
     }
 
     #[test]

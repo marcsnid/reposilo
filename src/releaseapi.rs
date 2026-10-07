@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 
 use crate::config::Config;
 use crate::forge::{self, ForgeKind};
-use crate::ratelimit::{host_key, send_with_pacing, RemoteGovernor};
+use crate::ratelimit::{host_key, RemoteGovernor};
 
 #[derive(Debug, Clone)]
 pub struct RemoteAsset {
@@ -165,17 +165,29 @@ fn download_client() -> Result<reqwest::Client> {
 
 /// Look up one release by tag and return its downloadable assets. `None` when
 /// the forge is unsupported, the release is missing, or the API call fails.
-pub async fn fetch_release(cfg: &Config, gov: &RemoteGovernor, origin: &str, tag: &str) -> Option<RemoteRelease> {
+pub async fn fetch_release(
+    cfg: &Config,
+    gov: &RemoteGovernor,
+    cache: &std::sync::Mutex<crate::httpcache::HttpCache>,
+    origin: &str,
+    tag: &str,
+) -> Option<RemoteRelease> {
     let info = forge::detect(origin).ok()?;
     match info.kind {
-        ForgeKind::GitHub => github(cfg, gov, &info, tag).await,
-        ForgeKind::GitLab => gitlab(cfg, gov, origin, tag).await,
-        ForgeKind::Forgejo => forgejo(cfg, gov, origin, &info, tag).await,
+        ForgeKind::GitHub => github(cfg, gov, cache, &info, tag).await,
+        ForgeKind::GitLab => gitlab(cfg, gov, cache, origin, tag).await,
+        ForgeKind::Forgejo => forgejo(cfg, gov, cache, origin, &info, tag).await,
         ForgeKind::Generic => None,
     }
 }
 
-async fn github(cfg: &Config, gov: &RemoteGovernor, info: &forge::ForgeInfo, tag: &str) -> Option<RemoteRelease> {
+async fn github(
+    cfg: &Config,
+    gov: &RemoteGovernor,
+    cache: &std::sync::Mutex<crate::httpcache::HttpCache>,
+    info: &forge::ForgeInfo,
+    tag: &str,
+) -> Option<RemoteRelease> {
     use reqwest::header::ACCEPT;
     let client = crate::ratelimit::api_client();
     let token = cfg.github.resolved_token();
@@ -185,16 +197,16 @@ async fn github(cfg: &Config, gov: &RemoteGovernor, info: &forge::ForgeInfo, tag
         info.name,
         percent_encode(tag)
     );
-    let host = host_key(&url);
-    let resp = send_with_pacing(gov, &cfg.remote, &host, || {
+    let body = crate::httpcache::conditional_get(cfg, gov, cache, &url, || {
         let mut req = client.get(&url).header(ACCEPT, "application/vnd.github+json");
         if let Some(tok) = token.as_deref() {
             req = req.bearer_auth(tok);
         }
         req
     })
-    .await?;
-    let v: Value = resp.json().await.ok()?;
+    .await?
+    .body;
+    let v: Value = serde_json::from_str(&body).ok()?;
     let assets = v["assets"]
         .as_array()?
         .iter()
@@ -218,7 +230,13 @@ async fn github(cfg: &Config, gov: &RemoteGovernor, info: &forge::ForgeInfo, tag
     Some(RemoteRelease { tag: tag.to_string(), assets })
 }
 
-async fn gitlab(cfg: &Config, gov: &RemoteGovernor, origin: &str, tag: &str) -> Option<RemoteRelease> {
+async fn gitlab(
+    cfg: &Config,
+    gov: &RemoteGovernor,
+    cache: &std::sync::Mutex<crate::httpcache::HttpCache>,
+    origin: &str,
+    tag: &str,
+) -> Option<RemoteRelease> {
     let origin = parse_origin(origin)?;
     let client = crate::ratelimit::api_client();
     let token = cfg.gitlab.resolved_token();
@@ -228,16 +246,16 @@ async fn gitlab(cfg: &Config, gov: &RemoteGovernor, origin: &str, tag: &str) -> 
         percent_encode(&origin.path),
         percent_encode(tag)
     );
-    let host = host_key(&url);
-    let resp = send_with_pacing(gov, &cfg.remote, &host, || {
+    let body = crate::httpcache::conditional_get(cfg, gov, cache, &url, || {
         let mut req = client.get(&url);
         if let Some(tok) = token.as_deref() {
             req = req.header("PRIVATE-TOKEN", tok);
         }
         req
     })
-    .await?;
-    let v: Value = resp.json().await.ok()?;
+    .await?
+    .body;
+    let v: Value = serde_json::from_str(&body).ok()?;
     let assets = v["assets"]["links"]
         .as_array()?
         .iter()
@@ -255,7 +273,14 @@ async fn gitlab(cfg: &Config, gov: &RemoteGovernor, origin: &str, tag: &str) -> 
     Some(RemoteRelease { tag: tag.to_string(), assets })
 }
 
-async fn forgejo(cfg: &Config, gov: &RemoteGovernor, origin: &str, info: &forge::ForgeInfo, tag: &str) -> Option<RemoteRelease> {
+async fn forgejo(
+    cfg: &Config,
+    gov: &RemoteGovernor,
+    cache: &std::sync::Mutex<crate::httpcache::HttpCache>,
+    origin: &str,
+    info: &forge::ForgeInfo,
+    tag: &str,
+) -> Option<RemoteRelease> {
     let origin = parse_origin(origin)?;
     let client = crate::ratelimit::api_client();
     let token = cfg.forgejo.resolved_token();
@@ -266,16 +291,16 @@ async fn forgejo(cfg: &Config, gov: &RemoteGovernor, origin: &str, info: &forge:
         info.name,
         percent_encode(tag)
     );
-    let host = host_key(&url);
-    let resp = send_with_pacing(gov, &cfg.remote, &host, || {
+    let body = crate::httpcache::conditional_get(cfg, gov, cache, &url, || {
         let mut req = client.get(&url);
         if let Some(tok) = token.as_deref() {
             req = req.header(reqwest::header::AUTHORIZATION, format!("token {tok}"));
         }
         req
     })
-    .await?;
-    let v: Value = resp.json().await.ok()?;
+    .await?
+    .body;
+    let v: Value = serde_json::from_str(&body).ok()?;
     let assets = v["assets"]
         .as_array()?
         .iter()

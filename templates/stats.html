@@ -32,6 +32,8 @@
       <div class="stat-card"><div class="stat-num">{{ ctx.verify_runs }}</div><div class="stat-label">integrity checks</div></div>
       <div class="stat-card{% if ctx.verify_problems > 0 %} stat-bad{% endif %}"><div class="stat-num">{{ ctx.verify_problems }}</div><div class="stat-label">integrity problems</div></div>
       <div class="stat-card{% if ctx.verify_fail > 0 %} stat-bad{% endif %}"><div class="stat-num">{{ ctx.verify_fail }}</div><div class="stat-label">check failures</div></div>
+      <div class="stat-card"><div class="stat-num">{{ ctx.cache_hits }}</div><div class="stat-label">API revalidations</div></div>
+      <div class="stat-card"><div class="stat-num">{{ ctx.cache_misses }}</div><div class="stat-label">API fetches</div></div>
     </div>
 
     <h3>Last 7 days</h3>

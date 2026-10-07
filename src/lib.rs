@@ -9,6 +9,7 @@ pub mod config;
 pub mod files;
 pub mod forge;
 pub mod forgeapi;
+pub mod httpcache;
 pub mod importer;
 pub mod index;
 pub mod llm;

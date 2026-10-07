@@ -25,11 +25,16 @@ fn gh_url(origin: &str, suffix: &str) -> Option<String> {
     ))
 }
 
-/// Authenticated GitHub API GET, paced by the shared governor.
-async fn gh_get(cfg: &Config, gov: &RemoteGovernor, url: &str) -> Option<reqwest::Response> {
+/// Authenticated GitHub API GET, paced by the shared governor and revalidated
+/// through the conditional cache. Returns the response body.
+async fn gh_get(
+    cfg: &Config,
+    gov: &RemoteGovernor,
+    cache: &std::sync::Mutex<crate::httpcache::HttpCache>,
+    url: &str,
+) -> Option<String> {
     use reqwest::header::ACCEPT;
-    let host = host_key(url);
-    send_with_pacing(gov, &cfg.remote, &host, || {
+    crate::httpcache::conditional_get(cfg, gov, cache, url, || {
         let mut req = crate::ratelimit::api_client()
             .get(url)
             .header(ACCEPT, "application/vnd.github+json");
@@ -39,12 +44,19 @@ async fn gh_get(cfg: &Config, gov: &RemoteGovernor, url: &str) -> Option<reqwest
         req
     })
     .await
+    .map(|f| f.body)
 }
 
 /// Repo metadata (stars, topics, description). GitHub repos only.
-pub async fn github_repo_meta(cfg: &Config, gov: &RemoteGovernor, origin: &str) -> Option<RepoMeta> {
+pub async fn github_repo_meta(
+    cfg: &Config,
+    gov: &RemoteGovernor,
+    cache: &std::sync::Mutex<crate::httpcache::HttpCache>,
+    origin: &str,
+) -> Option<RepoMeta> {
     let url = gh_url(origin, "")?;
-    let resp: serde_json::Value = gh_get(cfg, gov, &url).await?.json().await.ok()?;
+    let body = gh_get(cfg, gov, cache, &url).await?;
+    let resp: serde_json::Value = serde_json::from_str(&body).ok()?;
     Some(RepoMeta {
         stars: resp["stargazers_count"].as_u64().unwrap_or(0),
         topics: resp["topics"]
@@ -108,12 +120,14 @@ pub struct CompareInfo {
 pub async fn github_compare(
     cfg: &Config,
     gov: &RemoteGovernor,
+    cache: &std::sync::Mutex<crate::httpcache::HttpCache>,
     origin: &str,
     base: &str,
     head: &str,
 ) -> Option<CompareInfo> {
     let url = gh_url(origin, &format!("/compare/{base}...{head}"))?;
-    let resp: serde_json::Value = gh_get(cfg, gov, &url).await?.json().await.ok()?;
+    let body = gh_get(cfg, gov, cache, &url).await?;
+    let resp: serde_json::Value = serde_json::from_str(&body).ok()?;
     Some(parse_compare(&resp))
 }
 
@@ -143,11 +157,18 @@ fn parse_compare(resp: &serde_json::Value) -> CompareInfo {
 }
 
 /// Release notes (markdown body) for a tag, from the GitHub releases API.
-pub async fn github_release_body(cfg: &Config, gov: &RemoteGovernor, origin: &str, tag: &str) -> Option<String> {
+pub async fn github_release_body(
+    cfg: &Config,
+    gov: &RemoteGovernor,
+    cache: &std::sync::Mutex<crate::httpcache::HttpCache>,
+    origin: &str,
+    tag: &str,
+) -> Option<String> {
     let url = gh_url(origin, &format!("/releases/tags/{tag}"))?;
-    let resp: serde_json::Value = gh_get(cfg, gov, &url).await?.json().await.ok()?;
-    let body = resp["body"].as_str()?.to_string();
-    (!body.trim().is_empty()).then_some(body)
+    let body = gh_get(cfg, gov, cache, &url).await?;
+    let resp: serde_json::Value = serde_json::from_str(&body).ok()?;
+    let notes = resp["body"].as_str()?.to_string();
+    (!notes.trim().is_empty()).then_some(notes)
 }
 
 #[cfg(test)]

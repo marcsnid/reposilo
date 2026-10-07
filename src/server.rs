@@ -98,6 +98,8 @@ pub struct AppState {
     pub metrics: Mutex<crate::metrics::Metrics>,
     /// Process-wide request governor shared by every add and refresh job.
     pub governor: Arc<RemoteGovernor>,
+    /// Conditional-request cache for forge API responses.
+    pub http_cache: Arc<std::sync::Mutex<crate::httpcache::HttpCache>>,
     /// True while a full-archive integrity check is running, so the scheduled
     /// loop does not start one on top of a manual check.
     pub verify_active: std::sync::atomic::AtomicBool,
@@ -133,6 +135,7 @@ impl AppState {
             listing_cache: Mutex::new(HashMap::new()),
             metrics: Mutex::new(crate::metrics::Metrics::load(&root)),
             governor: Arc::new(RemoteGovernor::new()),
+            http_cache: Arc::new(std::sync::Mutex::new(crate::httpcache::HttpCache::load(&root))),
             verify_active: std::sync::atomic::AtomicBool::new(false),
             users: std::sync::Mutex::new(crate::auth::Users::load(&root)),
             sessions: crate::auth::SessionStore::new(),
@@ -417,8 +420,9 @@ impl AppState {
 
     /// Current index-derived gauges (repos, snapshots, dead/unavailable...).
     pub async fn totals(&self) -> crate::metrics::Totals {
+        let (cache_hits, cache_misses) = self.http_cache.lock().unwrap().stats();
         let index = self.index.read().await;
-        let mut t = crate::metrics::Totals::default();
+        let mut t = crate::metrics::Totals { cache_hits, cache_misses, ..Default::default() };
         for r in &index.repos {
             t.repos += 1;
             t.snapshots += r.branch_snapshots.len() as u64;
@@ -818,7 +822,13 @@ pub async fn spawn_add_job(
     tokio::spawn(async move {
         // RAII: release the slug lock even if the job panics or returns early.
         let _lock = lock_key.as_deref().map(|k| RepoLockGuard::new(st2.clone(), k));
-        let result = Archiver::with_governor(st2.cfg().await, st2.governor.clone()).add_repo(&url, &tags, notes).await;
+        let result = Archiver::with_governor_and_cache(
+            st2.cfg().await,
+            st2.governor.clone(),
+            st2.http_cache.clone(),
+        )
+        .add_repo(&url, &tags, notes)
+        .await;
         match result {
             Ok(dir) => {
                 tracing::info!(repo = ?dir, "add finished");
@@ -991,7 +1001,15 @@ pub async fn spawn_refresh_job(
         let _permit = permit;
         let dir = { st.index.read().await.find(&rel).cloned().map(|r| r.dir) };
         let result = match dir {
-            Some(dir) => Archiver::with_governor(st.cfg().await, st.governor.clone()).refresh_repo(&dir).await,
+            Some(dir) => {
+                Archiver::with_governor_and_cache(
+                    st.cfg().await,
+                    st.governor.clone(),
+                    st.http_cache.clone(),
+                )
+                .refresh_repo(&dir)
+                .await
+            }
             None => Err(anyhow::anyhow!("repo disappeared from index")),
         };
         match result {

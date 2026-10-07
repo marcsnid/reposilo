@@ -35,6 +35,10 @@ goes away.
   a rate limit, so refreshing many repos does not trip GitHub/GitLab/Forgejo
   limits. Works with anonymous or token auth, is on by default, and can be
   disabled.
+- **Revalidate** forge API responses with `ETag` / `If-None-Match`: an
+  unchanged answer comes back as a 304, which on GitHub does not count against
+  the rate limit, so repeat lookups are free. Cached bodies are kept under the
+  archive root (`http-cache.json`). On by default, can be disabled.
 - **Collect release binaries**: download the platform-specific assets attached
   to a release, filtered to the OS/arch you care about. Names like
   `foo-win64.zip`, `foo-x86_64-unknown-linux-gnu.tar.gz` and `Bar-1.0-arm64.dmg`
@@ -165,6 +169,12 @@ respect_rate_limits = true # honor Retry-After / X-RateLimit-* / RateLimit-*
 max_wait_secs = 30         # never block longer than this; skip and retry later
 max_cooldown_secs = 900    # cap on a single rate-limit pause
 
+[cache]
+# Revalidate API responses with ETag / If-None-Match. A 304 means the data is
+# unchanged and does not count against GitHub's primary rate limit. Cached
+# bodies live in http-cache.json under the archive root.
+conditional = true
+
 [verify]
 # Run a full hash check while serving (also a toggle in Settings). Off by
 # default because it reads every stored zip. When problems are found, one
@@ -213,12 +223,14 @@ Every instance has a built-in **Stats** page (`/stats`, also in the top bar)
 and a JSON API at `/api/stats`. It shows current totals (repos, snapshots,
 releases, dead/unavailable remotes, untagged) plus a per-day 7-day bar chart
 of refresh successes vs failures and a table of recent days. The table also
-carries integrity check counts. Counters are persisted to
-`<archive>/metrics.json` for 90 days, so they survive restarts.
+carries integrity check counts, and the page shows API cache revalidations and
+fetches. Counters are persisted to `<archive>/metrics.json` for 90 days, so
+they survive restarts.
 
 Setting `[otel] enabled = true` additionally exports over OTLP/HTTP to a
 collector: **metrics** (the same totals and counters, plus per-host rate-limit
-counters `reposilo.remote.rate_limited` and `reposilo.remote.requests_skipped`)
+counters `reposilo.remote.rate_limited` and `reposilo.remote.requests_skipped`,
+and http cache gauges `reposilo.http.cache_hits` / `reposilo.http.cache_misses`)
 and **logs** (everything
 `tracing` emits, bridged through the OpenTelemetry log appender). Logs and
 metrics can be toggled independently. Both are optional and best-effort, and

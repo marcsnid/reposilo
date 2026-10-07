@@ -1060,29 +1060,29 @@ async fn import_scan(
     }
 }
 
-/// GitHub repository search → candidate origins (web search assist).
-async fn github_search(cfg: &crate::config::Config, query: &str) -> anyhow::Result<Vec<views::CandView>> {
+/// GitHub repository search → candidate origins (web search assist). Goes
+/// through the shared governor and conditional cache like every other forge
+/// call, so repeated searches revalidate instead of refetching.
+async fn github_search(st: &Arc<AppState>, query: &str) -> anyhow::Result<Vec<views::CandView>> {
+    let cfg = st.cfg().await;
     let url = format!(
         "https://api.github.com/search/repositories?q={}&per_page=5",
         views::urlencode(query)
     );
-    let mut req = reqwest::Client::new()
-        .get(&url)
-        .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "reposilo-import");
-    if let Some(tok) = cfg.github.resolved_token() {
-        req = req.bearer_auth(tok);
-    }
-    let resp = req
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("GitHub API request failed: {e}"))?;
-    let status = resp.status();
-    let body: serde_json::Value = resp.json().await.unwrap_or_default();
-    if !status.is_success() {
-        anyhow::bail!("GitHub API returned {status} (rate limit? add [github] token in config)");
-    }
+    let body = crate::httpcache::conditional_get(&cfg, &st.governor, &st.http_cache, &url, || {
+        let mut req = crate::ratelimit::api_client()
+            .get(&url)
+            .header("Accept", "application/vnd.github+json")
+            .header("User-Agent", "reposilo-import");
+        if let Some(tok) = cfg.github.resolved_token() {
+            req = req.bearer_auth(tok);
+        }
+        req
+    })
+    .await
+    .ok_or_else(|| anyhow::anyhow!("GitHub API request failed (rate limit? add [github] token in config)"))?
+    .body;
+    let body: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
     let items = body["items"].as_array().cloned().unwrap_or_default();
     Ok(items
         .into_iter()
@@ -1122,7 +1122,7 @@ async fn import_suggest(
     };
     let scan_id = q.scan;
     let i = q.i;
-    match github_search(&st.cfg().await, &query).await {
+    match github_search(&st, &query).await {
         Ok(candidates) => render(&views::SuggestT {
             ctx: views::SuggestCtx {
                 i,

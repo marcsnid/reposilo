@@ -75,9 +75,9 @@ fn render_branch_changelog(info: &crate::forgeapi::CompareInfo) -> String {
 
 /// Best-effort changelog for a release: GitHub release notes, or the
 /// matching section of CHANGELOG.md at the tag.
-async fn fetch_changelog(cfg: &Config, gov: &RemoteGovernor, origin: &str, git_dir: &Path, tag: &str, version: Option<&str>) -> Option<String> {
+async fn fetch_changelog(cfg: &Config, gov: &RemoteGovernor, cache: &std::sync::Mutex<crate::httpcache::HttpCache>, origin: &str, git_dir: &Path, tag: &str, version: Option<&str>) -> Option<String> {
     // 1. forge release notes (GitHub only for now)
-    if let Some(body) = crate::forgeapi::github_release_body(cfg, gov, origin, tag).await {
+    if let Some(body) = crate::forgeapi::github_release_body(cfg, gov, cache, origin, tag).await {
         return Some(body);
     }
     // 2. CHANGELOG.md in the tree at the tag
@@ -220,18 +220,30 @@ fn git_host(url: &str) -> Option<String> {
 pub struct Archiver {
     pub cfg: Config,
     /// Per-host request governor. CLI construction makes a private one; the
-    /// server passes its process-wide governor to `with_governor` so jobs
-    /// share pacing state.
+    /// server passes its process-wide governor to `with_governor_and_cache` so
+    /// jobs share pacing state.
     pub governor: Arc<RemoteGovernor>,
+    /// Conditional-request cache for forge API responses. Shared by the server
+    /// across jobs, or loaded from the archive root by the CLI.
+    pub http_cache: Arc<std::sync::Mutex<crate::httpcache::HttpCache>>,
 }
 
 impl Archiver {
     pub fn new(cfg: Config) -> Self {
-        Self { cfg, governor: Arc::new(RemoteGovernor::new()) }
+        let cache = crate::httpcache::HttpCache::load(Path::new(&cfg.archive.root));
+        Self {
+            cfg,
+            governor: Arc::new(RemoteGovernor::new()),
+            http_cache: Arc::new(std::sync::Mutex::new(cache)),
+        }
     }
 
-    pub fn with_governor(cfg: Config, governor: Arc<RemoteGovernor>) -> Self {
-        Self { cfg, governor }
+    pub fn with_governor_and_cache(
+        cfg: Config,
+        governor: Arc<RemoteGovernor>,
+        http_cache: Arc<std::sync::Mutex<crate::httpcache::HttpCache>>,
+    ) -> Self {
+        Self { cfg, governor, http_cache }
     }
 
     /// Add a repo: shallow-bare clone, manifest, initial snapshots.
@@ -319,7 +331,7 @@ impl Archiver {
             .ok()
             .and_then(|tree| crate::files::detect_language(&tree));
         // forge enrichment (GitHub: stars, topics → suggested tags, description)
-        let (stars, suggested_tags, avatar_url) = match crate::forgeapi::github_repo_meta(&self.cfg, &self.governor, url).await {
+        let (stars, suggested_tags, avatar_url) = match crate::forgeapi::github_repo_meta(&self.cfg, &self.governor, &self.http_cache, url).await {
             Some(meta) => {
                 if description.is_none() {
                     description = meta.description;
@@ -521,7 +533,7 @@ impl Archiver {
         let changelog = if let Some(c) = changelog_override {
             Some(c.chars().take(32 * 1024).collect::<String>())
         } else if matches!(kind, SnapshotKind::Release) {
-            fetch_changelog(&self.cfg, &self.governor, origin, git_dir, label, version)
+            fetch_changelog(&self.cfg, &self.governor, &self.http_cache, origin, git_dir, label, version)
                 .await
                 .map(|c| c.chars().take(32 * 1024).collect::<String>())
         } else {
@@ -661,7 +673,7 @@ impl Archiver {
             return Ok(0);
         }
         let Some(release) =
-            crate::releaseapi::fetch_release(&self.cfg, &self.governor, &sidecar.origin, &sidecar.r#ref).await
+            crate::releaseapi::fetch_release(&self.cfg, &self.governor, &self.http_cache, &sidecar.origin, &sidecar.r#ref).await
         else {
             // transient (rate limit, network): leave assets_filters untouched so
             // the next poll retries instead of caching the miss
@@ -783,7 +795,7 @@ impl Archiver {
             && !repo_dir.join("icon").exists()
             && matches!(crate::forge::detect(&origin), Ok(info) if info.kind == crate::forge::ForgeKind::GitHub)
         {
-            if let Some(meta) = crate::forgeapi::github_repo_meta(&self.cfg, &self.governor, &origin).await {
+            if let Some(meta) = crate::forgeapi::github_repo_meta(&self.cfg, &self.governor, &self.http_cache, &origin).await {
                 match meta.avatar_url {
                     Some(url) => {
                         if let Some(bytes) = crate::forgeapi::fetch_avatar(&self.cfg, &self.governor, &url).await {
@@ -913,7 +925,7 @@ impl Archiver {
         // compare the previous and new commits (GitHub only for now)
         if branch_changed {
             let changelog = if !local_sha.is_empty() && !remote_branch_sha.is_empty() {
-                match crate::forgeapi::github_compare(&self.cfg, &self.governor, &origin, &local_sha, &remote_branch_sha).await {
+                match crate::forgeapi::github_compare(&self.cfg, &self.governor, &self.http_cache, &origin, &local_sha, &remote_branch_sha).await {
                     Some(info) => {
                         summary.branch_commits = Some(info.total_commits);
                         Some(render_branch_changelog(&info))
