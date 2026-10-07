@@ -28,6 +28,10 @@ goes away.
 - **Verify** the archive on demand: hash every stored zip against the sha256
   in its sidecar, from `reposilo verify` or a Settings button, to catch missing
   or corrupt files
+- **Pace** outbound API calls per host: requests are spaced and paused when a
+  forge reports a rate limit, so refreshing many repos does not trip
+  GitHub/GitLab/Forgejo limits. Works with anonymous or token auth, is on by
+  default, and can be disabled.
 - **Collect release binaries**: download the platform-specific assets attached
   to a release, filtered to the OS/arch you care about. Names like
   `foo-win64.zip`, `foo-x86_64-unknown-linux-gnu.tar.gz` and `Bar-1.0-arm64.dmg`
@@ -144,6 +148,18 @@ dead_after_days = 21       # stop checking after N days unreachable
 [git]
 # depth = 1                # 1 = shallow snapshot, 0 = full mirror
 # timeout_secs = 600       # hard kill for hung git subprocesses (network hangs)
+
+[remote]
+# Space outbound requests per host so a burst of repos does not trip a forge's
+# rate limiter, and honor the server's own backoff signals. Applies to every
+# forge path (GitHub, GitLab, Forgejo/Codeberg, custom). Set enabled = false
+# to send immediately (the old behavior).
+enabled = true
+min_interval_ms = 500      # minimum gap between requests to the same host
+jitter_ms = 250            # extra random 0..N ms, to avoid lockstep bursts
+respect_rate_limits = true # honor Retry-After / X-RateLimit-* / RateLimit-*
+max_wait_secs = 30         # never block longer than this; skip and retry later
+max_cooldown_secs = 900    # cap on a single rate-limit pause
 
 [github]
 # token = "env:GITHUB_TOKEN"  # better rate limits for enrichment

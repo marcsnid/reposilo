@@ -27,6 +27,7 @@ use crate::archiver::{now_rfc3339, Archiver};
 use crate::importer;
 use crate::config::Config;
 use crate::index::{Index, RepoEntry, SnapshotEntry};
+use crate::ratelimit::RemoteGovernor;
 use crate::types::write_json;
 
 /// Cap on retained job / job-note entries (long-running memory bound).
@@ -95,6 +96,8 @@ pub struct AppState {
     pub listing_cache: Mutex<HashMap<String, (std::time::Instant, Arc<crate::files::ArchiveIndex>)>>,
     /// Runtime + per-day stats for the built-in stats page and OTLP.
     pub metrics: Mutex<crate::metrics::Metrics>,
+    /// Process-wide request governor shared by every add and refresh job.
+    pub governor: Arc<RemoteGovernor>,
     next_job_id: AtomicU64,
     next_scan_id: AtomicU64,
 }
@@ -126,6 +129,7 @@ impl AppState {
             telemetry: std::sync::OnceLock::new(),
             listing_cache: Mutex::new(HashMap::new()),
             metrics: Mutex::new(crate::metrics::Metrics::load(&root)),
+            governor: Arc::new(RemoteGovernor::new()),
             users: std::sync::Mutex::new(crate::auth::Users::load(&root)),
             sessions: crate::auth::SessionStore::new(),
             next_job_id: AtomicU64::new(1),
@@ -785,7 +789,7 @@ pub async fn spawn_add_job(
     tokio::spawn(async move {
         // RAII: release the slug lock even if the job panics or returns early.
         let _lock = lock_key.as_deref().map(|k| RepoLockGuard::new(st2.clone(), k));
-        let result = Archiver::new(st2.cfg().await).add_repo(&url, &tags, notes).await;
+        let result = Archiver::with_governor(st2.cfg().await, st2.governor.clone()).add_repo(&url, &tags, notes).await;
         match result {
             Ok(dir) => {
                 tracing::info!(repo = ?dir, "add finished");
@@ -958,7 +962,7 @@ pub async fn spawn_refresh_job(
         let _permit = permit;
         let dir = { st.index.read().await.find(&rel).cloned().map(|r| r.dir) };
         let result = match dir {
-            Some(dir) => Archiver::new(st.cfg().await).refresh_repo(&dir).await,
+            Some(dir) => Archiver::with_governor(st.cfg().await, st.governor.clone()).refresh_repo(&dir).await,
             None => Err(anyhow::anyhow!("repo disappeared from index")),
         };
         match result {

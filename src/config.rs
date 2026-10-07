@@ -18,6 +18,7 @@ pub struct Config {
     pub gitlab: ForgeTokenCfg,
     pub forgejo: ForgeTokenCfg,
     pub releases: ReleasesCfg,
+    pub remote: RemoteCfg,
     pub llm: LlmCfg,
     pub otel: OtelCfg,
     pub tags: TagsCfg,
@@ -228,6 +229,40 @@ impl ForgeTokenCfg {
     }
 }
 
+/// Outbound request pacing shared by every forge path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RemoteCfg {
+    /// Space outbound HTTP requests per host so a burst of repos does not trip
+    /// a forge's rate limiter. `false` sends immediately.
+    pub enabled: bool,
+    /// Minimum spacing between requests to the same host, in milliseconds.
+    pub min_interval_ms: u64,
+    /// Extra random delay (0..jitter_ms) added to each spacing, to spread a
+    /// fleet of repos instead of firing in lockstep.
+    pub jitter_ms: u64,
+    /// Honor `Retry-After` and rate-limit-reset headers by pausing the host.
+    pub respect_rate_limits: bool,
+    /// Never block longer than this for a paused host; requests that would
+    /// wait longer are skipped and retried on the next scheduler pass.
+    pub max_wait_secs: u64,
+    /// Cap on a single rate-limit cooldown, in seconds.
+    pub max_cooldown_secs: u64,
+}
+
+impl Default for RemoteCfg {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_interval_ms: 500,
+            jitter_ms: 250,
+            respect_rate_limits: true,
+            max_wait_secs: 30,
+            max_cooldown_secs: 900,
+        }
+    }
+}
+
 /// Release binary/asset downloading.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -318,6 +353,26 @@ pub fn default_config_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_cfg_defaults_and_parses() {
+        let d = Config::default();
+        assert!(d.remote.enabled, "pacing is on by default");
+        assert_eq!(d.remote.min_interval_ms, 500);
+        assert!(d.remote.respect_rate_limits);
+
+        // A partial section keeps the other defaults.
+        let cfg: Config =
+            toml::from_str("[remote]\nenabled = false\nmin_interval_ms = 0\n").unwrap();
+        assert!(!cfg.remote.enabled);
+        assert_eq!(cfg.remote.min_interval_ms, 0);
+        assert_eq!(cfg.remote.max_wait_secs, 30);
+        assert_eq!(cfg.remote.max_cooldown_secs, 900);
+
+        // Omitting the section entirely also yields the defaults (fallback).
+        let cfg: Config = toml::from_str("[archive]\nroot = \".\"\n").unwrap();
+        assert!(cfg.remote.enabled);
+    }
 
     #[test]
     fn releases_cfg_roundtrips_toml() {

@@ -3,6 +3,7 @@
 
 use crate::config::Config;
 use crate::forge::{self, ForgeKind};
+use crate::ratelimit::{host_key, send_with_pacing, RemoteGovernor};
 
 pub struct RepoMeta {
     pub stars: u64,
@@ -12,33 +13,38 @@ pub struct RepoMeta {
     pub avatar_url: Option<String>,
 }
 
-fn gh_request(cfg: &Config, origin: &str, suffix: &str) -> Option<reqwest::RequestBuilder> {
-    use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, USER_AGENT};
+/// API URL for a GitHub repo endpoint, or `None` for a non-GitHub origin.
+fn gh_url(origin: &str, suffix: &str) -> Option<String> {
     let info = forge::detect(origin).ok()?;
     if info.kind != ForgeKind::GitHub {
         return None;
     }
-    let mut headers = HeaderMap::new();
-    headers.insert(ACCEPT, HeaderValue::from_static("application/vnd.github+json"));
-    headers.insert(USER_AGENT, HeaderValue::from_static("reposilo"));
-    let client = reqwest::Client::builder()
-        .default_headers(headers)
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .ok()?;
-    let mut req = client.get(format!(
+    Some(format!(
         "https://api.github.com/repos/{}/{}{suffix}",
         info.owner, info.name
-    ));
-    if let Some(tok) = cfg.github.resolved_token() {
-        req = req.bearer_auth(tok);
-    }
-    Some(req)
+    ))
+}
+
+/// Authenticated GitHub API GET, paced by the shared governor.
+async fn gh_get(cfg: &Config, gov: &RemoteGovernor, url: &str) -> Option<reqwest::Response> {
+    use reqwest::header::ACCEPT;
+    let host = host_key(url);
+    send_with_pacing(gov, &cfg.remote, &host, || {
+        let mut req = crate::ratelimit::api_client()
+            .get(url)
+            .header(ACCEPT, "application/vnd.github+json");
+        if let Some(tok) = cfg.github.resolved_token() {
+            req = req.bearer_auth(tok);
+        }
+        req
+    })
+    .await
 }
 
 /// Repo metadata (stars, topics, description). GitHub repos only.
-pub async fn github_repo_meta(cfg: &Config, origin: &str) -> Option<RepoMeta> {
-    let resp: serde_json::Value = gh_request(cfg, origin, "")?.send().await.ok()?.json().await.ok()?;
+pub async fn github_repo_meta(cfg: &Config, gov: &RemoteGovernor, origin: &str) -> Option<RepoMeta> {
+    let url = gh_url(origin, "")?;
+    let resp: serde_json::Value = gh_get(cfg, gov, &url).await?.json().await.ok()?;
     Some(RepoMeta {
         stars: resp["stargazers_count"].as_u64().unwrap_or(0),
         topics: resp["topics"]
@@ -53,7 +59,7 @@ pub async fn github_repo_meta(cfg: &Config, origin: &str) -> Option<RepoMeta> {
 /// Download a small avatar image (best-effort, capped at 2 MB). GitHub
 /// avatars accept a size hint, so we ask for 64px, plenty for a 20-34px UI
 /// at 2x and a fraction of the full-size image.
-pub async fn fetch_avatar(url: &str) -> Option<Vec<u8>> {
+pub async fn fetch_avatar(cfg: &Config, gov: &RemoteGovernor, url: &str) -> Option<Vec<u8>> {
     let url = if url.contains("avatars.githubusercontent.com") {
         if url.contains('?') {
             format!("{url}&s=64")
@@ -63,16 +69,13 @@ pub async fn fetch_avatar(url: &str) -> Option<Vec<u8>> {
     } else {
         url.to_string()
     };
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .ok()?;
-    let resp = client
-        .get(&url)
-        .header(reqwest::header::USER_AGENT, "reposilo")
-        .send()
-        .await
-        .ok()?;
+    let host = host_key(&url);
+    let resp = send_with_pacing(gov, &cfg.remote, &host, || {
+        crate::ratelimit::api_client()
+            .get(&url)
+            .header(reqwest::header::USER_AGENT, "reposilo")
+    })
+    .await?;
     if !resp.status().is_success() {
         return None;
     }
@@ -104,17 +107,13 @@ pub struct CompareInfo {
 /// archive itself only ever keeps shallow copies.
 pub async fn github_compare(
     cfg: &Config,
+    gov: &RemoteGovernor,
     origin: &str,
     base: &str,
     head: &str,
 ) -> Option<CompareInfo> {
-    let resp: serde_json::Value = gh_request(cfg, origin, &format!("/compare/{base}...{head}"))?
-        .send()
-        .await
-        .ok()?
-        .json()
-        .await
-        .ok()?;
+    let url = gh_url(origin, &format!("/compare/{base}...{head}"))?;
+    let resp: serde_json::Value = gh_get(cfg, gov, &url).await?.json().await.ok()?;
     Some(parse_compare(&resp))
 }
 
@@ -144,9 +143,9 @@ fn parse_compare(resp: &serde_json::Value) -> CompareInfo {
 }
 
 /// Release notes (markdown body) for a tag, from the GitHub releases API.
-pub async fn github_release_body(cfg: &Config, origin: &str, tag: &str) -> Option<String> {
-    let resp: serde_json::Value =
-        gh_request(cfg, origin, &format!("/releases/tags/{tag}"))?.send().await.ok()?.json().await.ok()?;
+pub async fn github_release_body(cfg: &Config, gov: &RemoteGovernor, origin: &str, tag: &str) -> Option<String> {
+    let url = gh_url(origin, &format!("/releases/tags/{tag}"))?;
+    let resp: serde_json::Value = gh_get(cfg, gov, &url).await?.json().await.ok()?;
     let body = resp["body"].as_str()?.to_string();
     (!body.trim().is_empty()).then_some(body)
 }
