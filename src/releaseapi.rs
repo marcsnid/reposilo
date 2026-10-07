@@ -174,7 +174,7 @@ pub async fn fetch_release(
 ) -> Option<RemoteRelease> {
     let info = forge::detect(origin).ok()?;
     match info.kind {
-        ForgeKind::GitHub => github(cfg, gov, cache, &info, tag).await,
+        ForgeKind::GitHub => github(crate::forgeapi::GITHUB_API, cfg, gov, cache, &info, tag).await,
         ForgeKind::GitLab => gitlab(cfg, gov, cache, origin, tag).await,
         ForgeKind::Forgejo => forgejo(cfg, gov, cache, origin, &info, tag).await,
         ForgeKind::Generic => None,
@@ -182,6 +182,7 @@ pub async fn fetch_release(
 }
 
 async fn github(
+    base: &str,
     cfg: &Config,
     gov: &RemoteGovernor,
     cache: &std::sync::Mutex<crate::httpcache::HttpCache>,
@@ -189,10 +190,10 @@ async fn github(
     tag: &str,
 ) -> Option<RemoteRelease> {
     use reqwest::header::ACCEPT;
-    let client = crate::ratelimit::api_client();
+    let client = crate::ratelimit::api_client()?;
     let token = cfg.github.resolved_token();
     let url = format!(
-        "https://api.github.com/repos/{}/{}/releases/tags/{}",
+        "{base}/repos/{}/{}/releases/tags/{}",
         info.owner,
         info.name,
         percent_encode(tag)
@@ -207,26 +208,7 @@ async fn github(
     .await?
     .body;
     let v: Value = serde_json::from_str(&body).ok()?;
-    let assets = v["assets"]
-        .as_array()?
-        .iter()
-        .filter_map(|a| {
-            let name = a["name"].as_str()?.to_string();
-            let api = a["url"].as_str().map(str::to_string);
-            let url = a["browser_download_url"]
-                .as_str()
-                .map(str::to_string)
-                .or_else(|| api.clone())?;
-            Some(RemoteAsset {
-                name,
-                url,
-                api_url: api,
-                size: a["size"].as_u64(),
-                content_type: a["content_type"].as_str().map(str::to_string),
-                digest: a["digest"].as_str().map(str::to_string),
-            })
-        })
-        .collect();
+    let assets = parse_github_assets(&v)?;
     Some(RemoteRelease { tag: tag.to_string(), assets })
 }
 
@@ -238,7 +220,7 @@ async fn gitlab(
     tag: &str,
 ) -> Option<RemoteRelease> {
     let origin = parse_origin(origin)?;
-    let client = crate::ratelimit::api_client();
+    let client = crate::ratelimit::api_client()?;
     let token = cfg.gitlab.resolved_token();
     let url = format!(
         "{}/api/v4/projects/{}/releases/{}",
@@ -256,20 +238,7 @@ async fn gitlab(
     .await?
     .body;
     let v: Value = serde_json::from_str(&body).ok()?;
-    let assets = v["assets"]["links"]
-        .as_array()?
-        .iter()
-        .filter_map(|a| {
-            let name = a["name"].as_str()?.to_string();
-            // direct_asset_url is the stable download link; url may be any
-            // external host the maintainer attached.
-            let url = a["direct_asset_url"]
-                .as_str()
-                .or_else(|| a["url"].as_str())?
-                .to_string();
-            Some(RemoteAsset { name, url, api_url: None, size: None, content_type: None, digest: None })
-        })
-        .collect();
+    let assets = parse_gitlab_assets(&v)?;
     Some(RemoteRelease { tag: tag.to_string(), assets })
 }
 
@@ -282,7 +251,7 @@ async fn forgejo(
     tag: &str,
 ) -> Option<RemoteRelease> {
     let origin = parse_origin(origin)?;
-    let client = crate::ratelimit::api_client();
+    let client = crate::ratelimit::api_client()?;
     let token = cfg.forgejo.resolved_token();
     let url = format!(
         "{}/api/v1/repos/{}/{}/releases/tags/{}",
@@ -301,23 +270,76 @@ async fn forgejo(
     .await?
     .body;
     let v: Value = serde_json::from_str(&body).ok()?;
-    let assets = v["assets"]
-        .as_array()?
-        .iter()
-        .filter_map(|a| {
-            let name = a["name"].as_str()?.to_string();
-            let url = a["browser_download_url"].as_str()?.to_string();
-            Some(RemoteAsset {
-                name,
-                url,
-                api_url: None,
-                size: a["size"].as_u64(),
-                content_type: None,
-                digest: None,
-            })
-        })
-        .collect();
+    let assets = parse_forgejo_assets(&v)?;
     Some(RemoteRelease { tag: tag.to_string(), assets })
+}
+
+/// GitHub release payload -> downloadable assets. `None` when the payload has
+/// no `assets` array at all.
+fn parse_github_assets(v: &Value) -> Option<Vec<RemoteAsset>> {
+    Some(
+        v["assets"]
+            .as_array()?
+            .iter()
+            .filter_map(|a| {
+                let name = a["name"].as_str()?.to_string();
+                let api = a["url"].as_str().map(str::to_string);
+                let url = a["browser_download_url"]
+                    .as_str()
+                    .map(str::to_string)
+                    .or_else(|| api.clone())?;
+                Some(RemoteAsset {
+                    name,
+                    url,
+                    api_url: api,
+                    size: a["size"].as_u64(),
+                    content_type: a["content_type"].as_str().map(str::to_string),
+                    digest: a["digest"].as_str().map(str::to_string),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// GitLab release payload -> downloadable assets. `direct_asset_url` is the
+/// stable link; `url` may be any external host the maintainer attached.
+fn parse_gitlab_assets(v: &Value) -> Option<Vec<RemoteAsset>> {
+    Some(
+        v["assets"]["links"]
+            .as_array()?
+            .iter()
+            .filter_map(|a| {
+                let name = a["name"].as_str()?.to_string();
+                let url = a["direct_asset_url"]
+                    .as_str()
+                    .or_else(|| a["url"].as_str())?
+                    .to_string();
+                Some(RemoteAsset { name, url, api_url: None, size: None, content_type: None, digest: None })
+            })
+            .collect(),
+    )
+}
+
+/// Forgejo/Gitea release payload -> downloadable assets.
+fn parse_forgejo_assets(v: &Value) -> Option<Vec<RemoteAsset>> {
+    Some(
+        v["assets"]
+            .as_array()?
+            .iter()
+            .filter_map(|a| {
+                let name = a["name"].as_str()?.to_string();
+                let url = a["browser_download_url"].as_str()?.to_string();
+                Some(RemoteAsset {
+                    name,
+                    url,
+                    api_url: None,
+                    size: a["size"].as_u64(),
+                    content_type: None,
+                    digest: None,
+                })
+            })
+            .collect(),
+    )
 }
 
 /// Whether a failed attempt is worth retrying. Once bytes are streaming we
@@ -643,4 +665,129 @@ mod tests {
         a.digest = Some("not-a-digest".into());
         assert!(a.expected_sha256().is_none());
     }
+
+    #[test]
+    fn github_assets_prefer_the_browser_url_and_keep_api_details() {
+        let v = serde_json::json!({
+            "assets": [
+                {
+                    "name": "tool-linux-x64.tar.gz",
+                    "url": "https://api.github.com/repos/o/r/releases/assets/1",
+                    "browser_download_url": "https://github.com/o/r/releases/download/v1/tool-linux-x64.tar.gz",
+                    "size": 123,
+                    "content_type": "application/gzip",
+                    "digest": "sha256:abc"
+                },
+                { "name": "no-url" }
+            ]
+        });
+        let assets = parse_github_assets(&v).unwrap();
+        assert_eq!(assets.len(), 1, "an asset without a URL is skipped");
+        assert_eq!(assets[0].name, "tool-linux-x64.tar.gz");
+        assert_eq!(
+            assets[0].url,
+            "https://github.com/o/r/releases/download/v1/tool-linux-x64.tar.gz"
+        );
+        assert_eq!(
+            assets[0].api_url.as_deref(),
+            Some("https://api.github.com/repos/o/r/releases/assets/1")
+        );
+        assert_eq!(assets[0].size, Some(123));
+        assert_eq!(assets[0].digest.as_deref(), Some("sha256:abc"));
+        assert!(parse_github_assets(&serde_json::json!({})).is_none(), "missing assets array");
+    }
+
+    #[test]
+    fn gitlab_assets_prefer_the_direct_url_and_fall_back() {
+        let v = serde_json::json!({
+            "assets": { "links": [
+                { "name": "app.deb", "direct_asset_url": "https://gitlab.com/dl/app.deb", "url": "https://external/app" },
+                { "name": "fallback.bin", "url": "https://external/fallback.bin" }
+            ]}
+        });
+        let assets = parse_gitlab_assets(&v).unwrap();
+        assert_eq!(assets.len(), 2);
+        assert_eq!(assets[0].url, "https://gitlab.com/dl/app.deb");
+        assert_eq!(assets[1].url, "https://external/fallback.bin");
+        assert!(parse_gitlab_assets(&serde_json::json!({ "assets": {} })).is_none());
+    }
+
+    #[test]
+    fn forgejo_assets_need_a_name_and_url() {
+        let v = serde_json::json!({
+            "assets": [
+                { "name": "tool.exe", "browser_download_url": "https://codeberg.org/o/r/releases/download/v1/tool.exe", "size": 9 },
+                { "browser_download_url": "https://codeberg.org/o/r/releases/download/v1/noname" }
+            ]
+        });
+        let assets = parse_forgejo_assets(&v).unwrap();
+        assert_eq!(assets.len(), 1, "an asset without a name is skipped");
+        assert_eq!(assets[0].name, "tool.exe");
+        assert_eq!(assets[0].size, Some(9));
+    }
+
+    // End-to-end lookups through a local server, covering the URL, the
+    // governor/cache path, and the parse for each forge.
+
+    #[tokio::test]
+    async fn github_release_lookup_end_to_end() {
+        let server = crate::testserver::spawn(
+            200,
+            r#"{"assets":[{"name":"tool-linux-x64.tar.gz","browser_download_url":"http://dl/x","size":5}]}"#,
+        )
+        .await;
+        let cfg = Config::default();
+        let gov = RemoteGovernor::new();
+        let cache = std::sync::Mutex::new(crate::httpcache::HttpCache::empty());
+        let info = forge::ForgeInfo {
+            kind: forge::ForgeKind::GitHub,
+            owner: "o".into(),
+            name: "r".into(),
+        };
+        let rel = super::github(&server.base, &cfg, &gov, &cache, &info, "v1.0.0").await.unwrap();
+        assert_eq!(rel.tag, "v1.0.0");
+        assert_eq!(rel.assets.len(), 1);
+        assert_eq!(rel.assets[0].name, "tool-linux-x64.tar.gz");
+        assert_eq!(server.paths(), vec!["/repos/o/r/releases/tags/v1.0.0"]);
+    }
+
+    #[tokio::test]
+    async fn gitlab_release_lookup_end_to_end() {
+        let server = crate::testserver::spawn(
+            200,
+            r#"{"assets":{"links":[{"name":"app.deb","direct_asset_url":"http://dl/app.deb"}]}}"#,
+        )
+        .await;
+        let cfg = Config::default();
+        let gov = RemoteGovernor::new();
+        let cache = std::sync::Mutex::new(crate::httpcache::HttpCache::empty());
+        let origin = format!("{}/group/proj", server.base);
+        let rel = super::gitlab(&cfg, &gov, &cache, &origin, "v1.0.0").await.unwrap();
+        assert_eq!(rel.assets.len(), 1);
+        assert_eq!(rel.assets[0].name, "app.deb");
+        assert_eq!(server.paths(), vec!["/api/v4/projects/group%2Fproj/releases/v1.0.0"]);
+    }
+
+    #[tokio::test]
+    async fn forgejo_release_lookup_end_to_end() {
+        let server = crate::testserver::spawn(
+            200,
+            r#"{"assets":[{"name":"tool.exe","browser_download_url":"http://dl/tool.exe","size":9}]}"#,
+        )
+        .await;
+        let cfg = Config::default();
+        let gov = RemoteGovernor::new();
+        let cache = std::sync::Mutex::new(crate::httpcache::HttpCache::empty());
+        let info = forge::ForgeInfo {
+            kind: forge::ForgeKind::Forgejo,
+            owner: "o".into(),
+            name: "r".into(),
+        };
+        let origin = format!("{}/o/r", server.base);
+        let rel = super::forgejo(&cfg, &gov, &cache, &origin, &info, "v1.0.0").await.unwrap();
+        assert_eq!(rel.assets.len(), 1);
+        assert_eq!(rel.assets[0].name, "tool.exe");
+        assert_eq!(server.paths(), vec!["/api/v1/repos/o/r/releases/tags/v1.0.0"]);
+    }
+
 }

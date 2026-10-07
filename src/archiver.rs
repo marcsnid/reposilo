@@ -1201,6 +1201,14 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_replaces_unsafe_chars_and_keeps_safe_ones() {
+        assert_eq!(sanitize(""), "");
+        assert_eq!(sanitize("a b/c:d"), "a_b_c_d");
+        assert_eq!(sanitize("caf\u{e9}"), "caf_", "non-ascii becomes an underscore");
+        assert_eq!(sanitize(".._etc"), ".._etc", "dots are preserved");
+    }
+
+    #[test]
     fn branch_changelog_lists_commits_and_summary() {
         let info = crate::forgeapi::CompareInfo {
             total_commits: 2,

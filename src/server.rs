@@ -425,7 +425,11 @@ impl AppState {
 
     /// Current index-derived gauges (repos, snapshots, dead/unavailable...).
     pub async fn totals(&self) -> crate::metrics::Totals {
-        let (cache_hits, cache_misses) = self.http_cache.lock().unwrap().stats();
+        let (cache_hits, cache_misses) = self
+            .http_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .stats();
         let (rate_limited, requests_skipped) = self.governor.counters();
         let paused_hosts = self
             .governor
@@ -512,6 +516,23 @@ impl Drop for RepoLockGuard {
         if let Ok(mut set) = self.st.running.lock() {
             set.remove(&self.key);
         }
+    }
+}
+
+/// Clears `verify_active` when dropped, so a panicking verify task cannot
+/// leave the scheduled loop permanently skipping checks.
+struct VerifyActiveGuard(Arc<AppState>);
+
+impl VerifyActiveGuard {
+    fn new(st: Arc<AppState>) -> Self {
+        st.verify_active.store(true, Ordering::Relaxed);
+        Self(st)
+    }
+}
+
+impl Drop for VerifyActiveGuard {
+    fn drop(&mut self) {
+        self.0.verify_active.store(false, Ordering::Relaxed);
     }
 }
 
@@ -1100,7 +1121,8 @@ async fn spawn_verify_job_inner(st: &Arc<AppState>, scheduled: bool) -> u64 {
     let root = st.root().await;
     let st2 = st.clone();
     tokio::spawn(async move {
-        st2.verify_active.store(true, Ordering::Relaxed);
+        // Marks a check as running and clears it even if the task panics.
+        let _active = VerifyActiveGuard::new(st2.clone());
         tracing::info!(scheduled, job = id, "integrity check started");
         let progress = Arc::new(std::sync::Mutex::new(crate::verify::VerifyProgress::default()));
         let progress_cb = progress.clone();
@@ -1126,7 +1148,6 @@ async fn spawn_verify_job_inner(st: &Arc<AppState>, scheduled: bool) -> u64 {
                 }
             }
         };
-        st2.verify_active.store(false, Ordering::Relaxed);
         match outcome {
             Ok(report) => {
                 st2.set_job_note(id, report.summary()).await;
@@ -1278,17 +1299,24 @@ async fn repo_patch(
     Ok(ok_json(repo_json(&updated, false)))
 }
 
+/// Remove a repo's files, or just its manifest when `delete_files` is false.
+/// No locking or reindexing; callers handle those (bulk delete does one
+/// reindex for the whole batch).
+pub async fn unregister_repo(repo: &RepoEntry, delete_files: bool) -> std::io::Result<()> {
+    if delete_files {
+        tokio::fs::remove_dir_all(&repo.dir).await
+    } else {
+        tokio::fs::remove_file(repo.dir.join("repo.json")).await
+    }
+}
+
 /// Delete (unregister and optionally remove files) a repo. Shared by the API
 /// and the web UI. Returns the API error shape on failure.
 pub async fn delete_repo(st: &Arc<AppState>, repo: &RepoEntry, delete_files: bool) -> Result<(), ApiError> {
     if !st.try_lock_repo(&repo.rel).await {
         return Err(ApiError::conflict("a job is running for this repo"));
     }
-    let result = if delete_files {
-        tokio::fs::remove_dir_all(&repo.dir).await
-    } else {
-        tokio::fs::remove_file(repo.dir.join("repo.json")).await
-    };
+    let result = unregister_repo(repo, delete_files).await;
     st.unlock_repo(&repo.rel).await;
     result.map_err(|e| ApiError::internal(anyhow::anyhow!("delete failed: {e}")))?;
     st.reindex().await.map_err(ApiError::internal)?;
@@ -1574,6 +1602,8 @@ async fn verify_loop(st: Arc<AppState>) {
 /// can be toggled live; a no-op timer when telemetry is disabled.
 async fn otel_loop(st: Arc<AppState>) {
     loop {
+        // Persist any deferred conditional-cache writes.
+        st.http_cache.lock().unwrap_or_else(|e| e.into_inner()).flush();
         let cfg = st.cfg().await;
         if cfg.otel.enabled {
             let totals = st.totals().await;
@@ -1597,8 +1627,12 @@ async fn otel_loop(st: Arc<AppState>) {
 /// One span per HTTP request (method, path, final status). Exported as an OTLP
 /// trace when `[otel] traces` is on.
 async fn trace_request(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
-    let method = req.method().clone();
     let path = req.uri().path().to_string();
+    // Health checks and static assets are high-frequency and uninteresting.
+    if path == "/healthz" || path.starts_with("/assets/") {
+        return next.run(req).await;
+    }
+    let method = req.method().clone();
     let span = tracing::info_span!(
         "http.request",
         http.method = %method,
@@ -1690,6 +1724,20 @@ mod tests {
         assert!(!verify_is_due(Some(&rfc_days_ago(0)), 7));
         assert!(!verify_is_due(Some(&rfc_days_ago(6)), 7));
         assert!(verify_is_due(Some(&rfc_days_ago(8)), 7));
+    }
+
+    #[tokio::test]
+    async fn verify_active_guard_resets_the_flag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.archive.root = tmp.path().to_string_lossy().into_owned();
+        let st = Arc::new(AppState::new(cfg, None).await.unwrap());
+        assert!(!st.verify_active.load(Ordering::Relaxed));
+        {
+            let _guard = VerifyActiveGuard::new(st.clone());
+            assert!(st.verify_active.load(Ordering::Relaxed));
+        }
+        assert!(!st.verify_active.load(Ordering::Relaxed), "the guard must clear it");
     }
 
     /// `totals()` must sum stored bytes from the sidecars and rank the repos.

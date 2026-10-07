@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -20,8 +21,13 @@ use crate::ratelimit::{send_with_pacing, RemoteGovernor};
 /// Cap on cached URLs and on the total body bytes kept on disk.
 const MAX_ENTRIES: usize = 512;
 const MAX_BYTES: usize = 4 * 1024 * 1024;
+/// Cap on a single response we are willing to buffer at all, before caching.
+const MAX_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
 /// Cache file under the archive root.
 const CACHE_FILE: &str = "http-cache.json";
+/// Writes are deferred by this much so a burst of API responses does not
+/// rewrite the whole file on every request.
+const SAVE_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CacheEntry {
@@ -51,6 +57,9 @@ pub struct HttpCache {
     entries: HashMap<String, CacheEntry>,
     hits: AtomicU64,
     misses: AtomicU64,
+    /// When the file was last written, and whether changes are pending.
+    last_save: Option<Instant>,
+    dirty: bool,
 }
 
 impl HttpCache {
@@ -64,6 +73,8 @@ impl HttpCache {
             entries: file.entries,
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
+            last_save: None,
+            dirty: false,
         }
     }
 
@@ -78,14 +89,25 @@ impl HttpCache {
         self.entries.get(url).map(|e| (e.etag.clone(), e.body.clone()))
     }
 
-    /// Store a body and its ETag, then prune and persist.
+    /// Store a body and its ETag, prune, and persist (at most every
+    /// `SAVE_INTERVAL`; call `flush` to force a write).
     pub fn put(&mut self, url: &str, etag: &str, body: &str) {
         self.entries.insert(
             url.to_string(),
             CacheEntry { etag: etag.to_string(), body: body.to_string(), at: unix_now() },
         );
         self.prune();
-        self.save();
+        self.dirty = true;
+        if self.last_save.is_none_or(|t| t.elapsed() >= SAVE_INTERVAL) {
+            self.save_now();
+        }
+    }
+
+    /// Force any deferred writes to disk.
+    pub fn flush(&mut self) {
+        if self.dirty {
+            self.save_now();
+        }
     }
 
     /// Drop least-recently-stored entries until the count and byte bounds hold.
@@ -108,12 +130,13 @@ impl HttpCache {
         }
     }
 
-    fn save(&self) {
-        let Some(path) = &self.path else {
-            return;
-        };
-        let file = CacheFileRef { entries: &self.entries };
-        let _ = crate::types::write_json(path, &file);
+    fn save_now(&mut self) {
+        if let Some(path) = &self.path {
+            let file = CacheFileRef { entries: &self.entries };
+            let _ = crate::types::write_json(path, &file);
+        }
+        self.last_save = Some(Instant::now());
+        self.dirty = false;
     }
 
     pub fn hit(&self) {
@@ -135,6 +158,12 @@ fn unix_now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// Lock the cache, recovering from a poisoned mutex instead of panicking so a
+/// single bad request cannot take down every later one.
+fn lock_cache(cache: &std::sync::Mutex<HttpCache>) -> std::sync::MutexGuard<'_, HttpCache> {
+    cache.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// A response body plus whether it came from the cache instead of the network.
@@ -159,7 +188,7 @@ where
     F: FnMut() -> reqwest::RequestBuilder,
 {
     let cached = if cfg.cache.conditional {
-        cache.lock().unwrap().get(url)
+        lock_cache(cache).get(url)
     } else {
         None
     };
@@ -179,12 +208,18 @@ where
             // A 304 we cannot serve means the cache was lost; treat as a miss.
             return None;
         };
-        cache.lock().unwrap().hit();
+        lock_cache(cache).hit();
         tracing::debug!(url, "http cache revalidated (304)");
         return Some(Fetched { body, from_cache: true });
     }
     if !resp.status().is_success() {
         return None;
+    }
+    if let Some(len) = resp.content_length() {
+        if len > MAX_RESPONSE_BYTES {
+            tracing::warn!(url, len, "forge API response too large; skipping");
+            return None;
+        }
     }
     let new_etag = resp
         .headers()
@@ -193,9 +228,9 @@ where
         .map(str::to_string);
     let body = resp.text().await.ok()?;
     if cfg.cache.conditional {
-        cache.lock().unwrap().miss();
+        lock_cache(cache).miss();
         if let Some(etag) = new_etag {
-            cache.lock().unwrap().put(url, &etag, &body);
+            lock_cache(cache).put(url, &etag, &body);
         }
     }
     Some(Fetched { body, from_cache: false })
@@ -242,4 +277,48 @@ mod tests {
         let total: usize = cache.entries.values().map(|e| e.body.len()).sum();
         assert!(total <= MAX_BYTES, "byte cap must hold, got {total}");
     }
+
+    /// A panic while the cache is locked must not make every later request
+    /// panic too: `lock_cache` recovers from the poison.
+    #[test]
+    fn lock_cache_recovers_from_a_poisoned_mutex() {
+        let cache = std::sync::Mutex::new(HttpCache::empty());
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = cache.lock().unwrap();
+            panic!("poison the mutex");
+        }));
+        assert!(cache.lock().is_err(), "the mutex should now be poisoned");
+        let mut guard = lock_cache(&cache);
+        guard.put("https://api.example/x", "\"e\"", "body");
+        assert_eq!(guard.get("https://api.example/x"), Some(("\"e\"".into(), "body".into())));
+    }
+
+    /// Repeated writes within the save interval are deferred; `flush` forces
+    /// them out.
+    #[test]
+    fn deferred_saves_flush_on_demand() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cache = HttpCache::load(tmp.path());
+        cache.put("https://api.example/a", "\"e\"", "a"); // first write saves immediately
+        cache.put("https://api.example/b", "\"e\"", "b"); // deferred by the save interval
+
+        let reloaded = HttpCache::load(tmp.path());
+        assert!(reloaded.get("https://api.example/a").is_some());
+        assert!(reloaded.get("https://api.example/b").is_none(), "second write is deferred");
+
+        cache.flush();
+        let reloaded = HttpCache::load(tmp.path());
+        assert!(reloaded.get("https://api.example/b").is_some(), "flush persists it");
+    }
+
+    /// A single body larger than the whole cache budget must be dropped, not
+    /// loop forever trying to make room.
+    #[test]
+    fn a_single_oversized_body_is_dropped() {
+        let mut cache = HttpCache::empty();
+        let huge = "x".repeat(MAX_BYTES + 1);
+        cache.put("https://api.example/huge", "\"e\"", &huge);
+        assert!(cache.entries.is_empty(), "an oversized entry must be dropped");
+    }
+
 }

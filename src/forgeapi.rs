@@ -13,16 +13,16 @@ pub struct RepoMeta {
     pub avatar_url: Option<String>,
 }
 
+/// The public GitHub API base. Unit tests point this at a local server.
+pub(crate) const GITHUB_API: &str = "https://api.github.com";
+
 /// API URL for a GitHub repo endpoint, or `None` for a non-GitHub origin.
-fn gh_url(origin: &str, suffix: &str) -> Option<String> {
+fn gh_url(base: &str, origin: &str, suffix: &str) -> Option<String> {
     let info = forge::detect(origin).ok()?;
     if info.kind != ForgeKind::GitHub {
         return None;
     }
-    Some(format!(
-        "https://api.github.com/repos/{}/{}{suffix}",
-        info.owner, info.name
-    ))
+    Some(format!("{base}/repos/{}/{}{suffix}", info.owner, info.name))
 }
 
 /// Authenticated GitHub API GET, paced by the shared governor and revalidated
@@ -34,10 +34,9 @@ async fn gh_get(
     url: &str,
 ) -> Option<String> {
     use reqwest::header::ACCEPT;
+    let client = crate::ratelimit::api_client()?;
     crate::httpcache::conditional_get(cfg, gov, cache, url, || {
-        let mut req = crate::ratelimit::api_client()
-            .get(url)
-            .header(ACCEPT, "application/vnd.github+json");
+        let mut req = client.get(url).header(ACCEPT, "application/vnd.github+json");
         if let Some(tok) = cfg.github.resolved_token() {
             req = req.bearer_auth(tok);
         }
@@ -54,10 +53,28 @@ pub async fn github_repo_meta(
     cache: &std::sync::Mutex<crate::httpcache::HttpCache>,
     origin: &str,
 ) -> Option<RepoMeta> {
-    let url = gh_url(origin, "")?;
+    github_repo_meta_at(GITHUB_API, cfg, gov, cache, origin).await
+}
+
+/// `github_repo_meta` against an explicit API base, so tests can use a local
+/// server.
+async fn github_repo_meta_at(
+    base: &str,
+    cfg: &Config,
+    gov: &RemoteGovernor,
+    cache: &std::sync::Mutex<crate::httpcache::HttpCache>,
+    origin: &str,
+) -> Option<RepoMeta> {
+    let url = gh_url(base, origin, "")?;
     let body = gh_get(cfg, gov, cache, &url).await?;
     let resp: serde_json::Value = serde_json::from_str(&body).ok()?;
-    Some(RepoMeta {
+    Some(parse_repo_meta(&resp))
+}
+
+/// Pure parser for the GitHub repo payload (kept separate so it can be tested
+/// without a network call).
+fn parse_repo_meta(resp: &serde_json::Value) -> RepoMeta {
+    RepoMeta {
         stars: resp["stargazers_count"].as_u64().unwrap_or(0),
         topics: resp["topics"]
             .as_array()
@@ -65,7 +82,7 @@ pub async fn github_repo_meta(
             .unwrap_or_default(),
         description: resp["description"].as_str().map(String::from),
         avatar_url: resp["owner"]["avatar_url"].as_str().map(String::from),
-    })
+    }
 }
 
 /// Download a small avatar image (best-effort, capped at 2 MB). GitHub
@@ -81,9 +98,10 @@ pub async fn fetch_avatar(cfg: &Config, gov: &RemoteGovernor, url: &str) -> Opti
     } else {
         url.to_string()
     };
+    let client = crate::ratelimit::api_client()?;
     let host = host_key(&url);
     let resp = send_with_pacing(gov, &cfg.remote, &host, || {
-        crate::ratelimit::api_client()
+        client
             .get(&url)
             .header(reqwest::header::USER_AGENT, "reposilo")
     })
@@ -125,7 +143,7 @@ pub async fn github_compare(
     base: &str,
     head: &str,
 ) -> Option<CompareInfo> {
-    let url = gh_url(origin, &format!("/compare/{base}...{head}"))?;
+    let url = gh_url(GITHUB_API, origin, &format!("/compare/{base}...{head}"))?;
     let body = gh_get(cfg, gov, cache, &url).await?;
     let resp: serde_json::Value = serde_json::from_str(&body).ok()?;
     Some(parse_compare(&resp))
@@ -164,7 +182,7 @@ pub async fn github_release_body(
     origin: &str,
     tag: &str,
 ) -> Option<String> {
-    let url = gh_url(origin, &format!("/releases/tags/{tag}"))?;
+    let url = gh_url(GITHUB_API, origin, &format!("/releases/tags/{tag}"))?;
     let body = gh_get(cfg, gov, cache, &url).await?;
     let resp: serde_json::Value = serde_json::from_str(&body).ok()?;
     let notes = resp["body"].as_str()?.to_string();
@@ -173,7 +191,28 @@ pub async fn github_release_body(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_compare;
+    use super::{parse_compare, parse_repo_meta};
+
+    #[test]
+    fn parse_repo_meta_extracts_fields_and_tolerates_missing() {
+        let payload = serde_json::json!({
+            "stargazers_count": 1234,
+            "topics": ["cli", "rust"],
+            "description": "Fast search",
+            "owner": { "avatar_url": "https://avatars.example/x" }
+        });
+        let meta = parse_repo_meta(&payload);
+        assert_eq!(meta.stars, 1234);
+        assert_eq!(meta.topics, vec!["cli", "rust"]);
+        assert_eq!(meta.description.as_deref(), Some("Fast search"));
+        assert_eq!(meta.avatar_url.as_deref(), Some("https://avatars.example/x"));
+
+        let empty = parse_repo_meta(&serde_json::json!({}));
+        assert_eq!(empty.stars, 0);
+        assert!(empty.topics.is_empty());
+        assert!(empty.description.is_none());
+        assert!(empty.avatar_url.is_none());
+    }
 
     #[test]
     fn parse_compare_extracts_commit_readout() {
@@ -214,5 +253,57 @@ mod tests {
         let info = parse_compare(&serde_json::json!({}));
         assert_eq!(info.total_commits, 0);
         assert!(info.commits.is_empty());
+    }
+
+    /// The full request path: URL, governor, conditional cache, auth header,
+    /// and parse, against a local server.
+    #[tokio::test]
+    async fn github_repo_meta_end_to_end() {
+        let server = crate::testserver::spawn(
+            200,
+            r#"{"stargazers_count":7,"topics":["cli"],"description":"d","owner":{"avatar_url":"a"}}"#,
+        )
+        .await;
+        let mut cfg = crate::config::Config::default();
+        let gov = crate::ratelimit::RemoteGovernor::new();
+        let cache = std::sync::Mutex::new(crate::httpcache::HttpCache::empty());
+
+        let meta = super::github_repo_meta_at(
+            &server.base,
+            &cfg,
+            &gov,
+            &cache,
+            "https://github.com/o/r",
+        )
+        .await
+        .unwrap();
+        assert_eq!(meta.stars, 7);
+        assert_eq!(meta.topics, vec!["cli"]);
+        assert_eq!(meta.description.as_deref(), Some("d"));
+        assert_eq!(meta.avatar_url.as_deref(), Some("a"));
+        assert_eq!(server.paths(), vec!["/repos/o/r"], "the real endpoint must be used");
+        assert_eq!(server.count(), 1);
+        assert!(
+            !server.requests.lock().unwrap()[0]
+                .headers
+                .to_ascii_lowercase()
+                .contains("authorization"),
+            "no token means no Authorization header"
+        );
+
+        // A configured token is attached to the request.
+        cfg.github.token = Some("secret".into());
+        let cache2 = std::sync::Mutex::new(crate::httpcache::HttpCache::empty());
+        let _ = super::github_repo_meta_at(&server.base, &cfg, &gov, &cache2, "https://github.com/o/r")
+            .await
+            .unwrap();
+        assert_eq!(server.count(), 2);
+        assert!(
+            server.requests.lock().unwrap()[1]
+                .headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearer secret"),
+            "the token must be sent as a bearer header"
+        );
     }
 }

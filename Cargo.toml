@@ -28,7 +28,7 @@ opentelemetry = "0.33"
 opentelemetry_sdk = { version = "0.33", features = ["logs", "metrics", "trace"] }
 opentelemetry-otlp = { version = "0.33", default-features = false, features = ["logs", "metrics", "trace", "http-proto", "reqwest-blocking-client", "tls-ring", "tls-webpki-roots"] }
 opentelemetry-appender-tracing = "0.33"
-tracing-opentelemetry = "0.34"
+tracing-opentelemetry = { version = "0.34", default-features = false }
 askama = "0.14"
 pulldown-cmark = "0.13"
 zip = "4"

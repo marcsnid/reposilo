@@ -935,8 +935,15 @@ async fn bulk_delete(st: &Arc<AppState>, rels: &[String], delete_files: bool) ->
             skipped += 1;
             continue;
         };
-        // delete_repo takes the repo lock itself, so do not hold it here.
-        match crate::server::delete_repo(st, &repo, delete_files).await {
+        if !st.try_lock_repo(rel).await {
+            skipped += 1;
+            continue;
+        }
+        // Remove the files here and reindex once for the whole batch, instead
+        // of rebuilding the index for every repo.
+        let result = crate::server::unregister_repo(&repo, delete_files).await;
+        st.unlock_repo(rel).await;
+        match result {
             Ok(()) => deleted += 1,
             Err(_) => skipped += 1,
         }
@@ -1300,8 +1307,10 @@ async fn github_search(st: &Arc<AppState>, query: &str) -> anyhow::Result<Vec<vi
         "https://api.github.com/search/repositories?q={}&per_page=5",
         views::urlencode(query)
     );
+    let client = crate::ratelimit::api_client()
+        .ok_or_else(|| anyhow::anyhow!("cannot build the HTTP client"))?;
     let body = crate::httpcache::conditional_get(&cfg, &st.governor, &st.http_cache, &url, || {
-        let mut req = crate::ratelimit::api_client()
+        let mut req = client
             .get(&url)
             .header("Accept", "application/vnd.github+json")
             .header("User-Agent", "reposilo-import");

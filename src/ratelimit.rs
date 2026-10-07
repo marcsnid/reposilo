@@ -25,6 +25,11 @@ use tokio::sync::Mutex;
 use crate::config::RemoteCfg;
 use crate::telemetry::Telemetry;
 
+/// Caps so adversarial config values cannot overflow `Instant` arithmetic.
+const MAX_INTERVAL_MS: u64 = 24 * 60 * 60 * 1000; // 1 day
+const MAX_JITTER_MS: u64 = 60 * 1000; // 1 minute
+const MAX_COOLDOWN_SECS: u64 = 7 * 24 * 60 * 60; // 7 days
+
 /// Per-host pacing state.
 #[derive(Debug, Default)]
 struct HostState {
@@ -91,7 +96,7 @@ impl RemoteGovernor {
         if !cfg.enabled {
             return true;
         }
-        let interval = Duration::from_millis(cfg.min_interval_ms);
+        let interval = Duration::from_millis(cfg.min_interval_ms.min(MAX_INTERVAL_MS));
         loop {
             let now = Instant::now();
             let wait = {
@@ -105,8 +110,10 @@ impl RemoteGovernor {
                     .unwrap_or(now)
                     .max(st.paused_until.unwrap_or(now));
                 if earliest <= now {
-                    st.next_allowed =
-                        Some(now + interval + Duration::from_millis(jitter_ms(cfg.jitter_ms)));
+                    st.next_allowed = Some(
+                        now + interval
+                            + Duration::from_millis(jitter_ms(cfg.jitter_ms.min(MAX_JITTER_MS))),
+                    );
                     return true;
                 }
                 earliest - now
@@ -142,7 +149,7 @@ impl RemoteGovernor {
         }
 
         let Some(d) = cooldown else { return };
-        let d = d.min(Duration::from_secs(cfg.max_cooldown_secs));
+        let d = d.min(Duration::from_secs(cfg.max_cooldown_secs.min(MAX_COOLDOWN_SECS)));
         let until = Instant::now() + d;
         let mut hosts = self.hosts.lock().await;
         let st = hosts.entry(host.to_owned()).or_default();
@@ -234,17 +241,20 @@ where
 }
 
 /// Shared client for small API and metadata requests. Reusing one client keeps
-/// a single connection pool and a single place for timeouts.
-pub fn api_client() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .user_agent("reposilo")
-            .connect_timeout(Duration::from_secs(15))
-            .timeout(Duration::from_secs(20))
-            .build()
-            .expect("build shared api client")
-    })
+/// a single connection pool and a single place for timeouts. `None` when the
+/// client cannot be built (for example a broken TLS setup).
+pub fn api_client() -> Option<&'static reqwest::Client> {
+    static CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .user_agent("reposilo")
+                .connect_timeout(Duration::from_secs(15))
+                .timeout(Duration::from_secs(20))
+                .build()
+                .ok()
+        })
+        .as_ref()
 }
 
 /// The pacing key for a URL: its host (with port when present), lowercased.
@@ -334,7 +344,7 @@ fn jitter_ms(max: u64) -> u64 {
     x ^= x << 13;
     x ^= x >> 7;
     x ^= x << 17;
-    x % (max + 1)
+    x % max.saturating_add(1)
 }
 
 #[cfg(test)]
@@ -360,6 +370,13 @@ mod tests {
         assert_eq!(host_key("git@codeberg.org:dnkl/foot"), "codeberg.org");
         assert_eq!(host_key(""), "unknown");
         assert_eq!(host_key("not a url"), "not a url");
+    }
+
+    #[test]
+    fn host_key_is_case_insensitive_and_handles_ipv6() {
+        assert_eq!(host_key("HTTPS://API.GitHub.COM/x"), "api.github.com");
+        assert_eq!(host_key("http://[::1]:8080/x"), "[::1]:8080");
+        assert_eq!(host_key("example.com/repo"), "example.com");
     }
 
     #[tokio::test]
@@ -466,6 +483,50 @@ mod tests {
         }
         // Must not panic when telemetry is disabled.
         assert!(!gov.acquire("a.example", &c).await);
+    }
+
+    /// Many distinct hosts under load must each get their own bucket with no
+    /// deadlock or cross-host contention.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn many_hosts_do_not_contend() {
+        let gov = std::sync::Arc::new(RemoteGovernor::new());
+        let c = RemoteCfg {
+            enabled: true,
+            min_interval_ms: 0,
+            jitter_ms: 0,
+            respect_rate_limits: true,
+            max_wait_secs: 5,
+            max_cooldown_secs: 60,
+        };
+        let mut handles = Vec::new();
+        for i in 0..100 {
+            let gov = gov.clone();
+            let c = c.clone();
+            handles.push(tokio::spawn(async move {
+                gov.acquire(&format!("host{i}.example"), &c).await
+            }));
+        }
+        for h in handles {
+            assert!(h.await.unwrap(), "every host should get a slot");
+        }
+        assert!(gov.status().await.is_empty(), "nothing should be paused");
+    }
+
+    #[tokio::test]
+    async fn extreme_config_values_do_not_overflow() {
+        let gov = RemoteGovernor::new();
+        let c = RemoteCfg {
+            enabled: true,
+            min_interval_ms: u64::MAX,
+            jitter_ms: u64::MAX,
+            respect_rate_limits: true,
+            max_wait_secs: u64::MAX,
+            max_cooldown_secs: u64::MAX,
+        };
+        // The caps keep `now + interval + jitter` finite, and the jitter
+        // modulo must not overflow on `max + 1`.
+        assert!(gov.acquire("a.example", &c).await);
+        let _ = jitter_ms(u64::MAX);
     }
 
     #[tokio::test]
