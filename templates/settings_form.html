@@ -1,0 +1,109 @@
+<div id="settings-area">
+  <section class="panel">
+    <h2>Retention</h2>
+    <p class="note">How much history to keep per repo. <b>-1 keeps everything</b>, 1 keeps only the newest. Per-repo overrides live on each repo page.</p>
+    <div class="settings-row"><label>Default-branch snapshots to keep</label>
+      <input type="number" name="keep_branch" value="{{ ctx.keep_branch }}" min="-1"></div>
+    <div class="settings-row"><label>Releases to keep</label>
+      <input type="number" name="keep_releases" value="{{ ctx.keep_releases }}" min="-1"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Tags</h2>
+    <div class="settings-row"><label>Take on suggested tags</label>
+      <input type="checkbox" name="take_suggested_tags" value="1" {% if ctx.take_suggested_tags %}checked{% endif %}></div>
+    <p class="note">When enabled, forge-suggested tags (e.g. GitHub topics) are added to a repo automatically, alongside any tags you enter yourself.</p>
+    <div class="settings-row"><label>Folders add tags</label>
+      <input type="checkbox" name="tags_folders" value="1" {% if ctx.tags_folders %}checked{% endif %}></div>
+    <p class="note">When enabled, the folder a repo is placed in is split into tags. Putting a repo in <code>games/tools</code> adds the tags <code>games</code> and <code>tools</code> alongside any tags you enter.</p>
+  </section>
+
+  <section class="panel">
+    <h2>Repository icons</h2>
+    <div class="settings-row"><label>Fetch repo icons</label>
+      <input type="checkbox" name="fetch_icons" value="1" {% if ctx.fetch_icons %}checked{% endif %}></div>
+    <p class="note">Download the repo owner's avatar (GitHub, GitLab, Forgejo) and store it in the archive as the repo icon. Disable to skip the extra API call and storage; existing icons are kept.</p>
+  </section>
+
+  <section class="panel">
+    <h2>Release binaries</h2>
+    <p class="note">Also download the binary files attached to releases, not just the source snapshot. Assets are matched by filename, so <code>foo-win64.zip</code>, <code>foo-x86_64-unknown-linux-gnu.tar.gz</code> and <code>foo_1.2_amd64.deb</code> all work. Source tarballs and files without an OS and arch in the name are skipped. Leave everything unchecked to disable.</p>
+    <div class="settings-row"><label>Download all platforms</label>
+      <input type="checkbox" name="release_all" value="1" {% if ctx.release_all %}checked{% endif %}></div>
+    <div class="platform-grid">
+      {% for p in ctx.release_platforms %}
+      <label class="platform-choice"><input type="checkbox" name="plat_{{ p.key }}" value="1" {% if p.checked %}checked{% endif %}> {{ p.label }}</label>
+      {% endfor %}
+    </div>
+    <div class="settings-row"><label>Additional filters</label>
+      <input type="text" name="release_platforms_extra" value="{{ ctx.release_platforms_extra }}" placeholder="e.g. linux-arm64, riscv64, ppc64le"></div>
+    <p class="note">Each filter is a full slug (<code>linux-x64</code>), an OS (<code>linux</code>), an arch (<code>arm64</code>) or <code>all</code>; comma or space separated.</p>
+    <div class="settings-row"><label>Max size per asset (MiB, 0 = no limit)</label>
+      <input type="number" name="release_max_asset_mb" value="{{ ctx.release_max_asset_mb }}" min="0"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Scheduler</h2>
+    <p class="note">How often the background loop checks remotes. Unchanged repos cost a single ls-remote; nothing is cloned unless something moved.</p>
+    <div class="settings-row"><label>Enabled</label>
+      <input type="checkbox" name="sched_enabled" value="1" {% if ctx.sched_enabled %}checked{% endif %}></div>
+    <div class="settings-row"><label>Snapshot cadence (days)</label>
+      <input type="number" name="interval_days" value="{{ ctx.interval_days }}" min="1"></div>
+    <div class="settings-row"><label>Release polling (hours)</label>
+      <input type="number" name="poll_hours" value="{{ ctx.poll_hours }}" min="1"></div>
+    <div class="settings-row"><label>Loop interval (seconds)</label>
+      <input type="number" name="poll_every" value="{{ ctx.poll_every }}" min="60"></div>
+    <div class="settings-row"><label>Dead after (days unreachable)</label>
+      <input type="number" name="dead_after" value="{{ ctx.dead_after }}" min="0"></div>
+    <p class="note">A remote unreachable for this many consecutive days is marked <b>dead</b> and the scheduler stops contacting it. 0 = never declare dead. A manual refresh resurrects it if it ever comes back.</p>
+  </section>
+
+  <section class="panel">
+    <h2>Scheduled checks</h2>
+    <p class="note">Hash every stored zip against its sidecar hash on a schedule to catch missing or corrupt files. Off by default: a check reads the whole archive, so skip it if your storage already guards against bitrot (ZFS, btrfs, and similar).</p>
+    <div class="settings-row"><label>Enabled</label>
+      <input type="checkbox" name="verify_enabled" value="1" {% if ctx.verify_enabled %}checked{% endif %}></div>
+    <div class="settings-row"><label>Check interval (days)</label>
+      <input type="number" name="verify_interval_days" value="{{ ctx.verify_interval_days }}" min="1"></div>
+  </section>
+
+  <section class="panel">
+    <h2>llama.cpp</h2>
+    <p class="note">Any OpenAI-compatible endpoint. Used for <b>auto-tagging</b> and <b>import review</b>.</p>
+    <div class="settings-row"><label>Enabled</label>
+      <input type="checkbox" name="llm_enabled" value="1" {% if ctx.llm_enabled %}checked{% endif %}></div>
+    <div class="settings-row"><label>Endpoint URL</label>
+      <input type="text" name="llm_url" value="{{ ctx.llm_url }}" placeholder="http://192.168.0.1:11434/v1"></div>
+    <div class="settings-row"><label>Model</label>
+      <input type="text" name="llm_model" value="{{ ctx.llm_model }}" placeholder="(server default)"></div>
+    <div class="settings-row"><label>Batch size (repos per request)</label>
+      <input type="number" name="llm_batch" value="{{ ctx.llm_batch }}" min="1"></div>
+    <div class="settings-row"><label>Disable thinking mode</label>
+      <input type="checkbox" name="disable_thinking" value="1" {% if ctx.disable_thinking %}checked{% endif %}></div>
+  </section>
+
+  <section class="panel">
+    <h2>OpenTelemetry</h2>
+    <p class="note">Optional: push telemetry (logs, metrics, traces) to an OTLP/HTTP collector. The built-in <a href="/stats">Stats</a> page always works without this.</p>
+    <div class="settings-row"><label>Enabled</label>
+      <input type="checkbox" name="otel_enabled" value="1" {% if ctx.otel_enabled %}checked{% endif %}></div>
+    <div class="settings-row"><label>OTLP endpoint</label>
+      <input type="text" name="otel_endpoint" value="{{ ctx.otel_endpoint }}" placeholder="http://localhost:4318"></div>
+    <div class="settings-row"><label>Service name</label>
+      <input type="text" name="otel_service" value="{{ ctx.otel_service }}" placeholder="reposilo"></div>
+    <div class="settings-row"><label>Push interval (seconds)</label>
+      <input type="number" name="otel_interval" value="{{ ctx.otel_interval }}" min="10"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Instance</h2>
+    <p class="note">Fixed for the running server: edit the config file and restart to change these.</p>
+    <div class="settings-row"><label>Listen on</label><input type="text" value="{{ ctx.bind }}" disabled></div>
+    <div class="settings-row"><label>Archive root</label><input type="text" value="{{ ctx.archive_root }}" disabled></div>
+  </section>
+
+  <div class="settings-actions">
+    <span class="spinner htmx-indicator"></span>
+    <button type="submit" class="refresh-btn">Save settings</button>
+  </div>
+</div>

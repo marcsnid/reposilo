@@ -49,6 +49,7 @@ fn templates_render_balanced_divs() {
         ("job", include_str!("../templates/job_status.html")),
         ("verify", include_str!("../templates/verify_status.html")),
         ("settings", include_str!("../templates/settings.html")),
+        ("settings_form", include_str!("../templates/settings_form.html")),
         ("stats", include_str!("../templates/stats.html")),
         ("base", include_str!("../templates/base.html")),
     ] {
@@ -478,6 +479,9 @@ async fn drag_move_and_add_with_folder() -> Result<()> {
         tmp.path().join("archive/tools/cli/remotes-webproj/repo.json").exists(),
         "add with folder places the repo there"
     );
+    // the added folder chain is materialized, so it survives the repo leaving
+    assert!(tmp.path().join("archive/tools/folder.json").exists());
+    assert!(tmp.path().join("archive/tools/cli/folder.json").exists());
 
     // folder options endpoint lists the implicit folder chain
     let opts = client.get(format!("{base}/folders/options")).send().await?.text().await?;
@@ -513,6 +517,9 @@ async fn drag_move_and_add_with_folder() -> Result<()> {
         .await?;
     assert_eq!(resp.status(), 200);
     assert!(tmp.path().join("archive/remotes-webproj/repo.json").exists());
+    // the now-empty folders were made explicit, so they remain visible
+    assert!(tmp.path().join("archive/tools/folder.json").exists());
+    assert!(tmp.path().join("archive/tools/cli/folder.json").exists());
 
     // a folder path running through another repo is rejected
     let body = client
@@ -757,6 +764,58 @@ async fn settings_verify_toggle_roundtrip() -> Result<()> {
         .await?;
     assert!(resp.status().is_success());
     assert!(!st.cfg().await.verify.enabled);
+    Ok(())
+}
+
+/// The tags-as-folders and icon toggles round-trip through the settings form.
+#[tokio::test]
+async fn settings_tag_folders_and_icons_roundtrip() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let (base, st) = spawn_server(test_cfg(&tmp.path().join("archive"))).await;
+    let client = reqwest::Client::new();
+
+    // both default on/off as documented
+    let cfg = st.cfg().await;
+    assert!(!cfg.tags.folders);
+    assert!(cfg.fetch_icons());
+
+    let resp = client
+        .post(format!("{base}/settings"))
+        .form(&[("tags_folders", "1")])
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let cfg = st.cfg().await;
+    assert!(cfg.tags.folders, "tags_folders persisted");
+    assert!(!cfg.fetch_icons(), "omitting fetch_icons turns icons off");
+    assert_eq!(cfg.icons.enabled, Some(false), "icons key is written explicitly");
+
+    let html = client.get(format!("{base}/settings")).send().await?.text().await?;
+    assert!(html.contains("name=\"tags_folders\" value=\"1\" checked"), "{html}");
+    assert!(!html.contains("name=\"fetch_icons\" value=\"1\" checked"), "{html}");
+    Ok(())
+}
+
+/// Saving replaces only the form body, not a full HTML page nested in the form
+/// (the old bug left a second `<html>`/topbar inside #settings-area).
+#[tokio::test]
+async fn settings_save_returns_a_form_fragment() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let (base, _st) = spawn_server(test_cfg(&tmp.path().join("archive"))).await;
+    let client = reqwest::Client::new();
+
+    let body = client
+        .post(format!("{base}/settings"))
+        .form(&[("keep_branch", "2"), ("keep_releases", "3")])
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert!(body.contains("id=\"settings-area\""), "fragment must keep the swap target: {body}");
+    assert!(body.contains("settings-actions"), "the save bar must come back with the fragment");
+    assert!(!body.contains("<!DOCTYPE"), "no full document in the fragment: {body}");
+    assert!(!body.contains("<html"), "no nested html element: {body}");
+    assert!(!body.contains("class=\"topbar\""), "no nested topbar: {body}");
     Ok(())
 }
 
@@ -1426,5 +1485,101 @@ async fn viewing_notifications_clears_the_bell_without_accounts() -> Result<()> 
     // the read marker is persisted: a fresh state over the same root stays clear
     let st2 = Arc::new(AppState::new(test_cfg(&root), None).await?);
     assert_eq!(st2.notification_count(None).await, 1, "only the post-read item is unread");
+    Ok(())
+}
+
+/// Creating a folder over a directory that exists without a manifest (an empty
+/// leftover from a move) adopts it instead of refusing with "already exists".
+#[tokio::test]
+async fn folder_create_adopts_an_existing_directory() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let archive = tmp.path().join("archive");
+    fs::create_dir_all(archive.join("orphan").join("deep"))?;
+    let (base, _st) = spawn_server(test_cfg(&archive)).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{base}/folders/create"))
+        .form(&[("parent", ""), ("name", "orphan"), ("icon", "")])
+        .send()
+        .await?;
+    assert_eq!(resp.status(), 200);
+    assert!(archive.join("orphan/folder.json").exists(), "existing dir adopted");
+
+    let resp = client
+        .post(format!("{base}/folders/create"))
+        .form(&[("parent", "orphan"), ("name", "deep"), ("icon", "")])
+        .send()
+        .await?;
+    assert_eq!(resp.status(), 200);
+    assert!(archive.join("orphan/deep/folder.json").exists());
+
+    // now that it has a manifest, a second create is refused
+    let body = client
+        .post(format!("{base}/folders/create"))
+        .form(&[("parent", ""), ("name", "orphan"), ("icon", "")])
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert!(body.contains("already exists"), "{body}");
+    Ok(())
+}
+
+/// `[tags] folders = true`: the folder a repo is placed in contributes its
+/// path segments as tags.
+#[tokio::test]
+async fn folder_path_contributes_tags_when_enabled() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let remote = make_remote(tmp.path(), "tagdir");
+    let mut cfg = test_cfg(&tmp.path().join("archive"));
+    cfg.tags.folders = true;
+    let (base, _st) = spawn_server(cfg).await;
+    let client = reqwest::Client::new();
+
+    client
+        .post(format!("{base}/repos/add"))
+        .form(&[
+            ("url", file_url(&remote).as_str()),
+            ("tags", "cool"),
+            ("folder", "games/tools"),
+        ])
+        .send()
+        .await?;
+    wait_jobs_done(&base).await;
+
+    let repo = tmp.path().join("archive/games/tools/remotes-tagdir");
+    assert!(repo.join("repo.json").exists(), "repo is filed in the folder");
+    let m: serde_json::Value = serde_json::from_str(&fs::read_to_string(repo.join("repo.json"))?)?;
+    let tags: Vec<String> = m["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t.as_str().unwrap().to_string())
+        .collect();
+    assert!(tags.contains(&"games".to_string()), "{tags:?}");
+    assert!(tags.contains(&"tools".to_string()), "{tags:?}");
+    assert!(tags.contains(&"cool".to_string()), "the manual tag is kept: {tags:?}");
+
+    // moving to another folder swaps the location-derived tags
+    let resp = client
+        .post(format!("{base}/repos/games/tools/remotes-tagdir/metadata"))
+        .form(&[("folder", "apps/tools"), ("name", "TagDir"), ("description", ""), ("notes", "")])
+        .send()
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let repo = tmp.path().join("archive/apps/tools/remotes-tagdir");
+    assert!(repo.join("repo.json").exists());
+    let m: serde_json::Value = serde_json::from_str(&fs::read_to_string(repo.join("repo.json"))?)?;
+    let tags: Vec<String> = m["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t.as_str().unwrap().to_string())
+        .collect();
+    assert!(tags.contains(&"apps".to_string()), "{tags:?}");
+    assert!(tags.contains(&"tools".to_string()), "{tags:?}");
+    assert!(tags.contains(&"cool".to_string()), "{tags:?}");
+    assert!(!tags.contains(&"games".to_string()), "old folder tag is dropped: {tags:?}");
     Ok(())
 }

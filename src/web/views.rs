@@ -994,8 +994,9 @@ pub struct SettingsCtx {
     pub release_max_asset_mb: String,
     // tags
     pub take_suggested_tags: bool,
+    pub tags_folders: bool,
     // icons
-    pub fetch_avatars: bool,
+    pub fetch_icons: bool,
     pub saved: bool,
 }
 
@@ -1010,6 +1011,15 @@ pub struct PlatformChoiceView {
 #[derive(askama::Template)]
 #[template(path = "settings.html")]
 pub struct SettingsT {
+    pub ctx: SettingsCtx,
+}
+
+/// The settings form body only, for the in-place save swap. Keeping it a
+/// separate template avoids nesting a full page (with `base.html`) inside the
+/// form on save.
+#[derive(askama::Template)]
+#[template(path = "settings_form.html")]
+pub struct SettingsFormT {
     pub ctx: SettingsCtx,
 }
 
@@ -1063,7 +1073,8 @@ pub fn settings_ctx_from(cfg: &crate::config::Config, saved: bool) -> SettingsCt
         release_platforms_extra,
         release_max_asset_mb: cfg.releases.max_asset_mb.to_string(),
         take_suggested_tags: cfg.tags.take_suggested,
-        fetch_avatars: cfg.github.fetch_avatars,
+        tags_folders: cfg.tags.folders,
+        fetch_icons: cfg.fetch_icons(),
         saved,
     }
 }

@@ -65,12 +65,51 @@ fn html(s: String) -> Response {
 /// the topbar folder datalist, which lives outside #app and would otherwise
 /// keep the folder list it saw when the page first loaded.
 async fn oob_app_refresh(st: &Arc<AppState>) -> String {
-    let ctx = views::build_list_ctx(st, &[], "", "").await;
+    oob_app_refresh_with(st, &[], "", "").await
+}
+
+/// Same as [`oob_app_refresh`], but rebuilds the grid with the given filters so
+/// an in-page action (for example a background add) does not reset the view the
+/// user is looking at.
+async fn oob_app_refresh_with(st: &Arc<AppState>, tags: &[String], q: &str, folder: &str) -> String {
+    let ctx = views::build_list_ctx(st, tags, q, folder).await;
     let inner = views::FragmentT { ctx }.render().unwrap_or_default();
     let options = folder_options_html(st).await;
     format!(
         r#"<div id="app" class="app" hx-swap-oob="outerHTML">{inner}</div><datalist id="add-folder-list" hx-swap-oob="innerHTML">{options}</datalist>"#
     )
+}
+
+/// The tag/query/folder filters from the page the request came from, read from
+/// htmx's `HX-Current-URL` (falling back to `Referer`).
+fn filters_from_request(headers: &HeaderMap) -> (Vec<String>, String, String) {
+    let raw = headers
+        .get("hx-current-url")
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| headers.get(header::REFERER).and_then(|v| v.to_str().ok()))
+        .unwrap_or("");
+    let Ok(url) = reqwest::Url::parse(raw) else {
+        return (Vec::new(), String::new(), String::new());
+    };
+    let mut tags = Vec::new();
+    let mut q = String::new();
+    let mut folder = String::new();
+    for (k, v) in url.query_pairs() {
+        match k.as_ref() {
+            "tags" => {
+                tags = v
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .collect()
+            }
+            "q" => q = v.into_owned(),
+            "folder" => folder = v.into_owned(),
+            _ => {}
+        }
+    }
+    (tags, q, folder)
 }
 
 /// Out-of-band success toast: drop a status message into the fixed #toast
@@ -245,12 +284,19 @@ struct JobIdPath {
 
 /// GET /repos/job-status/{id}: polling endpoint; when the job finishes it
 /// out-of-bounds swaps the whole #app so the grid reflects the new state.
-async fn job_status(State(st): State<Arc<AppState>>, AxPath(p): AxPath<JobIdPath>) -> Response {
+async fn job_status(
+    State(st): State<Arc<AppState>>,
+    AxPath(p): AxPath<JobIdPath>,
+    headers: HeaderMap,
+) -> Response {
     let Some(job) = st.job(p.id).await else {
         return html("<div class=\"job-status failed\">unknown job</div>".into());
     };
     let done = job.status != "running";
     let failed = job.status == "failed";
+    // Preserve whatever filter the user is looking at when the grid refreshes,
+    // so a completed add does not silently bounce them to the main list.
+    let (tags, q, folder) = filters_from_request(&headers);
 
     // finished jobs with a recorded note (e.g. import summaries) use it as the message
     let note = if job.status != "running" { st.job_note(p.id).await } else { None };
@@ -278,7 +324,7 @@ async fn job_status(State(st): State<Arc<AppState>>, AxPath(p): AxPath<JobIdPath
 
     let mut oob_app = String::new();
     if done && !failed {
-        oob_app = oob_app_refresh(&st).await;
+        oob_app = oob_app_refresh_with(&st, &tags, &q, &folder).await;
     }
     let ctx = JobCtx { id: p.id, message, done, failed, view_url, oob_app };
     render(&JobT { ctx })
@@ -1068,11 +1114,22 @@ async fn folders_create(
     let rel = if parent.is_empty() { name.clone() } else { format!("{parent}/{name}") };
     let root = st.root().await;
     let dir = root.join(&rel);
-    if dir.exists() {
+    // Adopt a directory that already exists without a manifest (an empty folder
+    // left behind by a move, for example) instead of refusing to create it.
+    if dir.join("folder.json").exists() {
         return err(format!("{rel} already exists"));
+    }
+    if dir.join("repo.json").exists() {
+        return err(format!("{rel} is a repository, not a folder"));
     }
     if let Err(e) = tokio::fs::create_dir_all(&dir).await {
         return err(format!("cannot create folder: {e}"));
+    }
+    // A parent that existed only implicitly becomes explicit along with it.
+    if !parent.is_empty() {
+        if let Err(e) = crate::archiver::ensure_folder_manifests(&root, &parent) {
+            return err(format!("cannot create folder: {e:#}"));
+        }
     }
     let icon = icon_first_char(form.icon.trim());
     let manifest = crate::types::FolderManifest { icon: Some(icon).filter(|s| !s.is_empty()) };
@@ -1260,7 +1317,8 @@ async fn settings_save(
     cfg.releases.platforms = platforms;
     cfg.releases.max_asset_mb = num(&f, "release_max_asset_mb", cfg.releases.max_asset_mb);
     cfg.tags.take_suggested = f.0.get("take_suggested_tags").map(|v| v == "1").unwrap_or(false);
-    cfg.github.fetch_avatars = f.0.get("fetch_avatars").map(|v| v == "1").unwrap_or(false);
+    cfg.tags.folders = f.0.get("tags_folders").map(|v| v == "1").unwrap_or(false);
+    cfg.icons.enabled = Some(f.0.get("fetch_icons").map(|v| v == "1").unwrap_or(false));
 
     // apply live
     *st.cfg.write().await = cfg.clone();
@@ -1274,12 +1332,12 @@ async fn settings_save(
         }
         None => tracing::warn!("settings changed in memory only (config path unknown)"),
     }
-    // re-render the panel (saved flag off: feedback goes to the toast) while
-    // an OOB toast confirms the save at the bottom of the viewport
-    let page = views::SettingsT { ctx: views::settings_ctx_from(&cfg, false) }
+    // Re-render just the form body (not the whole page) into #settings-area,
+    // while an OOB toast confirms the save at the bottom of the viewport.
+    let form = views::SettingsFormT { ctx: views::settings_ctx_from(&cfg, false) }
         .render()
         .unwrap_or_default();
-    html(format!("{}{page}", oob_toast("Settings saved")))
+    html(format!("{}{form}", oob_toast("Settings saved")))
 }
 
 // ---------- import ----------
@@ -1609,7 +1667,27 @@ async fn notifications_mark_read(State(st): State<Arc<AppState>>, headers: Heade
 
 #[cfg(test)]
 mod tests {
-    use super::{icon_first_char, sniff_image};
+    use super::{filters_from_request, icon_first_char, sniff_image};
+    use axum::http::HeaderMap;
+
+    #[test]
+    fn filters_from_request_reads_the_current_url() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            "hx-current-url",
+            "http://127.0.0.1:8765/?tags=cli,rust&q=search&folder=tools/rust"
+                .parse()
+                .unwrap(),
+        );
+        let (tags, q, folder) = filters_from_request(&h);
+        assert_eq!(tags, vec!["cli", "rust"]);
+        assert_eq!(q, "search");
+        assert_eq!(folder, "tools/rust");
+
+        // no header, and a URL with no filters, both yield an empty filter set
+        let (tags, q, folder) = filters_from_request(&HeaderMap::new());
+        assert!(tags.is_empty() && q.is_empty() && folder.is_empty());
+    }
 
     #[test]
     fn sniffs_common_image_types() {

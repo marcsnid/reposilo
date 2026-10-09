@@ -56,6 +56,92 @@ pub fn sanitize(s: &str) -> String {
         .collect()
 }
 
+/// Split a folder path into its tag segments: `games/tools` becomes `games`
+/// and `tools`. Empty segments are dropped.
+pub fn folder_tags(folder: &str) -> Vec<String> {
+    folder
+        .split('/')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+/// Keep a repo's tags in step with the folder it lives in, when `[tags]
+/// folders` is on. Tags matching a segment of the old folder are dropped (they
+/// were location-derived) unless the new folder also uses that segment, and
+/// every segment of the new folder is added. Manual tags are left alone.
+pub fn apply_folder_tags(
+    tags: &mut Vec<String>,
+    old_folder: &str,
+    new_folder: &str,
+    enabled: bool,
+) {
+    if !enabled {
+        return;
+    }
+    let old = folder_tags(old_folder);
+    let new = folder_tags(new_folder);
+    tags.retain(|t| {
+        !old.iter().any(|o| o.eq_ignore_ascii_case(t))
+            || new.iter().any(|n| n.eq_ignore_ascii_case(t))
+    });
+    for seg in &new {
+        if !tags.iter().any(|t| t.eq_ignore_ascii_case(seg)) {
+            tags.push(seg.clone());
+        }
+    }
+    tags.sort();
+    tags.dedup();
+}
+
+/// Ensure every prefix of `folder` exists on disk with a `folder.json`, so a
+/// folder created by adding or moving a repo persists (and stays visible) after
+/// that repo later leaves. Existing manifests are left untouched.
+pub fn ensure_folder_manifests(root: &Path, folder: &str) -> Result<()> {
+    let folder = folder.trim().trim_matches('/');
+    if folder.is_empty() {
+        return Ok(());
+    }
+    let mut prefix = String::new();
+    for part in folder.split('/') {
+        if part.is_empty() {
+            continue;
+        }
+        prefix = if prefix.is_empty() { part.to_string() } else { format!("{prefix}/{part}") };
+        let dir = root.join(&prefix);
+        fs::create_dir_all(&dir).with_context(|| format!("cannot create folder {}", dir.display()))?;
+        let manifest = dir.join("folder.json");
+        if !manifest.exists() {
+            crate::types::write_json(&manifest, &crate::types::FolderManifest::default())?;
+        }
+    }
+    Ok(())
+}
+
+/// Remove now-empty implicit folders left behind by a move. Stops at the
+/// archive root, at a folder that has a `folder.json` (an explicit folder is
+/// kept even when empty), and at any folder that still holds something.
+pub fn sweep_empty_folders(root: &Path, start: &Path) {
+    let mut cur = start.to_path_buf();
+    while cur.starts_with(root) && cur != root {
+        if cur.join("folder.json").exists() {
+            break;
+        }
+        let empty = fs::read_dir(&cur).map(|mut it| it.next().is_none()).unwrap_or(false);
+        if !empty {
+            break;
+        }
+        if fs::remove_dir(&cur).is_err() {
+            break;
+        }
+        match cur.parent() {
+            Some(p) => cur = p.to_path_buf(),
+            None => break,
+        }
+    }
+}
+
 /// Render a branch-snapshot changelog from a GitHub compare result.
 fn render_branch_changelog(info: &crate::forgeapi::CompareInfo) -> String {
     let mut out = String::new();
@@ -353,6 +439,9 @@ impl Archiver {
             if !f.split('/').all(crate::server::valid_folder_name) {
                 bail!("invalid folder path: {f}");
             }
+            // Materialize the folder chain so it stays visible after the repo
+            // is later moved out or deleted.
+            ensure_folder_manifests(root, f)?;
         }
         let rel = match folder {
             Some(f) => format!("{f}/{slug}"),
@@ -429,7 +518,7 @@ impl Archiver {
             .ok()
             .and_then(|tree| crate::files::detect_language(&tree));
         // forge enrichment (GitHub: stars, topics → suggested tags, description)
-        let (stars, suggested_tags, avatar_url) = match crate::forgeapi::github_repo_meta(&self.cfg, &self.governor, &self.http_cache, url).await {
+        let (stars, suggested_tags, mut avatar_url) = match crate::forgeapi::github_repo_meta(&self.cfg, &self.governor, &self.http_cache, url).await {
             Some(meta) => {
                 if description.is_none() {
                     description = meta.description;
@@ -438,13 +527,23 @@ impl Archiver {
             }
             None => (None, Vec::new(), None),
         };
+        // GitLab and Forgejo icons come from their own API. GitHub already
+        // resolved its avatar above, so this is a no-op there.
+        if avatar_url.is_none() {
+            avatar_url = crate::releaseapi::repo_avatar_url(&self.cfg, &self.governor, &self.http_cache, url).await;
+        }
 
+        // `[tags] folders`: the folder a repo lands in contributes its path
+        // segments as tags (games/tools adds games and tools).
+        let folder = rel.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
+        let mut tags = tags.to_vec();
+        crate::archiver::apply_folder_tags(&mut tags, "", folder, self.cfg.tags.folders);
         // "take on suggested tags": keep manual tags, then add the forge's
         // suggested topics (case-insensitively deduped) when enabled.
         let manifest_tags = if self.cfg.tags.take_suggested {
-            crate::tagging::merge_suggested(tags, &suggested_tags)
+            crate::tagging::merge_suggested(&tags, &suggested_tags)
         } else {
-            tags.to_vec()
+            tags
         };
 
         let manifest = RepoManifest {
@@ -470,7 +569,7 @@ impl Archiver {
         crate::types::write_json(&manifest_path, &manifest)?;
 
         // store the owner avatar locally so the repo icon survives the remote
-        if self.cfg.github.fetch_avatars {
+        if self.cfg.fetch_icons() {
             if let Some(avatar) = avatar_url {
                 if let Some(bytes) = crate::forgeapi::fetch_avatar(&self.cfg, &self.governor, &avatar).await {
                     let _ = fs::write(repo_dir.join("icon"), bytes);
@@ -905,23 +1004,36 @@ impl Archiver {
         let name = manifest.name.clone();
         let mirror = shallow.is_dir(); // full-mirror mode keeps a persistent git store
 
-        // backfill the owner avatar for archives created before icon support
-        // (GitHub only; a zero-byte `icon` marks "checked, no avatar")
-        if self.cfg.github.fetch_avatars
-            && !repo_dir.join("icon").exists()
-            && matches!(crate::forge::detect(&origin), Ok(info) if info.kind == crate::forge::ForgeKind::GitHub)
-        {
-            if let Some(meta) = crate::forgeapi::github_repo_meta(&self.cfg, &self.governor, &self.http_cache, &origin).await {
-                match meta.avatar_url {
-                    Some(url) => {
+        // backfill the owner avatar for archives created before icon support.
+        // GitHub resolves its avatar from the repo metadata call; GitLab and
+        // Forgejo use their own project API. A zero-byte `icon` marks
+        // "checked, no avatar" so the API is not retried.
+        if self.cfg.fetch_icons() && !repo_dir.join("icon").exists() {
+            let info = crate::forge::detect(&origin).ok();
+            match info.as_ref().map(|i| i.kind) {
+                Some(crate::forge::ForgeKind::GitHub) => {
+                    if let Some(meta) = crate::forgeapi::github_repo_meta(&self.cfg, &self.governor, &self.http_cache, &origin).await {
+                        match meta.avatar_url {
+                            Some(url) => {
+                                if let Some(bytes) = crate::forgeapi::fetch_avatar(&self.cfg, &self.governor, &url).await {
+                                    let _ = fs::write(repo_dir.join("icon"), bytes);
+                                }
+                            }
+                            None => {
+                                let _ = fs::write(repo_dir.join("icon"), b"");
+                            }
+                        }
+                    }
+                }
+                Some(crate::forge::ForgeKind::GitLab | crate::forge::ForgeKind::Forgejo) => {
+                    if let Some(url) = crate::releaseapi::repo_avatar_url(&self.cfg, &self.governor, &self.http_cache, &origin).await {
                         if let Some(bytes) = crate::forgeapi::fetch_avatar(&self.cfg, &self.governor, &url).await {
                             let _ = fs::write(repo_dir.join("icon"), bytes);
                         }
                     }
-                    None => {
-                        let _ = fs::write(repo_dir.join("icon"), b"");
-                    }
                 }
+                // generic remotes and unidentified imports have no avatar API
+                _ => {}
             }
         }
 
@@ -1404,6 +1516,70 @@ mod tests {
     fn sanitize_keeps_safe_chars() {
         assert_eq!(sanitize("feature/abc-def"), "feature_abc-def");
         assert_eq!(sanitize("ripgrep"), "ripgrep");
+    }
+
+    #[test]
+    fn folder_tags_splits_a_path_into_segments() {
+        assert_eq!(folder_tags("games/tools"), vec!["games", "tools"]);
+        assert_eq!(folder_tags("/games//tools/"), vec!["games", "tools"]);
+        assert!(folder_tags("").is_empty());
+    }
+
+    #[test]
+    fn apply_folder_tags_adds_new_folder_and_drops_the_old_one() {
+        // entering a folder adds its segments
+        let mut tags = vec!["manual".to_string()];
+        apply_folder_tags(&mut tags, "", "games/tools", true);
+        assert_eq!(tags, vec!["games", "manual", "tools"]);
+
+        // moving between folders swaps the location-derived tags, keeping manual ones
+        let mut tags = vec!["games".to_string(), "manual".to_string(), "tools".to_string()];
+        apply_folder_tags(&mut tags, "games/tools", "apps/tools", true);
+        assert_eq!(tags, vec!["apps", "manual", "tools"], "games dropped, tools kept, apps added");
+
+        // disabled: nothing changes
+        let mut tags = vec!["manual".to_string()];
+        apply_folder_tags(&mut tags, "", "games/tools", false);
+        assert_eq!(tags, vec!["manual"]);
+    }
+
+    #[test]
+    fn ensure_folder_manifests_creates_chain_and_keeps_existing_icons() {
+        let tmp = tempfile::tempdir().unwrap();
+        ensure_folder_manifests(tmp.path(), "a/b/c").unwrap();
+        for p in ["a", "a/b", "a/b/c"] {
+            assert!(tmp.path().join(p).join("folder.json").exists(), "{p} missing manifest");
+        }
+        // an existing manifest is not overwritten
+        let custom = crate::types::FolderManifest { icon: Some("🎮".into()) };
+        crate::types::write_json(&tmp.path().join("a/b/folder.json"), &custom).unwrap();
+        ensure_folder_manifests(tmp.path(), "a/b/c").unwrap();
+        let back: crate::types::FolderManifest =
+            crate::types::read_json(&tmp.path().join("a/b/folder.json")).unwrap();
+        assert_eq!(back.icon.as_deref(), Some("🎮"));
+    }
+
+    #[test]
+    fn sweep_empty_folders_removes_implicit_but_keeps_explicit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("implicit/deep")).unwrap();
+        std::fs::create_dir_all(root.join("explicit/deep")).unwrap();
+        crate::types::write_json(
+            &root.join("explicit/folder.json"),
+            &crate::types::FolderManifest::default(),
+        )
+        .unwrap();
+
+        sweep_empty_folders(root, &root.join("implicit/deep"));
+        assert!(!root.join("implicit").exists(), "empty implicit folders are swept");
+
+        // an implicit child of an explicit folder is swept, but the explicit
+        // folder itself survives, and sweeping it directly is a no-op
+        sweep_empty_folders(root, &root.join("explicit/deep"));
+        assert!(!root.join("explicit/deep").exists());
+        sweep_empty_folders(root, &root.join("explicit"));
+        assert!(root.join("explicit").exists(), "explicit empty folder is kept");
     }
 
     #[test]
