@@ -342,6 +342,84 @@ fn parse_forgejo_assets(v: &Value) -> Option<Vec<RemoteAsset>> {
     )
 }
 
+/// The forge's avatar URL for a repository owner, used as the repo icon.
+/// GitHub avatars come from `forgeapi::github_repo_meta` (which fetches other
+/// metadata in the same call), so this handles GitLab and Forgejo. Returns
+/// `None` for unsupported forges or when the API has no avatar.
+pub async fn repo_avatar_url(
+    cfg: &Config,
+    gov: &RemoteGovernor,
+    cache: &std::sync::Mutex<crate::httpcache::HttpCache>,
+    origin: &str,
+) -> Option<String> {
+    let info = forge::detect(origin).ok()?;
+    match info.kind {
+        ForgeKind::GitLab => gitlab_avatar(cfg, gov, cache, origin).await,
+        ForgeKind::Forgejo => forgejo_avatar(cfg, gov, cache, origin, &info).await,
+        ForgeKind::GitHub | ForgeKind::Generic => None,
+    }
+}
+
+/// GitLab keeps the owner avatar on the namespace, with an optional project
+/// avatar that wins when set.
+async fn gitlab_avatar(
+    cfg: &Config,
+    gov: &RemoteGovernor,
+    cache: &std::sync::Mutex<crate::httpcache::HttpCache>,
+    origin: &str,
+) -> Option<String> {
+    let origin = parse_origin(origin)?;
+    let client = crate::ratelimit::api_client()?;
+    let token = cfg.gitlab.resolved_token();
+    let url = format!("{}/api/v4/projects/{}", origin.base, percent_encode(&origin.path));
+    let body = crate::httpcache::conditional_get(cfg, gov, cache, &url, || {
+        let mut req = client.get(&url);
+        if let Some(tok) = token.as_deref() {
+            req = req.header("PRIVATE-TOKEN", tok);
+        }
+        req
+    })
+    .await?
+    .body;
+    let v: Value = serde_json::from_str(&body).ok()?;
+    v["avatar_url"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .or_else(|| v["namespace"]["avatar_url"].as_str().filter(|s| !s.is_empty()))
+        .map(str::to_string)
+}
+
+/// Forgejo/Gitea expose the owner avatar on the repository payload.
+async fn forgejo_avatar(
+    cfg: &Config,
+    gov: &RemoteGovernor,
+    cache: &std::sync::Mutex<crate::httpcache::HttpCache>,
+    origin: &str,
+    info: &forge::ForgeInfo,
+) -> Option<String> {
+    let origin = parse_origin(origin)?;
+    let client = crate::ratelimit::api_client()?;
+    let token = cfg.forgejo.resolved_token();
+    let url = format!(
+        "{}/api/v1/repos/{}/{}",
+        origin.base, info.owner, info.name
+    );
+    let body = crate::httpcache::conditional_get(cfg, gov, cache, &url, || {
+        let mut req = client.get(&url);
+        if let Some(tok) = token.as_deref() {
+            req = req.header(reqwest::header::AUTHORIZATION, format!("token {tok}"));
+        }
+        req
+    })
+    .await?
+    .body;
+    let v: Value = serde_json::from_str(&body).ok()?;
+    v["owner"]["avatar_url"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 /// The tag of the forge's own "latest release". Used as a fallback when a repo
 /// has no semver git tag, so releases named by date, codename or other scheme
 /// are still archived. `None` when the forge is unsupported, the repo has no
@@ -946,5 +1024,53 @@ mod tests {
         let gov = RemoteGovernor::new();
         let cache = std::sync::Mutex::new(crate::httpcache::HttpCache::empty());
         assert!(super::latest_release_tag(&cfg, &gov, &cache, "file:///tmp/remote").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn gitlab_avatar_prefers_the_project_then_the_namespace() {
+        let server = crate::testserver::spawn(
+            200,
+            r#"{"avatar_url":"http://a/project","namespace":{"avatar_url":"http://a/ns"}}"#,
+        )
+        .await;
+        let cfg = Config::default();
+        let gov = RemoteGovernor::new();
+        let cache = std::sync::Mutex::new(crate::httpcache::HttpCache::empty());
+        let origin = format!("{}/group/proj", server.base);
+        let url = super::gitlab_avatar(&cfg, &gov, &cache, &origin).await.unwrap();
+        assert_eq!(url, "http://a/project");
+        assert_eq!(server.paths(), vec!["/api/v4/projects/group%2Fproj"]);
+    }
+
+    #[tokio::test]
+    async fn gitlab_avatar_falls_back_to_the_namespace() {
+        let server = crate::testserver::spawn(
+            200,
+            r#"{"avatar_url":null,"namespace":{"avatar_url":"http://a/ns"}}"#,
+        )
+        .await;
+        let cfg = Config::default();
+        let gov = RemoteGovernor::new();
+        let cache = std::sync::Mutex::new(crate::httpcache::HttpCache::empty());
+        let origin = format!("{}/group/proj", server.base);
+        let url = super::gitlab_avatar(&cfg, &gov, &cache, &origin).await.unwrap();
+        assert_eq!(url, "http://a/ns");
+    }
+
+    #[tokio::test]
+    async fn forgejo_avatar_reads_the_owner() {
+        let server = crate::testserver::spawn(200, r#"{"owner":{"avatar_url":"http://a/owner"}}"#).await;
+        let cfg = Config::default();
+        let gov = RemoteGovernor::new();
+        let cache = std::sync::Mutex::new(crate::httpcache::HttpCache::empty());
+        let origin = format!("{}/o/r", server.base);
+        let info = forge::ForgeInfo {
+            kind: forge::ForgeKind::Forgejo,
+            owner: "o".into(),
+            name: "r".into(),
+        };
+        let url = super::forgejo_avatar(&cfg, &gov, &cache, &origin, &info).await.unwrap();
+        assert_eq!(url, "http://a/owner");
+        assert_eq!(server.paths(), vec!["/api/v1/repos/o/r"]);
     }
 }

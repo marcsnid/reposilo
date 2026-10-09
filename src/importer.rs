@@ -479,8 +479,8 @@ pub async fn import_one(
             .map(|i| sanitize(&i.name))
             .unwrap_or_else(|| sanitize(stem));
         let slug = format!("{owner}-{name}");
-        let dir = root.join(&slug);
         let rel = slug;
+        let dir = root.join(&rel);
         if dir.join("repo.json").exists() {
             manifest_existing = crate::types::read_json::<RepoManifest>(&dir.join("repo.json")).ok();
         }
@@ -504,7 +504,7 @@ pub async fn import_one(
     let manifest = if let Some(mut m) = manifest_existing.take() {
         for t in tags {
             if !m.tags.iter().any(|e| e.eq_ignore_ascii_case(t)) {
-                m.tags.push(t.clone());
+                m.tags.push(t.to_string());
             }
         }
         m

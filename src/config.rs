@@ -24,6 +24,7 @@ pub struct Config {
     pub llm: LlmCfg,
     pub otel: OtelCfg,
     pub tags: TagsCfg,
+    pub icons: IconsCfg,
 }
 
 /// Tag-related behavior.
@@ -33,6 +34,18 @@ pub struct TagsCfg {
     /// When true, forge-suggested tags (e.g. GitHub topics) are applied to a
     /// repo's normal tag list automatically, alongside any manual tags.
     pub take_suggested: bool,
+    /// When true, the folder a repo is placed in contributes its path segments
+    /// as tags: `games/tools` adds the tags `games` and `tools`.
+    pub folders: bool,
+}
+
+/// Repository icon (forge avatar) downloading.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct IconsCfg {
+    /// Download forge avatars and store them as repo icons. `None` falls back
+    /// to the legacy `[github] fetch_avatars` key.
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -350,6 +363,13 @@ impl Default for LlmCfg {
 }
 
 impl Config {
+    /// Whether forge avatars are downloaded as repo icons. The dedicated
+    /// `[icons] enabled` key wins; when unset, the legacy `[github]
+    /// fetch_avatars` value is honored so existing configs keep working.
+    pub fn fetch_icons(&self) -> bool {
+        self.icons.enabled.unwrap_or(self.github.fetch_avatars)
+    }
+
     /// Load config from a TOML file.
     pub fn load(path: &Path) -> Result<Self> {
         let s = fs::read_to_string(path)
@@ -482,6 +502,28 @@ mod tests {
         let cfg: Config = toml::from_str("[tags]\ntake_suggested = true\n").unwrap();
         assert!(cfg.tags.take_suggested);
         assert!(!Config::default().tags.take_suggested);
+    }
+
+    #[test]
+    fn tags_folders_parses_and_defaults_off() {
+        assert!(!Config::default().tags.folders);
+        let cfg: Config = toml::from_str("[tags]\nfolders = true\n").unwrap();
+        assert!(cfg.tags.folders);
+    }
+
+    #[test]
+    fn icons_enabled_falls_back_to_legacy_github_key() {
+        // default: true via the legacy key
+        assert!(Config::default().fetch_icons());
+        // legacy false is honored while [icons] is absent
+        let legacy: Config = toml::from_str("[github]\nfetch_avatars = false\n").unwrap();
+        assert!(!legacy.fetch_icons());
+        // the dedicated key wins over the legacy one
+        let explicit: Config =
+            toml::from_str("[icons]\nenabled = false\n[github]\nfetch_avatars = true\n").unwrap();
+        assert!(!explicit.fetch_icons());
+        let on: Config = toml::from_str("[icons]\nenabled = true\n").unwrap();
+        assert!(on.fetch_icons());
     }
 
     #[test]

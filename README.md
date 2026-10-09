@@ -193,6 +193,17 @@ interval_days = 7
 [forgejo]
 # token = "env:FORGEJO_TOKEN"  # private Forgejo/Codeberg release assets
 
+[tags]
+# Adopt forge-suggested tags (GitHub topics, etc.) automatically.
+take_suggested = false
+# Split the folder a repo is placed in into tags. Putting a repo in games/tools
+# adds the tags games and tools alongside any tags you enter.
+folders = false
+
+[icons]
+# Download the repo owner's avatar (GitHub, GitLab, Forgejo) as the repo icon.
+enabled = true
+
 [releases]
 # Also download the binary assets attached to releases, for these platforms.
 # Filters match the asset filename loosely: an OS ("linux"), an arch

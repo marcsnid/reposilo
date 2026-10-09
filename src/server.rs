@@ -1030,18 +1030,40 @@ pub async fn move_repo_to_folder(
     if dest.exists() {
         return Err(format!("cannot move: {} already exists", dest.display()));
     }
+    // Materialize the destination folder chain (with manifests) so it stays
+    // visible even after this repo leaves again.
+    if !dest_folder.is_empty() {
+        if let Err(e) = crate::archiver::ensure_folder_manifests(&root, dest_folder) {
+            return Err(format!("cannot create folder: {e:#}"));
+        }
+    }
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|e| format!("cannot create folder: {e}"))?;
     }
+    let source_parent = repo.dir.parent().map(|p| p.to_path_buf());
     tokio::fs::rename(&repo.dir, &dest)
         .await
         .map_err(|e| format!("cannot move repo: {e}"))?;
+    // Drop empty implicit source folders left behind by the move.
+    if let Some(parent) = source_parent {
+        crate::archiver::sweep_empty_folders(&root, &parent);
+    }
     let new_rel = dest.strip_prefix(&root).unwrap_or(&dest).to_string_lossy().into_owned();
     // Keep the sidecars self-describing after the move.
     if let Err(e) = crate::archiver::rewrite_sidecar_repo(&dest, &new_rel) {
         tracing::warn!(repo = %new_rel, error = %format!("{e:#}"), "could not update snapshot sidecars after move");
+    }
+    // `[tags] folders`: keep location-derived tags in step with the new folder.
+    if st.cfg().await.tags.folders {
+        let manifest_path = dest.join("repo.json");
+        if let Ok(mut m) = crate::types::read_json::<crate::types::RepoManifest>(&manifest_path) {
+            crate::archiver::apply_folder_tags(&mut m.tags, &current_parent, dest_folder, true);
+            if let Err(e) = crate::types::write_json(&manifest_path, &m) {
+                tracing::warn!(repo = %new_rel, error = %format!("{e:#}"), "could not update folder tags after move");
+            }
+        }
     }
     Ok(new_rel)
 }

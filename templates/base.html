@@ -88,11 +88,17 @@
       applyFolderCollapse();
     }
     // The add-repo form lives in the top bar, so it has no server context.
-    // Mirror the active folder/tag filters into it when they change.
-    function syncAddForm() {
+    // Mirror the active folder/tag filters into it only when the URL actually
+    // changes (or the panel is opened), so a periodic htmx swap cannot wipe
+    // input the user is still typing.
+    var lastSyncedSearch = null;
+    function syncAddForm(force) {
+      var search = window.location.search || '';
+      if (!force && search === lastSyncedSearch) return;
+      lastSyncedSearch = search;
       var form = document.querySelector('.add-panel form');
       if (!form) return;
-      var p = new URLSearchParams(window.location.search || '');
+      var p = new URLSearchParams(search);
       var folder = form.querySelector('#add-folder');
       var tags = form.querySelector('#add-tags');
       if (folder && document.activeElement !== folder) folder.value = p.get('folder') || '';
@@ -165,7 +171,7 @@
   <header class="topbar">
     <a class="brand" href="/"><svg class="icon brand-icon" viewBox="0 0 16 16"><path d="M2 2h12v3H2z"/><rect x="2" y="7" width="12" height="3"/><path d="M2 12h12v2H2z"/><path d="M7 3h2v1H7zM7 8h2v1H7z"/></svg> <b>reposilo</b></a>
     <div class="topbar-actions">
-      <details class="add-menu">
+      <details class="add-menu" ontoggle="if(this.open) syncAddForm(true)">
         <summary>&#xFF0B; Add repo</summary>
         <div class="add-panel">
           <h4>Add repository</h4>
@@ -231,15 +237,13 @@
       document.body.addEventListener('htmx:oobAfterSwap', updateBulkBar);
       document.body.addEventListener('htmx:afterSwap', applyFolderCollapse);
       document.body.addEventListener('htmx:oobAfterSwap', applyFolderCollapse);
-      document.body.addEventListener('htmx:afterSwap', syncAddForm);
-      document.body.addEventListener('htmx:oobAfterSwap', syncAddForm);
       document.body.addEventListener('htmx:pushedIntoHistory', syncAddForm);
       window.addEventListener('popstate', syncAddForm);
       schedule();
       syncViewButtons();
       updateBulkBar();
       applyFolderCollapse();
-      syncAddForm();
+      syncAddForm(true);
     })();
   </script>
   {% block content %}{% endblock %}
