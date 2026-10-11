@@ -398,6 +398,17 @@ impl AppState {
         self.notifications.lock().await.unread(since)
     }
 
+    /// Repos whose manifest is behind the current on-disk schema.
+    pub async fn outdated_count(&self) -> usize {
+        self.index
+            .read()
+            .await
+            .repos
+            .iter()
+            .filter(|r| r.manifest.schema < crate::migrations::SCHEMA_VERSION)
+            .count()
+    }
+
     /// Get (building + caching if needed) the parsed listing for an archive.
     /// The cache is time-bounded and size-bounded; it never grows unbounded and
     /// never leaves files behind.
@@ -1188,6 +1199,36 @@ pub async fn spawn_refresh_job(
 }
 
 /// Spawn a full-archive verify job (manual, from the Settings page).
+/// Run schema migrations over every repo as a background job. Returns the job
+/// id; progress and the summary surface through the normal job-status UI.
+pub async fn spawn_migrate_job(st: &Arc<AppState>) -> u64 {
+    let id = st.create_job("migrate", None).await;
+    let st2 = st.clone();
+    tokio::spawn(async move {
+        let cfg = st2.cfg().await;
+        let archiver =
+            Archiver::with_governor_and_cache(cfg, st2.governor.clone(), st2.http_cache.clone());
+        let repos: Vec<(String, PathBuf)> = st2
+            .index
+            .read()
+            .await
+            .repos
+            .iter()
+            .map(|r| (r.rel.clone(), r.dir.clone()))
+            .collect();
+        let report = crate::migrations::migrate_all(&archiver, &repos, false).await;
+        let _ = st2.reindex().await;
+        let mut msg = format!("migrated {} of {} repositories", report.migrated, report.scanned);
+        if !report.errors.is_empty() {
+            msg.push_str(&format!(" ({} errors)", report.errors.len()));
+        }
+        st2.set_job_note(id, msg.clone()).await;
+        st2.finish_job(id, None).await;
+        st2.push_notification("migrate", "", msg, None).await;
+    });
+    id
+}
+
 pub async fn spawn_verify_job(st: &Arc<AppState>) -> u64 {
     spawn_verify_job_inner(st, false).await
 }
@@ -1975,6 +2016,7 @@ mod tests {
             color: None,
             auto_color: None,
             unidentified: false,
+            schema: 0,
         }
     }
 

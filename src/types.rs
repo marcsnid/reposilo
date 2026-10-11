@@ -90,6 +90,11 @@ pub struct RepoManifest {
     /// True for imported zips whose origin could not be determined.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unidentified: bool,
+    /// On-disk manifest schema this record was last written with. Missing in old
+    /// files reads as 0. Migrations bring older records up to the current
+    /// `crate::migrations::SCHEMA_VERSION`.
+    #[serde(default)]
+    pub schema: u32,
 }
 
 /// Info about a stored zip, embedded in the sidecar.

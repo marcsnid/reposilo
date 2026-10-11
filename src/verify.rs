@@ -177,6 +177,7 @@ mod tests {
                 color: None,
                 auto_color: None,
                 unidentified: false,
+                schema: 0,
             })
             .unwrap(),
         )

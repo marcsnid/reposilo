@@ -25,6 +25,14 @@
   </section>
 
   <section class="panel">
+    <h2>Archive schema</h2>
+    <p class="note">Each repo manifest records the on-disk schema it was written with. Newer code can backfill derived fields, like card colors and missing icons, into older archives. This build uses schema {{ ctx.schema_version }}.</p>
+    <div class="settings-row"><label>Repositories needing migration</label><span>{{ ctx.outdated_repos }}</span></div>
+    <button class="refresh-btn"
+      hx-post="/settings/migrate" hx-target="#toast" hx-swap="innerHTML" hx-indicator="find .spinner"><span class="spinner htmx-indicator"></span>Run migrations</button>
+  </section>
+
+  <section class="panel">
     <h2>Import a zip collection</h2>
     <p class="note">Point reposilo at a folder of zipped repositories; detection, GitHub suggestions and llama.cpp identification take it from there.</p>
     <div id="import-area">

@@ -105,6 +105,8 @@ reposilo import /path/to/zips --copy --tag imported
 # migrate an old archive to the current layout
 reposilo migrate-folders                     # owner/repo → owner-repo folders
 reposilo prune-shallow                       # remove old git stores (zip-only)
+reposilo migrate --dry-run                   # preview schema migrations
+reposilo migrate                             # backfill card colors + icons
 
 # start the web UI + API + scheduler
 reposilo serve                               # 127.0.0.1:8765 by default

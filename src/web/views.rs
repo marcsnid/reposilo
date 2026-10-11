@@ -1056,6 +1056,9 @@ pub struct SettingsCtx {
     // read-only info
     pub bind: String,
     pub archive_root: String,
+    // archive schema
+    pub schema_version: u32,
+    pub outdated_repos: usize,
     // llm
     pub llm_enabled: bool,
     pub llm_url: String,
@@ -1103,7 +1106,7 @@ pub struct SettingsFormT {
     pub ctx: SettingsCtx,
 }
 
-pub fn settings_ctx_from(cfg: &crate::config::Config, saved: bool) -> SettingsCtx {
+pub fn settings_ctx_from(cfg: &crate::config::Config, saved: bool, outdated_repos: usize) -> SettingsCtx {
     // canonicalize the configured release filters so the checkboxes reflect
     // whatever the user typed ("win64" shows up as Windows · x64)
     let canonical: Vec<String> = cfg
@@ -1139,6 +1142,8 @@ pub fn settings_ctx_from(cfg: &crate::config::Config, saved: bool) -> SettingsCt
         verify_interval_days: cfg.verify.interval_days.to_string(),
         bind: cfg.server.bind.clone(),
         archive_root: cfg.archive.root.clone(),
+        schema_version: crate::migrations::SCHEMA_VERSION,
+        outdated_repos,
         llm_enabled: cfg.llm.enabled,
         llm_url: cfg.llm.url.clone(),
         llm_model: cfg.llm.model.clone().unwrap_or_default(),
@@ -1266,6 +1271,7 @@ pub fn notif_kind_label(kind: &str) -> String {
         "repo_added" => "added".to_string(),
         "import" => "import".to_string(),
         "autotag" => "autotag".to_string(),
+        "migrate" => "migration".to_string(),
         "corrupt" => "corrupt".to_string(),
         other => other.replace('_', " "),
     }
@@ -1594,13 +1600,13 @@ mod tests {
     #[test]
     fn settings_ctx_includes_verify_toggle() {
         let mut cfg = crate::config::Config::default();
-        let ctx = settings_ctx_from(&cfg, false);
+        let ctx = settings_ctx_from(&cfg, false, 0);
         assert!(!ctx.verify_enabled, "scheduled checks default to off");
         assert_eq!(ctx.verify_interval_days, "7");
 
         cfg.verify.enabled = true;
         cfg.verify.interval_days = 30;
-        let ctx = settings_ctx_from(&cfg, false);
+        let ctx = settings_ctx_from(&cfg, false, 0);
         assert!(ctx.verify_enabled);
         assert_eq!(ctx.verify_interval_days, "30");
     }

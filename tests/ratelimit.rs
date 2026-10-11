@@ -323,6 +323,7 @@ async fn two_git_refresh_gap(min_interval_ms: u64, enabled: bool) -> (Duration, 
         color: None,
         auto_color: None,
         unidentified: false,
+        schema: 0,
     };
     reposilo::types::write_json(&repo.join("repo.json"), &manifest).unwrap();
 

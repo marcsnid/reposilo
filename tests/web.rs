@@ -1755,3 +1755,53 @@ async fn autotag_is_a_noop_without_untagged_repos() -> Result<()> {
     assert_eq!(body["message"], "no untagged repos");
     Ok(())
 }
+
+/// Solid-color PNG used by the migration tests.
+fn write_test_png(path: &Path, rgb: [u8; 3]) {
+    let img = image::RgbaImage::from_pixel(16, 16, image::Rgba([rgb[0], rgb[1], rgb[2], 255]));
+    let mut buf = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(img)
+        .write_to(&mut buf, image::ImageFormat::Png)
+        .unwrap();
+    fs::write(path, buf.into_inner()).unwrap();
+}
+
+/// The settings page reports the archive schema and migrates outdated manifests
+/// on demand, backfilling the card color from a stored icon.
+#[tokio::test]
+async fn settings_migrate_backfills_card_colors() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    let repo = root.join("owner-demo");
+    fs::create_dir_all(&repo)?;
+    // a solid red icon plus a manifest written before the schema field existed
+    write_test_png(&repo.join("icon"), [220, 40, 30]);
+    fs::write(
+        repo.join("repo.json"),
+        r#"{"forge":"github","name":"demo","added":"2025-01-01T00:00:00Z","default_branch":"main"}"#,
+    )?;
+    let (base, _st) = spawn_server(test_cfg(&root)).await;
+    let client = reqwest::Client::new();
+
+    let page = client.get(format!("{base}/settings")).send().await?.text().await?;
+    assert!(page.contains("Archive schema"), "schema section missing: {page}");
+    assert!(page.contains("Repositories needing migration"), "{page}");
+
+    let body = client
+        .post(format!("{base}/settings/migrate"))
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert!(body.contains("/repos/job-status/"), "expected a job fragment: {body}");
+    wait_jobs_done(&base).await;
+
+    let m: serde_json::Value = serde_json::from_str(&fs::read_to_string(repo.join("repo.json"))?)?;
+    assert_eq!(m["schema"], reposilo::migrations::SCHEMA_VERSION);
+    assert!(
+        m["auto_color"].as_str().is_some_and(|c| c.starts_with('#')),
+        "expected a derived tint, got {}",
+        m["auto_color"]
+    );
+    Ok(())
+}

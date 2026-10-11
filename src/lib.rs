@@ -15,6 +15,7 @@ pub mod importer;
 pub mod index;
 pub mod llm;
 pub mod metrics;
+pub mod migrations;
 pub mod platform;
 pub mod ratelimit;
 pub mod releaseapi;

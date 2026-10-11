@@ -31,6 +31,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/import", get(import_page))
         .route("/settings", get(settings_page).post(settings_save))
         .route("/settings/verify", post(settings_verify))
+        .route("/settings/migrate", post(settings_migrate))
         .route("/settings/verify/{id}", get(settings_verify_status))
         .route("/import/scan", post(import_scan))
         .route("/import/suggest", get(import_suggest))
@@ -1244,7 +1245,22 @@ async fn folders_update(
 
 async fn settings_page(State(st): State<Arc<AppState>>) -> Response {
     let cfg = st.cfg().await;
-    render(&views::SettingsT { ctx: views::settings_ctx_from(&cfg, false) })
+    let outdated = st.outdated_count().await;
+    render(&views::SettingsT { ctx: views::settings_ctx_from(&cfg, false, outdated) })
+}
+
+/// POST /settings/migrate: run on-disk schema migrations as a background job.
+async fn settings_migrate(State(st): State<Arc<AppState>>) -> Response {
+    let id = crate::server::spawn_migrate_job(&st).await;
+    let ctx = views::JobCtx {
+        id,
+        message: "Migrating archive".to_string(),
+        done: false,
+        failed: false,
+        view_url: String::new(),
+        oob_app: String::new(),
+    };
+    render(&views::JobT { ctx })
 }
 
 /// GET /stats: totals + a 7-day chart + recent days, no collector required.
@@ -1354,7 +1370,8 @@ async fn settings_save(
     }
     // Re-render just the form body (not the whole page) into #settings-area,
     // while an OOB toast confirms the save at the bottom of the viewport.
-    let form = views::SettingsFormT { ctx: views::settings_ctx_from(&cfg, false) }
+    let outdated = st.outdated_count().await;
+    let form = views::SettingsFormT { ctx: views::settings_ctx_from(&cfg, false, outdated) }
         .render()
         .unwrap_or_default();
     html(format!("{}{form}", oob_toast("Settings saved")))

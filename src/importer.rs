@@ -545,6 +545,7 @@ pub async fn import_one(
             color: None,
             auto_color: None,
             unidentified: unknown,
+            schema: crate::migrations::SCHEMA_VERSION,
         }
     };
     let _ = move_failed; // (moved earlier via is_err checks)

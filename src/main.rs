@@ -109,6 +109,15 @@ enum Command {
         #[arg(default_value = "all")]
         repo: String,
     },
+    /// Bring repo manifests up to the current on-disk schema (card colors, icons)
+    Migrate {
+        /// Repo path relative to archive root, or "all"
+        #[arg(default_value = "all")]
+        repo: String,
+        /// Show what would change without writing
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Manage user accounts for the web UI
     User {
         #[command(subcommand)]
@@ -220,6 +229,31 @@ async fn run(cli: Cli, telemetry: reposilo::telemetry::Telemetry) -> Result<()> 
                     }
                     Err(e) => eprintln!("{rel}: refresh failed: {e:#}"),
                 }
+            }
+            Ok(())
+        }
+
+        Command::Migrate { repo, dry_run } => {
+            let (cfg, _) = load_config(cli.config.as_ref())?;
+            let index = Index::load(&archive_root(&cfg))?;
+            let repos: Vec<(String, PathBuf)> = if repo == "all" {
+                index.repos.iter().map(|r| (r.rel.clone(), r.dir.clone())).collect()
+            } else {
+                let r = index.find(&repo).with_context(|| format!("no such repo: {repo}"))?;
+                vec![(r.rel.clone(), r.dir.clone())]
+            };
+            let archiver = Archiver::new(cfg);
+            let report = reposilo::migrations::migrate_all(&archiver, &repos, dry_run).await;
+            let action = if dry_run { "need migration" } else { "migrated" };
+            println!(
+                "{} repos scanned, {} {} (schema {})",
+                report.scanned,
+                report.migrated,
+                action,
+                reposilo::migrations::SCHEMA_VERSION
+            );
+            for e in &report.errors {
+                eprintln!("error: {e}");
             }
             Ok(())
         }

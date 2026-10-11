@@ -592,6 +592,7 @@ impl Archiver {
             color: None,
             auto_color,
             unidentified: false,
+            schema: crate::migrations::SCHEMA_VERSION,
         };
         crate::types::write_json(&manifest_path, &manifest)?;
 
@@ -1002,6 +1003,67 @@ impl Archiver {
         Ok(stored)
     }
 
+    /// Fetch and store the owner avatar when none is present and icons are
+    /// enabled. A zero-byte `icon` records "checked, no avatar" so the API is
+    /// not retried. Best effort: failures are ignored.
+    pub async fn backfill_icon(&self, repo_dir: &Path, origin: &str) {
+        if !self.cfg.fetch_icons() || repo_dir.join("icon").exists() {
+            return;
+        }
+        let info = crate::forge::detect(origin).ok();
+        match info.as_ref().map(|i| i.kind) {
+            Some(crate::forge::ForgeKind::GitHub) => {
+                if let Some(meta) = crate::forgeapi::github_repo_meta(&self.cfg, &self.governor, &self.http_cache, origin).await {
+                    match meta.avatar_url {
+                        Some(url) => {
+                            if let Some(bytes) = crate::forgeapi::fetch_avatar(&self.cfg, &self.governor, &url).await {
+                                let _ = fs::write(repo_dir.join("icon"), bytes);
+                            }
+                        }
+                        None => {
+                            let _ = fs::write(repo_dir.join("icon"), b"");
+                        }
+                    }
+                }
+            }
+            Some(crate::forge::ForgeKind::GitLab | crate::forge::ForgeKind::Forgejo) => {
+                if let Some(url) = crate::releaseapi::repo_avatar_url(&self.cfg, &self.governor, &self.http_cache, origin).await {
+                    if let Some(bytes) = crate::forgeapi::fetch_avatar(&self.cfg, &self.governor, &url).await {
+                        let _ = fs::write(repo_dir.join("icon"), bytes);
+                    }
+                }
+            }
+            // generic remotes and unidentified imports have no avatar API
+            _ => {}
+        }
+    }
+
+    /// Derive the card tint from the stored icon once. The color is stable
+    /// identity, so there is no reason to decode again later; an empty string
+    /// records "icon present but no usable color" so a gray avatar is not
+    /// re-decoded either.
+    pub async fn derive_auto_color(&self, manifest: &mut RepoManifest, repo_dir: &Path) {
+        if manifest.auto_color.is_some() {
+            return;
+        }
+        if let Ok(bytes) = fs::read(repo_dir.join("icon")) {
+            if !bytes.is_empty() {
+                let hex = tokio::task::spawn_blocking(move || crate::color::extract_auto_color(&bytes))
+                    .await
+                    .ok()
+                    .flatten();
+                manifest.auto_color = Some(hex.unwrap_or_default());
+            }
+        }
+    }
+
+    /// Fetch a missing icon (when enabled) and derive the card tint from it.
+    /// Shared by refresh and the schema migration.
+    pub async fn backfill_card_color(&self, manifest: &mut RepoManifest, repo_dir: &Path, origin: &str) {
+        self.backfill_icon(repo_dir, origin).await;
+        self.derive_auto_color(manifest, repo_dir).await;
+    }
+
     /// Refresh one repo against its remote: re-snapshot the default branch if
     /// it moved, archive a newer semver release if one exists, prune per
     /// retention, and record the check time
@@ -1027,54 +1089,9 @@ impl Archiver {
         let name = manifest.name.clone();
         let mirror = shallow.is_dir(); // full-mirror mode keeps a persistent git store
 
-        // backfill the owner avatar for archives created before icon support.
-        // GitHub resolves its avatar from the repo metadata call; GitLab and
-        // Forgejo use their own project API. A zero-byte `icon` marks
-        // "checked, no avatar" so the API is not retried.
-        if self.cfg.fetch_icons() && !repo_dir.join("icon").exists() {
-            let info = crate::forge::detect(&origin).ok();
-            match info.as_ref().map(|i| i.kind) {
-                Some(crate::forge::ForgeKind::GitHub) => {
-                    if let Some(meta) = crate::forgeapi::github_repo_meta(&self.cfg, &self.governor, &self.http_cache, &origin).await {
-                        match meta.avatar_url {
-                            Some(url) => {
-                                if let Some(bytes) = crate::forgeapi::fetch_avatar(&self.cfg, &self.governor, &url).await {
-                                    let _ = fs::write(repo_dir.join("icon"), bytes);
-                                }
-                            }
-                            None => {
-                                let _ = fs::write(repo_dir.join("icon"), b"");
-                            }
-                        }
-                    }
-                }
-                Some(crate::forge::ForgeKind::GitLab | crate::forge::ForgeKind::Forgejo) => {
-                    if let Some(url) = crate::releaseapi::repo_avatar_url(&self.cfg, &self.governor, &self.http_cache, &origin).await {
-                        if let Some(bytes) = crate::forgeapi::fetch_avatar(&self.cfg, &self.governor, &url).await {
-                            let _ = fs::write(repo_dir.join("icon"), bytes);
-                        }
-                    }
-                }
-                // generic remotes and unidentified imports have no avatar API
-                _ => {}
-            }
-        }
-
-        // Derive the card tint from the stored icon once. The color is stable
-        // identity, so there is no reason to decode again on later refreshes;
-        // an empty string records "icon present but no usable color" so a gray
-        // avatar is not re-decoded either.
-        if manifest.auto_color.is_none() {
-            if let Ok(bytes) = fs::read(repo_dir.join("icon")) {
-                if !bytes.is_empty() {
-                    let hex = tokio::task::spawn_blocking(move || crate::color::extract_auto_color(&bytes))
-                        .await
-                        .ok()
-                        .flatten();
-                    manifest.auto_color = Some(hex.unwrap_or_default());
-                }
-            }
-        }
+        // Bring older archives up to the current card behavior: fetch a missing
+        // owner avatar when icons are enabled, then derive the tint from it.
+        self.backfill_card_color(&mut manifest, repo_dir, &origin).await;
 
         // Probe the remote first (cheap). If it's gone entirely, record that
         // state on the manifest and keep the local archive untouched.
