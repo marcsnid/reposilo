@@ -25,7 +25,7 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(index_page))
         .route("/healthz", get(healthz))
-        .route("/notifications", get(notifications_page).post(notifications_mark_read))
+        .route("/notifications", get(notifications_page))
         .route("/stats", get(stats_page))
         .route("/import", get(import_page))
         .route("/settings", get(settings_page).post(settings_save))
@@ -1679,20 +1679,8 @@ async fn notifications_page(State(st): State<Arc<AppState>>, headers: HeaderMap)
             }
         })
         .collect();
-    let ctx = views::NotificationsCtx { items: views, can_mark_read: true };
+    let ctx = views::NotificationsCtx { items: views };
     render(&views::NotificationsT { ctx })
-}
-
-async fn notifications_mark_read(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    match crate::auth::current_user(&st, &headers) {
-        Some(user) => st.mark_notifications_seen_for(&user).await,
-        None => st.mark_notifications_seen().await,
-    }
-    Response::builder()
-        .status(StatusCode::SEE_OTHER)
-        .header("location", "/notifications")
-        .body(Body::empty())
-        .unwrap()
 }
 
 #[cfg(test)]

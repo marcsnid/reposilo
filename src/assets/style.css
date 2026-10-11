@@ -565,8 +565,6 @@ table.files tr:last-child td { border-bottom: none; }
 
 /* ---------- notifications ---------- */
 .notification { margin-bottom: 0.6rem; }
-/* the left ribbon carries the repo's card color; the row tint stays subtle */
-.notification.tinted { border-left: 3px solid var(--tint); }
 .notification .notif-row { display: flex; gap: 0.8rem; align-items: flex-start; }
 .notification .notif-ident {
   flex: 0 0 12rem; min-width: 0; display: flex; align-items: center; gap: 0.4rem;

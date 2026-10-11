@@ -1232,7 +1232,6 @@ pub fn notif_kind_label(kind: &str) -> String {
 #[derive(Debug, Clone)]
 pub struct NotificationsCtx {
     pub items: Vec<NotifView>,
-    pub can_mark_read: bool,
 }
 
 #[derive(askama::Template)]
