@@ -207,6 +207,11 @@ button:hover, button[type="submit"]:hover { background: var(--chip-hover); }
 
 /* ---------- repo grid ---------- */
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 0.8rem; }
+/* infinite-scroll sentinel: spans the row so it sits centered at the bottom */
+.repo-more {
+  grid-column: 1 / -1; text-align: center; color: var(--text-muted);
+  font-size: 0.85rem; padding: 0.9rem 0;
+}
 .card {
   background: var(--bg-panel); border: 1px solid var(--border); border-radius: 8px;
   padding: 0.9rem 1rem; display: flex; flex-direction: column; gap: 0.35rem;
@@ -580,6 +585,9 @@ table.files tr:last-child td { border-bottom: none; }
 .notification .notif-head { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
 .notification .readme { font-size: 0.85rem; margin-top: 0.4rem; }
 .notification .notif-kind { flex: 0 0 auto; }
+.notif-more {
+  text-align: center; color: var(--text-muted); font-size: 0.85rem; padding: 0.9rem 0;
+}
 @media (max-width: 640px) {
   .notification .notif-row { flex-direction: column; gap: 0.35rem; }
   .notification .notif-ident { flex: none; width: 100%; }

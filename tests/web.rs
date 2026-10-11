@@ -41,6 +41,7 @@ fn templates_render_balanced_divs() {
     for (name, tpl) in [
         ("index", include_str!("../templates/index.html")),
         ("app", include_str!("../templates/app.html")),
+        ("repo_grid", include_str!("../templates/repo_grid.html")),
         ("fragment", include_str!("../templates/fragment.html")),
         ("detail", include_str!("../templates/repo_detail.html")),
         ("blob", include_str!("../templates/blob.html")),
@@ -50,6 +51,8 @@ fn templates_render_balanced_divs() {
         ("verify", include_str!("../templates/verify_status.html")),
         ("settings", include_str!("../templates/settings.html")),
         ("settings_form", include_str!("../templates/settings_form.html")),
+        ("notif_rows", include_str!("../templates/notif_rows.html")),
+        ("notifications_list", include_str!("../templates/notifications_list.html")),
         ("stats", include_str!("../templates/stats.html")),
         ("base", include_str!("../templates/base.html")),
     ] {
@@ -1087,6 +1090,55 @@ async fn index_offers_grid_and_list_view_toggles() -> Result<()> {
     Ok(())
 }
 
+/// The repo grid paginates: the first page stops at REPO_PAGE_SIZE and leaves a
+/// scroll sentinel pointing at the next offset; /repos/more returns the rest and
+/// drops the sentinel once the feed is exhausted. Active filters ride along.
+#[tokio::test]
+async fn repo_grid_paginates_with_infinite_scroll() -> Result<()> {
+    let page_size = reposilo::web::views::REPO_PAGE_SIZE;
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    for i in 0..(page_size + 5) {
+        let dir = root.join(format!("owner-repo{i:03}"));
+        fs::create_dir_all(&dir)?;
+        let manifest = serde_json::json!({
+            "forge": "generic",
+            "name": format!("repo{i:03}"),
+            "added": "2025-01-01T00:00:00Z",
+            "default_branch": "main",
+            "tags": ["bulk"],
+        });
+        fs::write(dir.join("repo.json"), serde_json::to_vec(&manifest)?)?;
+    }
+    let (base, _st) = spawn_server(test_cfg(&root)).await;
+    let client = reqwest::Client::new();
+
+    let first = client.get(format!("{base}/")).send().await?.text().await?;
+    assert_eq!(first.matches("data-rel=\"").count(), page_size, "first page card count");
+    assert!(first.contains("hx-trigger=\"revealed\""), "sentinel missing: {first}");
+    assert!(
+        first.contains(&format!("offset={page_size}")),
+        "sentinel should point at the next offset"
+    );
+
+    let second = client
+        .get(format!("{base}/repos/more?offset={page_size}"))
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert_eq!(second.matches("data-rel=\"").count(), 5, "second page card count");
+    assert!(!second.contains("hx-trigger=\"revealed\""), "sentinel should be gone at the end");
+
+    // active filters are carried into the sentinel so the feed stays consistent
+    let filtered = client.get(format!("{base}/?tags=bulk")).send().await?.text().await?;
+    assert!(
+        filtered.contains("/repos/more?tags=bulk"),
+        "filters lost in the sentinel url: {filtered}"
+    );
+    Ok(())
+}
+
 /// Gallery cards expose hover quick actions: force-refresh and open-origin.
 #[tokio::test]
 async fn gallery_card_has_quick_actions() -> Result<()> {
@@ -1488,6 +1540,66 @@ async fn viewing_notifications_clears_the_bell_without_accounts() -> Result<()> 
     Ok(())
 }
 
+/// The notification list paginates the same way as the repo grid, and the feed
+/// stops at the store's limit rather than loading forever.
+#[tokio::test]
+async fn notifications_paginate_and_stop_at_the_limit() -> Result<()> {
+    let page = reposilo::web::views::NOTIF_PAGE_SIZE;
+    let limit = reposilo::server::NOTIFICATION_LIMIT;
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    fs::create_dir_all(&root)?;
+
+    // Seed more than one page, but fewer than the cap.
+    let seed = page + 7;
+    let items: Vec<serde_json::Value> = (0..seed)
+        .map(|i| {
+            serde_json::json!({
+                "id": (seed - i) as u64,
+                "kind": "new_snapshot",
+                "repo": "owner-repo",
+                "title": format!("item {i}"),
+                "at": "2025-01-01T00:00:00Z",
+            })
+        })
+        .collect();
+    let file = serde_json::json!({ "next_id": seed as u64 + 1, "items": items });
+    fs::write(root.join("notifications.json"), serde_json::to_vec(&file)?)?;
+
+    let (base, st) = spawn_server(test_cfg(&root)).await;
+    let client = reqwest::Client::new();
+
+    let first = client.get(format!("{base}/notifications")).send().await?.text().await?;
+    assert_eq!(first.matches("class=\"panel notification").count(), page, "first page size");
+    assert!(first.contains("hx-trigger=\"revealed\""), "sentinel missing: {first}");
+    assert!(
+        first.contains(&format!("offset={page}")),
+        "sentinel should point at the next offset"
+    );
+
+    let more = client
+        .get(format!("{base}/notifications/more?offset={page}"))
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert_eq!(more.matches("class=\"panel notification").count(), 7, "second page size");
+    assert!(!more.contains("hx-trigger=\"revealed\""), "sentinel should be gone at the end");
+
+    // The store drops the oldest once it crosses the limit, so load-more can
+    // never run past it.
+    for i in 0..(limit + 5) {
+        st.push_notification("new_snapshot", "owner-repo", format!("cap {i}"), None)
+            .await;
+    }
+    assert_eq!(
+        st.notifications.lock().await.items.len(),
+        limit,
+        "notification store must stop at the limit"
+    );
+    Ok(())
+}
+
 /// Creating a folder over a directory that exists without a manifest (an empty
 /// leftover from a move) adopts it instead of refusing with "already exists".
 #[tokio::test]
@@ -1581,5 +1693,65 @@ async fn folder_path_contributes_tags_when_enabled() -> Result<()> {
     assert!(tags.contains(&"tools".to_string()), "{tags:?}");
     assert!(tags.contains(&"cool".to_string()), "{tags:?}");
     assert!(!tags.contains(&"games".to_string()), "old folder tag is dropped: {tags:?}");
+    Ok(())
+}
+
+/// Dynamic fragments that fail should report the problem in place, not return a
+/// 500 or leave a dead swap target. These paths never touch the network.
+#[tokio::test]
+async fn dynamic_fragments_report_errors_in_place() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    fs::create_dir_all(&root)?;
+    let (base, _st) = spawn_server(test_cfg(&root)).await;
+    let client = reqwest::Client::new();
+
+    // the folder form close is a no-op that clears the modal target
+    let close = client.get(format!("{base}/folders/close")).send().await?;
+    assert_eq!(close.status(), 200);
+    assert!(close.text().await?.is_empty(), "close should return an empty fragment");
+
+    // an unknown import scan is reported inline instead of erroring
+    let suggest = client
+        .get(format!("{base}/import/suggest?scan=999&i=0"))
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert!(suggest.contains("Unknown scan"), "expected inline scan error: {suggest}");
+
+    // llama.cpp is off by default, so both LLM entry points say so clearly
+    let llm = client
+        .post(format!("{base}/import/llm"))
+        .form(&[("scan", "1"), ("i", "0")])
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert!(llm.contains("not enabled"), "expected disabled note: {llm}");
+
+    let autotag = client.post(format!("{base}/api/autotag")).send().await?;
+    assert_eq!(autotag.status(), 400, "autotag should be rejected when LLM is off");
+    Ok(())
+}
+
+/// With llama.cpp enabled but no untagged repos, autotag stops before any LLM
+/// call and reports the cheap no-op.
+#[tokio::test]
+async fn autotag_is_a_noop_without_untagged_repos() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    fs::create_dir_all(&root)?;
+    let mut cfg = test_cfg(&root);
+    cfg.llm.enabled = true;
+    let (base, _st) = spawn_server(cfg).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/api/autotag"))
+        .send()
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await?;
+    assert_eq!(body["message"], "no untagged repos");
     Ok(())
 }

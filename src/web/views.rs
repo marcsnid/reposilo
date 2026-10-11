@@ -184,6 +184,26 @@ pub fn page_url(tags: &[String], q: &str, folder: &str) -> String {
     }
 }
 
+/// How many repo cards render per page; the grid loads more on scroll.
+pub const REPO_PAGE_SIZE: usize = 48;
+
+/// URL the grid's infinite-scroll sentinel requests for the next page of
+/// cards, carrying the current filters so the feed stays consistent.
+fn repo_more_url(tags: &[String], q: &str, folder: &str, offset: usize) -> String {
+    let mut params = Vec::new();
+    if !tags.is_empty() {
+        params.push(format!("tags={}", urlencode(&tags.join(","))));
+    }
+    if !q.is_empty() {
+        params.push(format!("q={}", urlencode(q)));
+    }
+    if !folder.is_empty() {
+        params.push(format!("folder={}", urlencode(folder)));
+    }
+    params.push(format!("offset={offset}"));
+    format!("/repos/more?{}", params.join("&"))
+}
+
 fn without(tags: &[String], tag: &str) -> Vec<String> {
     tags.iter().filter(|t| !t.eq_ignore_ascii_case(tag)).cloned().collect()
 }
@@ -284,11 +304,21 @@ pub struct ListCtx {
     pub popular_tags: Vec<TagLink>,
     pub repos: Vec<RepoCard>,
     pub total: usize,
+    /// True when there are more repos after this page (grid loads them on scroll).
+    pub has_more: bool,
+    /// URL the grid's sentinel requests for the next page of cards.
+    pub more_url: String,
 }
 
 #[derive(Template)]
 #[template(path = "index.html")]
 pub struct IndexT {
+    pub ctx: ListCtx,
+}
+
+#[derive(Template)]
+#[template(path = "repo_grid.html")]
+pub struct RepoMoreT {
     pub ctx: ListCtx,
 }
 
@@ -388,7 +418,13 @@ fn folder_dot_color(path: &str) -> u32 {
     path.bytes().map(|b| b as u32).fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b)) % 8
 }
 
-pub async fn build_list_ctx(st: &Arc<AppState>, tags: &[String], q: &str, folder: &str) -> ListCtx {
+pub async fn build_list_ctx(
+    st: &Arc<AppState>,
+    tags: &[String],
+    q: &str,
+    folder: &str,
+    offset: usize,
+) -> ListCtx {
     let index = st.index.read().await;
     let mut entries = index.filter(tags, (!q.is_empty()).then_some(q));
     let folder = folder.trim_matches('/');
@@ -396,8 +432,11 @@ pub async fn build_list_ctx(st: &Arc<AppState>, tags: &[String], q: &str, folder
         entries.retain(|r| r.rel == folder || r.rel.starts_with(&format!("{folder}/")));
     }
 
-    // repo cards
-    let repos: Vec<RepoCard> = entries
+    // repo cards: one page at a time, in the index's stable order
+    let total = entries.len();
+    let offset = offset.min(total);
+    let end = (offset + REPO_PAGE_SIZE).min(total);
+    let repos: Vec<RepoCard> = entries[offset..end]
         .iter()
         .map(|r| {
             let total_bytes: u64 = r
@@ -515,7 +554,8 @@ pub async fn build_list_ctx(st: &Arc<AppState>, tags: &[String], q: &str, folder
         chips.push(ChipLink { label: format!("“{q}”"), url: page_url(tags, "", folder) });
     }
 
-    let total = repos.len();
+    let has_more = end < total;
+    let more_url = repo_more_url(tags, q, folder, end);
     ListCtx {
         q: q.to_string(),
         active_tags_csv: tags.join(","),
@@ -526,6 +566,8 @@ pub async fn build_list_ctx(st: &Arc<AppState>, tags: &[String], q: &str, folder
         popular_tags,
         repos,
         total,
+        has_more,
+        more_url,
     }
 }
 
@@ -1232,12 +1274,96 @@ pub fn notif_kind_label(kind: &str) -> String {
 #[derive(Debug, Clone)]
 pub struct NotificationsCtx {
     pub items: Vec<NotifView>,
+    /// True when older notifications remain (the list loads them on scroll).
+    pub has_more: bool,
+    /// URL the list's sentinel requests for the next page.
+    pub more_url: String,
 }
 
 #[derive(askama::Template)]
 #[template(path = "notifications_list.html")]
 pub struct NotificationsT {
     pub ctx: NotificationsCtx,
+}
+
+#[derive(askama::Template)]
+#[template(path = "notif_rows.html")]
+pub struct NotifRowsT {
+    pub ctx: NotificationsCtx,
+}
+
+/// How many notifications render per page; the list loads older ones on scroll.
+pub const NOTIF_PAGE_SIZE: usize = 50;
+
+/// Build one page of the notification list. `offset` walks back through the
+/// store, which keeps at most [`crate::server::NOTIFICATION_LIMIT`] items, so
+/// the feed cannot load past that cap.
+pub async fn build_notifications_ctx(st: &Arc<AppState>, offset: usize) -> NotificationsCtx {
+    let items: Vec<crate::server::Notification> = st
+        .notifications
+        .lock()
+        .await
+        .items
+        .iter()
+        .take(crate::server::NOTIFICATION_LIMIT)
+        .cloned()
+        .collect();
+
+    // Resolve each notification's repo tint, icon and display name once, so the
+    // marker and avatar on the left match the repo's card.
+    let lookup: std::collections::HashMap<String, (String, bool, String)> = {
+        let idx = st.index.read().await;
+        idx.repos
+            .iter()
+            .map(|r| {
+                let tint = resolve_tint(
+                    r.manifest.color.as_deref(),
+                    r.manifest.auto_color.as_deref(),
+                    &r.rel,
+                );
+                (r.rel.clone(), (tint, r.has_icon, r.manifest.name.clone()))
+            })
+            .collect()
+    };
+
+    let total = items.len();
+    let offset = offset.min(total);
+    let end = (offset + NOTIF_PAGE_SIZE).min(total);
+    let views: Vec<NotifView> = items[offset..end]
+        .iter()
+        .map(|n| {
+            let (at, at_exact) = humanize_ago(&n.at).unwrap_or_else(|| {
+                let t: String = n.at.chars().take(16).collect();
+                (t.clone(), t)
+            });
+            let (tint, has_icon, repo_name) = match lookup.get(&n.repo) {
+                Some((tint, has_icon, name)) => (tint.clone(), *has_icon, name.clone()),
+                // The repo may be gone: keep a stable color from its path.
+                None if !n.repo.is_empty() => (resolve_tint(None, None, &n.repo), false, n.repo.clone()),
+                None => (String::new(), false, String::new()),
+            };
+            NotifView {
+                kind: n.kind.clone(),
+                kind_label: notif_kind_label(&n.kind),
+                repo: n.repo.clone(),
+                repo_name,
+                title: n.title.clone(),
+                at,
+                at_exact,
+                changelog_html: n
+                    .body
+                    .as_deref()
+                    .map(crate::files::markdown_to_html)
+                    .unwrap_or_default(),
+                tint,
+                has_icon,
+            }
+        })
+        .collect();
+
+    let has_more = end < total;
+    let more_url = format!("/notifications/more?offset={end}");
+    NotificationsCtx { items: views, has_more, more_url }
 }
 
 // ---------- stats view ----------

@@ -1,0 +1,38 @@
+{% for n in ctx.items %}
+  <div class="panel notification{% if !n.tint.is_empty() %} tinted{% endif %}"{% if !n.tint.is_empty() %} style="--tint: {{ n.tint }}"{% endif %}>
+    <div class="notif-row">
+      <div class="notif-ident">
+        {% if n.has_icon %}
+        <img class="repo-icon" src="/repo-icon/{{ n.repo }}" alt="" width="20" height="20" loading="lazy">
+        {% else if !n.tint.is_empty() %}
+        <span class="notif-dot" style="background: {{ n.tint }}"></span>
+        {% endif %}
+        {% if !n.repo.is_empty() %}
+        <a class="notif-repo" href="/repos/{{ n.repo }}">{{ n.repo_name }}</a>
+        {% else %}
+        <span class="notif-repo dim">reposilo</span>
+        {% endif %}
+        <span class="dim notif-time"><span title="{{ n.at_exact }}">{{ n.at }}</span></span>
+      </div>
+      <div class="notif-body">
+        <div class="notif-head">
+          <span class="badge notif-kind">{{ n.kind_label }}</span>
+          <b>{{ n.title }}</b>
+        </div>
+        {% if !n.changelog_html.is_empty() %}
+        {% if n.kind == "new_snapshot" %}
+        <details class="notif-details">
+          <summary class="dim">Show changes</summary>
+          <div class="readme">{{ n.changelog_html|safe }}</div>
+        </details>
+        {% else %}
+        <div class="readme">{{ n.changelog_html|safe }}</div>
+        {% endif %}
+        {% endif %}
+      </div>
+    </div>
+  </div>
+{% endfor %}
+{% if ctx.has_more %}
+  <div class="notif-more" hx-get="{{ ctx.more_url }}" hx-trigger="revealed" hx-swap="outerHTML">Loading more</div>
+{% endif %}

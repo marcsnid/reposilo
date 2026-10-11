@@ -50,6 +50,9 @@ pub struct Job {
     pub created: String,
 }
 
+/// Most notifications kept on disk and in memory. Older ones are dropped.
+pub const NOTIFICATION_LIMIT: usize = 500;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Notification {
     pub id: u64,
@@ -341,8 +344,8 @@ impl AppState {
         let id = store.items.first().map(|i| i.id + 1).unwrap_or(1);
         let n = Notification { id, ..n };
         store.items.insert(0, n.clone());
-        if store.items.len() > 500 {
-            store.items.truncate(500);
+        if store.items.len() > NOTIFICATION_LIMIT {
+            store.items.truncate(NOTIFICATION_LIMIT);
         }
         let file = store.to_file();
         let _ = write_json(&notif_path, &file);

@@ -1,0 +1,43 @@
+{% for r in ctx.repos %}
+      <div class="card{% if !r.tint.is_empty() %} tinted{% endif %}"{% if !r.tint.is_empty() %} style="--tint: {{ r.tint }}"{% endif %} draggable="true" data-rel="{{ r.rel }}" ondragstart="dragRepo(event)">
+        <div class="card-head">
+          <input type="checkbox" class="bulk-check" value="{{ r.rel }}" onclick="event.stopPropagation(); updateBulkBar()" aria-label="select {{ r.name }}">
+          {% if r.has_icon %}<img class="repo-icon" src="/repo-icon/{{ r.rel }}" alt="" width="20" height="20" loading="lazy">{% endif %}
+          <a class="card-title" href="/repos/{{ r.rel }}">{{ r.name }}</a>
+          <span class="badge forge-{{ r.forge }}">{{ r.forge }}</span>
+          {% if r.remote_dead %}<span class="badge">remote dead</span>{% else if r.remote_gone %}<span class="badge">remote gone</span>{% endif %}
+          <div class="card-actions">
+            <button type="button" class="card-action" title="Force refresh"
+                    hx-post="/repos/{{ r.rel }}/refresh" hx-target="#toast" hx-swap="innerHTML"
+                    hx-indicator="find .spinner" onclick="event.stopPropagation()">
+              <span class="spinner htmx-indicator"></span>
+              <svg class="icon" viewBox="0 0 16 16"><path d="M2.5 8a5.5 5.5 0 0 1 9.4-3.9L14 6.2"/><path d="M14 2.5v3.7h-3.7"/><path d="M13.5 8a5.5 5.5 0 0 1-9.4 3.9L2 9.8"/><path d="M2 13.5V9.8h3.7"/></svg>
+            </button>
+            {% if !r.origin.is_empty() %}
+            <a class="card-action" href="{{ r.origin }}" target="_blank" rel="noopener" title="Open origin" onclick="event.stopPropagation()">
+              <svg class="icon" viewBox="0 0 16 16"><path d="M6 3.5H3.5v9h9V10"/><path d="M9 2.5h4.5V7"/><path d="M13.5 2.5 7.5 8.5"/></svg>
+            </a>
+            {% endif %}
+          </div>
+        </div>
+        <div class="card-sub">{{ r.rel }} · archived <span title="{{ r.last_archived }}">{{ r.last_archived_ago }}</span></div>
+        {% if !r.description.is_empty() %}<p class="card-desc">{{ r.description }}</p>{% endif %}
+        <div class="card-meta">
+          {% if !r.language.is_empty() %}<span class="lang" title="primary language"><i class="dot {{ r.lang_class }}"></i> {{ r.language }}</span>{% endif %}
+          <span title="default branch"><svg class="icon" viewBox="0 0 16 16"><circle cx="3.5" cy="3.5" r="1.9"/><circle cx="3.5" cy="12.5" r="1.9"/><circle cx="12.5" cy="3.5" r="1.9"/><path d="M3.5 5.5v5M12.5 5.5v1.2a4 4 0 0 1-4 4H5.7"/></svg>{{ r.branch }}</span>
+          <span title="snapshots"><svg class="icon" viewBox="0 0 16 16"><path d="M8 1.2l6.7 3.8v6L8 14.8 1.3 11V5z"/><path d="M1.3 5L8 8.8 14.7 5M8 8.8v5.9"/></svg>{{ r.snapshot_count }}</span>
+          {% if !r.latest_release.is_empty() %}<span title="latest release"><svg class="icon" viewBox="0 0 16 16"><path d="M1 7.6V2.5a1 1 0 0 1 1-1h5.1a1 1 0 0 1 .71.3l6.9 6.9a1 1 0 0 1 0 1.4l-4.6 4.6a1 1 0 0 1-1.4 0L1.3 8.3a1 1 0 0 1-.3-.7Z"/><circle cx="4.8" cy="4.8" r="1.3" fill="currentColor" stroke="none"/></svg>{{ r.latest_release }}</span>{% endif %}
+          <span title="total archived size"><svg class="icon" viewBox="0 0 16 16"><ellipse cx="8" cy="3.6" rx="6.5" ry="2.6"/><path d="M1.5 3.6v8.8c0 1.44 2.91 2.6 6.5 2.6s6.5-1.16 6.5-2.6V3.6"/><path d="M1.5 8c0 1.44 2.91 2.6 6.5 2.6S14.5 9.44 14.5 8"/></svg>{{ r.size_human }}</span>
+        </div>
+        {% if !r.tags.is_empty() %}
+        <div class="chips">
+          {% for t in r.tags %}
+          <a class="chip" hx-get="{{ t.url }}" hx-target="#app" hx-push-url="true">#{{ t.tag }}</a>
+          {% endfor %}
+        </div>
+        {% endif %}
+      </div>
+{% endfor %}
+{% if ctx.has_more %}
+      <div class="repo-more" hx-get="{{ ctx.more_url }}" hx-trigger="revealed" hx-swap="outerHTML">Loading more</div>
+{% endif %}

@@ -26,6 +26,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/", get(index_page))
         .route("/healthz", get(healthz))
         .route("/notifications", get(notifications_page))
+        .route("/notifications/more", get(notifications_more))
         .route("/stats", get(stats_page))
         .route("/import", get(import_page))
         .route("/settings", get(settings_page).post(settings_save))
@@ -36,6 +37,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/import/llm", post(import_llm))
         .route("/import/commit", post(import_commit))
         .route("/repos/add", post(add_repo_form))
+        .route("/repos/more", get(repos_more))
         .route("/repos/job-status/{id}", get(job_status))
         .route("/folders/new", get(folders_new))
         .route("/folders/close", get(folders_close))
@@ -72,7 +74,7 @@ async fn oob_app_refresh(st: &Arc<AppState>) -> String {
 /// an in-page action (for example a background add) does not reset the view the
 /// user is looking at.
 async fn oob_app_refresh_with(st: &Arc<AppState>, tags: &[String], q: &str, folder: &str) -> String {
-    let ctx = views::build_list_ctx(st, tags, q, folder).await;
+    let ctx = views::build_list_ctx(st, tags, q, folder, 0).await;
     let inner = views::FragmentT { ctx }.render().unwrap_or_default();
     let options = folder_options_html(st).await;
     format!(
@@ -244,12 +246,30 @@ async fn index_page(
     let tags = csv_param(&map, "tags");
     let q = map.get("q").cloned().unwrap_or_default();
     let folder = map.get("folder").cloned().unwrap_or_default();
-    let ctx = build_list_ctx(&st, &tags, &q, &folder).await;
+    let ctx = build_list_ctx(&st, &tags, &q, &folder, 0).await;
     if headers.contains_key("hx-request") {
         render(&FragmentT { ctx })
     } else {
         render(&IndexT { ctx })
     }
+}
+
+/// GET /repos/more: one more page of repo cards for the grid's scroll sentinel.
+/// Returns cards plus the next sentinel, so an outerHTML swap keeps the feed
+/// going. Filters are carried in the URL so the feed never shifts mid-scroll.
+async fn repos_more(
+    State(st): State<Arc<AppState>>,
+    Query(map): Query<HashMap<String, String>>,
+) -> Response {
+    let tags = csv_param(&map, "tags");
+    let q = map.get("q").cloned().unwrap_or_default();
+    let folder = map.get("folder").cloned().unwrap_or_default();
+    let offset = map
+        .get("offset")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0);
+    let ctx = build_list_ctx(&st, &tags, &q, &folder, offset).await;
+    render(&views::RepoMoreT { ctx })
 }
 
 /// POST /repos/add: form-encoded { url, tags?, notes? }. Kicks off the same
@@ -1626,61 +1646,23 @@ async fn notifications_page(State(st): State<Arc<AppState>>, headers: HeaderMap)
         Some(u) => st.mark_notifications_seen_for(u).await,
         None => st.mark_notifications_seen().await,
     }
-    let items: Vec<crate::server::Notification> =
-        st.notifications.lock().await.items.iter().take(100).cloned().collect();
-
-    // Resolve each notification's repo tint, icon and display name once, so the
-    // ribbon and avatar on the left match the repo's card.
-    let lookup: HashMap<String, (String, bool, String)> = {
-        let idx = st.index.read().await;
-        idx.repos
-            .iter()
-            .map(|r| {
-                let tint = views::resolve_tint(
-                    r.manifest.color.as_deref(),
-                    r.manifest.auto_color.as_deref(),
-                    &r.rel,
-                );
-                (r.rel.clone(), (tint, r.has_icon, r.manifest.name.clone()))
-            })
-            .collect()
-    };
-
-    let views: Vec<views::NotifView> = items
-        .iter()
-        .map(|n| {
-            let (at, at_exact) = views::humanize_ago(&n.at).unwrap_or_else(|| {
-                let t: String = n.at.chars().take(16).collect();
-                (t.clone(), t)
-            });
-            let (tint, has_icon, repo_name) = match lookup.get(&n.repo) {
-                Some((tint, has_icon, name)) => (tint.clone(), *has_icon, name.clone()),
-                // The repo may be gone: keep a stable color from its path.
-                None if !n.repo.is_empty() => {
-                    (views::resolve_tint(None, None, &n.repo), false, n.repo.clone())
-                }
-                None => (String::new(), false, String::new()),
-            };
-            views::NotifView {
-                kind: n.kind.clone(),
-                kind_label: views::notif_kind_label(&n.kind),
-                repo: n.repo.clone(),
-                repo_name,
-                title: n.title.clone(),
-                at,
-                at_exact,
-                changelog_html: n
-                    .body
-                    .as_deref()
-                    .map(crate::files::markdown_to_html)
-                    .unwrap_or_default(),
-                tint,
-                has_icon,
-            }
-        })
-        .collect();
-    let ctx = views::NotificationsCtx { items: views };
+    let ctx = views::build_notifications_ctx(&st, 0).await;
     render(&views::NotificationsT { ctx })
+}
+
+/// GET /notifications/more: the next page of notifications for the list's
+/// scroll sentinel. Read state is not touched here; viewing the first page
+/// already cleared the bell.
+async fn notifications_more(
+    State(st): State<Arc<AppState>>,
+    Query(map): Query<HashMap<String, String>>,
+) -> Response {
+    let offset = map
+        .get("offset")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0);
+    let ctx = views::build_notifications_ctx(&st, offset).await;
+    render(&views::NotifRowsT { ctx })
 }
 
 #[cfg(test)]
