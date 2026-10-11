@@ -1,4 +1,5 @@
 {% for n in ctx.items %}
+  {% if n.show_week_divider %}<div class="notif-week-divider">Older than a week ago</div>{% endif %}
   <div class="panel notification{% if !n.tint.is_empty() %} tinted{% endif %}"{% if !n.tint.is_empty() %} style="--tint: {{ n.tint }}"{% endif %}>
     <div class="notif-row">
       <div class="notif-ident">

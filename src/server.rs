@@ -50,9 +50,6 @@ pub struct Job {
     pub created: String,
 }
 
-/// Most notifications kept on disk and in memory. Older ones are dropped.
-pub const NOTIFICATION_LIMIT: usize = 500;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Notification {
     pub id: u64,
@@ -100,6 +97,18 @@ impl NotificationStore {
             seen_at: self.seen_at.clone(),
             items: self.items.clone(),
         }
+    }
+
+    /// Drop notifications older than `keep_days` (0 keeps everything). A
+    /// malformed timestamp is kept rather than silently discarded.
+    fn prune(&mut self, keep_days: u32) {
+        if keep_days == 0 {
+            return;
+        }
+        let cutoff = OffsetDateTime::now_utc() - time::Duration::days(i64::from(keep_days));
+        self.items.retain(|n| {
+            OffsetDateTime::parse(&n.at, &Rfc3339).map(|t| t >= cutoff).unwrap_or(true)
+        });
     }
 
     /// Count items newer than `since`; when `since` is empty, use the
@@ -168,9 +177,10 @@ impl AppState {
         }
         let index = Index::load(&root)?;
         let refresh_sem = Arc::new(Semaphore::new(cfg.scheduler.max_concurrent.max(1)));
-        let notifications = crate::types::read_json::<NotificationsFile>(&root.join("notifications.json"))
+        let mut notifications = crate::types::read_json::<NotificationsFile>(&root.join("notifications.json"))
             .map(NotificationStore::from_file)
             .unwrap_or_default();
+        notifications.prune(cfg.notifications.keep_days);
         Ok(Self {
             cfg: RwLock::new(cfg),
             config_path,
@@ -349,16 +359,15 @@ impl AppState {
             at: now_rfc3339(),
             target,
         };
-        // Resolve the root before taking the notifications lock: `root()` awaits
-        // the config lock, and we don't want to hold one lock across another.
+        // Resolve config-dependent values before taking the notifications lock:
+        // those awaits take other locks, and we don't hold one across another.
+        let keep_days = self.cfg().await.notifications.keep_days;
         let notif_path = self.root().await.join("notifications.json");
         let mut store = self.notifications.lock().await;
         let id = store.items.first().map(|i| i.id + 1).unwrap_or(1);
         let n = Notification { id, ..n };
         store.items.insert(0, n.clone());
-        if store.items.len() > NOTIFICATION_LIMIT {
-            store.items.truncate(NOTIFICATION_LIMIT);
-        }
+        store.prune(keep_days);
         let file = store.to_file();
         let _ = write_json(&notif_path, &file);
         drop(store);

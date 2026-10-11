@@ -120,7 +120,8 @@ reposilo serve --bind 0.0.0.0:8765           # or REPOSILO_BIND=0.0.0.0:8765
 #   - edit metadata (name, description, notes, origin, folder, tags) per repo
 #   - import zips from Settings; assign origins to _unknown repos
 #   - notifications with readable release changelogs, deep links to the exact
-    release/snapshot, and kind filter tabs
+    release/snapshot, kind filter tabs with past-week counts, and a divider
+    between this week and older items
 #   - verify the whole archive from Settings (hashes every zip)
 #   - dark/light theme, settings (retention, scheduler, llama.cpp)
 #   - a REST API; downloads stream straight from disk
@@ -222,6 +223,7 @@ url = "http://192.168.0.1:11434/v1"  # any OpenAI-compatible endpoint
 
 [notifications]
 # webhook_url = "https://hooks.example.com/your-hook"  # new releases + dead links
+# keep_days = 14                                       # drop alerts older than this (0 = keep all)
 
 [otel]
 # enabled = true

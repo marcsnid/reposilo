@@ -1264,6 +1264,8 @@ pub struct NotifView {
     pub changelog_html: String,
     pub tint: String,    // resolved #rrggbb, matches the repo's card
     pub has_icon: bool,  // stored owner avatar, shown on the left
+    /// Draw the "older than a week ago" divider before this row.
+    pub show_week_divider: bool,
 }
 
 /// Short, human label for a notification kind, shown as a text badge.
@@ -1338,8 +1340,33 @@ fn notif_matches(filter: &str, kind: &str) -> bool {
     }
 }
 
-fn notif_tabs(all: &[crate::server::Notification], active: &str) -> Vec<NotifTab> {
-    let count = |filter: &str| all.iter().filter(|n| notif_matches(filter, &n.kind)).count();
+/// The boundary between "this week" and older. Passing the cutoff through the
+/// scroll URL keeps the divider and the tab counts stable while paging.
+fn notif_week_cutoff(week: Option<&str>) -> (OffsetDateTime, String) {
+    if let Some(c) = week.and_then(|s| OffsetDateTime::parse(s, &Rfc3339).ok()) {
+        let text = c.format(&Rfc3339).unwrap_or_default();
+        return (c, text);
+    }
+    let cutoff = OffsetDateTime::now_utc() - time::Duration::days(7);
+    let text = cutoff.format(&Rfc3339).unwrap_or_default();
+    (cutoff, text)
+}
+
+/// True when a notification falls inside the current week window.
+fn notif_recent(at: &str, cutoff: OffsetDateTime) -> bool {
+    OffsetDateTime::parse(at, &Rfc3339).map(|t| t >= cutoff).unwrap_or(false)
+}
+
+fn notif_tabs(
+    all: &[crate::server::Notification],
+    active: &str,
+    cutoff: OffsetDateTime,
+) -> Vec<NotifTab> {
+    let count = |filter: &str| {
+        all.iter()
+            .filter(|n| notif_matches(filter, &n.kind) && notif_recent(&n.at, cutoff))
+            .count()
+    };
     [("", "All"), ("release", "Releases"), ("snapshot", "Snapshots"), ("error", "Errors")]
         .iter()
         .map(|(key, label)| {
@@ -1359,13 +1386,14 @@ fn notif_tabs(all: &[crate::server::Notification], active: &str) -> Vec<NotifTab
         .collect()
 }
 
-/// Build one page of the notification list. `offset` walks back through the
-/// store, which keeps at most [`crate::server::NOTIFICATION_LIMIT`] items, so
-/// the feed cannot load past that cap. `filter` is a normalized kind filter.
+/// Build one page of the notification list. Retention is time-based (see
+/// `notifications.keep_days`), so the store only holds recent alerts.
+/// `filter` is a normalized kind filter.
 pub async fn build_notifications_ctx(
     st: &Arc<AppState>,
     offset: usize,
     filter: &str,
+    week: Option<&str>,
 ) -> NotificationsCtx {
     let all: Vec<crate::server::Notification> = st
         .notifications
@@ -1373,10 +1401,10 @@ pub async fn build_notifications_ctx(
         .await
         .items
         .iter()
-        .take(crate::server::NOTIFICATION_LIMIT)
         .cloned()
         .collect();
-    let tabs = notif_tabs(&all, filter);
+    let (cutoff, week_text) = notif_week_cutoff(week);
+    let tabs = notif_tabs(&all, filter, cutoff);
 
     // Resolve each notification's repo tint, icon and display name once, so the
     // marker and avatar on the left match the repo's card.
@@ -1400,12 +1428,17 @@ pub async fn build_notifications_ctx(
         .filter(|n| notif_matches(filter, &n.kind))
         .collect();
     let total = filtered.len();
+    // The divider goes right before the first item older than the week window,
+    // and only when at least one newer item precedes it.
+    let boundary = filtered.iter().position(|n| !notif_recent(&n.at, cutoff));
+    let show_divider = boundary.is_some_and(|b| b > 0);
     let offset = offset.min(total);
     let end = (offset + NOTIF_PAGE_SIZE).min(total);
     let views: Vec<NotifView> = filtered[offset..end]
         .iter()
         .copied()
-        .map(|n| {
+        .enumerate()
+        .map(|(i, n)| {
             let (at, at_exact) = humanize_ago(&n.at).unwrap_or_else(|| {
                 let t: String = n.at.chars().take(16).collect();
                 (t.clone(), t)
@@ -1440,16 +1473,19 @@ pub async fn build_notifications_ctx(
                     .unwrap_or_default(),
                 tint,
                 has_icon,
+                show_week_divider: show_divider && boundary == Some(offset + i),
             }
         })
         .collect();
 
     let has_more = end < total;
-    let more_url = if filter.is_empty() {
-        format!("/notifications/more?offset={end}")
-    } else {
-        format!("/notifications/more?kind={filter}&offset={end}")
-    };
+    let mut params = Vec::new();
+    if !filter.is_empty() {
+        params.push(format!("kind={filter}"));
+    }
+    params.push(format!("offset={end}"));
+    params.push(format!("week={}", urlencode(&week_text)));
+    let more_url = format!("/notifications/more?{}", params.join("&"));
     NotificationsCtx { items: views, has_more, more_url, filter: filter.to_string(), tabs }
 }
 

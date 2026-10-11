@@ -1547,34 +1547,21 @@ async fn viewing_notifications_clears_the_bell_without_accounts() -> Result<()> 
     Ok(())
 }
 
-/// The notification list paginates the same way as the repo grid, and the feed
-/// stops at the store's limit rather than loading forever.
+/// The notification list paginates the same way as the repo grid.
 #[tokio::test]
-async fn notifications_paginate_and_stop_at_the_limit() -> Result<()> {
+async fn notifications_paginate() -> Result<()> {
     let page = reposilo::web::views::NOTIF_PAGE_SIZE;
-    let limit = reposilo::server::NOTIFICATION_LIMIT;
     let tmp = tempfile::tempdir()?;
     let root = tmp.path().join("archive");
     fs::create_dir_all(&root)?;
-
-    // Seed more than one page, but fewer than the cap.
-    let seed = page + 7;
-    let items: Vec<serde_json::Value> = (0..seed)
-        .map(|i| {
-            serde_json::json!({
-                "id": (seed - i) as u64,
-                "kind": "new_snapshot",
-                "repo": "owner-repo",
-                "title": format!("item {i}"),
-                "at": "2025-01-01T00:00:00Z",
-            })
-        })
-        .collect();
-    let file = serde_json::json!({ "next_id": seed as u64 + 1, "items": items });
-    fs::write(root.join("notifications.json"), serde_json::to_vec(&file)?)?;
-
     let (base, st) = spawn_server(test_cfg(&root)).await;
     let client = reqwest::Client::new();
+
+    let seed = page + 7;
+    for i in 0..seed {
+        st.push_notification("new_snapshot", "owner-repo", format!("item {i}"), None, None)
+            .await;
+    }
 
     let first = client.get(format!("{base}/notifications")).send().await?.text().await?;
     assert_eq!(first.matches("class=\"panel notification").count(), page, "first page size");
@@ -1583,6 +1570,7 @@ async fn notifications_paginate_and_stop_at_the_limit() -> Result<()> {
         first.contains(&format!("offset={page}")),
         "sentinel should point at the next offset"
     );
+    assert!(first.contains("week="), "sentinel should carry the week cutoff: {first}");
 
     let more = client
         .get(format!("{base}/notifications/more?offset={page}"))
@@ -1592,18 +1580,6 @@ async fn notifications_paginate_and_stop_at_the_limit() -> Result<()> {
         .await?;
     assert_eq!(more.matches("class=\"panel notification").count(), 7, "second page size");
     assert!(!more.contains("hx-trigger=\"revealed\""), "sentinel should be gone at the end");
-
-    // The store drops the oldest once it crosses the limit, so load-more can
-    // never run past it.
-    for i in 0..(limit + 5) {
-        st.push_notification("new_snapshot", "owner-repo", format!("cap {i}"), None, None)
-            .await;
-    }
-    assert_eq!(
-        st.notifications.lock().await.items.len(),
-        limit,
-        "notification store must stop at the limit"
-    );
     Ok(())
 }
 
@@ -1852,9 +1828,9 @@ async fn notifications_deep_link_and_kind_tabs() -> Result<()> {
         "snapshot deep link missing: {page}"
     );
     assert!(page.contains("notif-tabs"), "tabs missing: {page}");
-    assert!(page.contains("Releases <span class=\"count\">1</span>"), "{page}");
-    assert!(page.contains("Snapshots <span class=\"count\">1</span>"), "{page}");
-    assert!(page.contains("Errors <span class=\"count\">2</span>"), "{page}");
+    assert!(page.contains("Releases <span class=\"count\" title=\"notifications in the past week\">1</span>"), "{page}");
+    assert!(page.contains("Snapshots <span class=\"count\" title=\"notifications in the past week\">1</span>"), "{page}");
+    assert!(page.contains("Errors <span class=\"count\" title=\"notifications in the past week\">2</span>"), "{page}");
 
     // the release tab hides everything else
     let rel = client
@@ -1876,5 +1852,113 @@ async fn notifications_deep_link_and_kind_tabs() -> Result<()> {
         .await?;
     assert!(more.contains("release one"), "{more}");
     assert!(!more.contains("snap one"), "{more}");
+    Ok(())
+}
+
+/// Tab badges count the past week, and the list draws a divider where the week
+/// ends. The cutoff rides in the scroll URL so paging cannot move it.
+#[tokio::test]
+async fn notifications_week_counts_and_divider() -> Result<()> {
+    use time::format_description::well_known::Rfc3339;
+    use time::{Duration, OffsetDateTime};
+
+    let now = OffsetDateTime::now_utc();
+    let recent = (now - Duration::hours(1)).format(&Rfc3339).unwrap();
+    // Older than a week but inside the 14 day retention window.
+    let old = (now - Duration::days(10)).format(&Rfc3339).unwrap();
+
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    fs::create_dir_all(&root)?;
+    let items = serde_json::json!([
+        {"id": 4, "kind": "new_release", "repo": "r", "title": "recent release", "at": recent},
+        {"id": 3, "kind": "new_snapshot", "repo": "r", "title": "recent snapshot", "at": recent},
+        {"id": 2, "kind": "new_release", "repo": "r", "title": "old release", "at": old},
+        {"id": 1, "kind": "corrupt", "repo": "", "title": "old corrupt", "at": old},
+    ]);
+    fs::write(
+        root.join("notifications.json"),
+        serde_json::to_vec(&serde_json::json!({"next_id": 5, "items": items}))?,
+    )?;
+    let (base, _st) = spawn_server(test_cfg(&root)).await;
+    let client = reqwest::Client::new();
+
+    let page = client.get(format!("{base}/notifications")).send().await?.text().await?;
+    let week = "title=\"notifications in the past week\"";
+    assert!(page.contains(&format!("All <span class=\"count\" {week}>2</span>")), "{page}");
+    assert!(page.contains(&format!("Releases <span class=\"count\" {week}>1</span>")), "{page}");
+    assert!(page.contains(&format!("Snapshots <span class=\"count\" {week}>1</span>")), "{page}");
+    assert!(page.contains(&format!("Errors <span class=\"count\" {week}>0</span>")), "{page}");
+
+    let divider = page.find("Older than a week ago").expect("week divider missing");
+    let recent_pos = page.find("recent snapshot").expect("recent row");
+    let old_pos = page.find("old release").expect("old row");
+    assert!(recent_pos < divider && divider < old_pos, "divider not between the week and older: {page}");
+    Ok(())
+}
+
+/// Notifications are alerts, not a log: anything older than keep_days is dropped
+/// on load and again on push. keep_days = 0 keeps everything.
+#[tokio::test]
+async fn notifications_prune_older_than_keep_days() -> Result<()> {
+    use time::format_description::well_known::Rfc3339;
+    use time::{Duration, OffsetDateTime};
+
+    let now = OffsetDateTime::now_utc();
+    let recent = (now - Duration::hours(1)).format(&Rfc3339).unwrap();
+    let old = (now - Duration::days(30)).format(&Rfc3339).unwrap();
+
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    fs::create_dir_all(&root)?;
+    let items = serde_json::json!([
+        {"id": 2, "kind": "new_release", "repo": "r", "title": "keep-marker", "at": recent},
+        {"id": 1, "kind": "new_release", "repo": "r", "title": "prune-marker", "at": old},
+    ]);
+    fs::write(
+        root.join("notifications.json"),
+        serde_json::to_vec(&serde_json::json!({"next_id": 3, "items": items}))?,
+    )?;
+    let (base, st) = spawn_server(test_cfg(&root)).await;
+    let client = reqwest::Client::new();
+
+    // pruned on load
+    let page = client.get(format!("{base}/notifications")).send().await?.text().await?;
+    assert!(page.contains("keep-marker"), "recent notification missing: {page}");
+    assert!(!page.contains("prune-marker"), "stale notification should be pruned on load: {page}");
+
+    // and again on push: an injected stale row is dropped by the next push
+    st.notifications.lock().await.items.push(reposilo::server::Notification {
+        id: 0,
+        kind: "new_release".into(),
+        repo: "r".into(),
+        title: "inject-marker".into(),
+        body: None,
+        at: old.clone(),
+        target: None,
+    });
+    st.push_notification("new_release", "r", "fresh".into(), None, None).await;
+    assert!(
+        st.notifications.lock().await.items.iter().all(|n| n.title != "inject-marker"),
+        "push should prune stale rows"
+    );
+
+    // keep_days = 0 disables pruning
+    let root2 = tmp.path().join("archive-keepall");
+    fs::create_dir_all(&root2)?;
+    fs::write(
+        root2.join("notifications.json"),
+        serde_json::to_vec(&serde_json::json!({"next_id": 2, "items": [
+            {"id": 1, "kind": "new_release", "repo": "r", "title": "kept", "at": old},
+        ]}))?,
+    )?;
+    let mut cfg = test_cfg(&root2);
+    cfg.notifications.keep_days = 0;
+    let (_base2, st2) = spawn_server(cfg).await;
+    assert_eq!(
+        st2.notifications.lock().await.items.len(),
+        1,
+        "keep_days = 0 should keep everything"
+    );
     Ok(())
 }

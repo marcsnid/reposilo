@@ -1231,6 +1231,7 @@ impl Archiver {
                 .snapshot_ref(repo_dir, git_dir, &rel, &name, &origin, &branch, SnapshotKind::Branch, None, None, changelog.as_deref())
                 .await?;
             summary.branch_snapshot_anchor = Some(sc.anchor());
+            tracing::info!(repo = %rel, commits = ?summary.branch_commits, "new branch snapshot archived");
             summary.branch_changelog = changelog;
             summary.new_branch_snapshot = true;
         }
@@ -1246,6 +1247,7 @@ impl Archiver {
                     if let Err(e) = self.sync_release_assets(repo_dir, &mut sc).await {
                         tracing::warn!(repo = %rel, error = %format!("{e:#}"), "release asset sync failed");
                     }
+                    tracing::info!(repo = %rel, version = %version, "new release archived");
                     summary.new_release = Some(version);
                     summary.release_changelog = sc.changelog.clone();
                     summary.release_snapshot_anchor = Some(sc.anchor());

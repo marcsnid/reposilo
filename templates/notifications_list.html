@@ -5,7 +5,7 @@
   <div class="detail-head"><h1>Notifications</h1></div>
   <div class="notif-tabs">
     {% for t in ctx.tabs %}
-    <a class="notif-tab{% if t.active %} active{% endif %}" href="{{ t.url }}">{{ t.label }} <span class="count">{{ t.count }}</span></a>
+    <a class="notif-tab{% if t.active %} active{% endif %}" href="{{ t.url }}" title="notifications in the past week">{{ t.label }} <span class="count" title="notifications in the past week">{{ t.count }}</span></a>
     {% endfor %}
   </div>
   {% if ctx.items.is_empty() %}

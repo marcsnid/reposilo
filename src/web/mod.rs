@@ -1668,7 +1668,7 @@ async fn notifications_page(
         None => st.mark_notifications_seen().await,
     }
     let filter = views::normalize_notif_filter(map.get("kind").map(String::as_str).unwrap_or(""));
-    let ctx = views::build_notifications_ctx(&st, 0, filter).await;
+    let ctx = views::build_notifications_ctx(&st, 0, filter, map.get("week").map(String::as_str)).await;
     render(&views::NotificationsT { ctx })
 }
 
@@ -1684,7 +1684,7 @@ async fn notifications_more(
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(0);
     let filter = views::normalize_notif_filter(map.get("kind").map(String::as_str).unwrap_or(""));
-    let ctx = views::build_notifications_ctx(&st, offset, filter).await;
+    let ctx = views::build_notifications_ctx(&st, offset, filter, map.get("week").map(String::as_str)).await;
     render(&views::NotifRowsT { ctx })
 }
 
