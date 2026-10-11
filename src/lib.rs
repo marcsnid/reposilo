@@ -5,6 +5,7 @@
 
 pub mod archiver;
 pub mod auth;
+pub mod color;
 pub mod config;
 pub mod files;
 pub mod forge;

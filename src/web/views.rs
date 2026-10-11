@@ -69,6 +69,36 @@ pub fn color_class(key: &str) -> Option<&'static str> {
     COLOR_CHOICES.iter().find(|(k, _, _)| *k == key).map(|(_, _, c)| *c)
 }
 
+/// Hex value for a palette key, kept in sync with the `.dot-N` colors in
+/// `style.css`.
+const COLOR_HEX: &[(&str, &str)] = &[
+    ("red", "#e5534b"),
+    ("orange", "#e0823d"),
+    ("yellow", "#bb8009"),
+    ("green", "#57ab5a"),
+    ("blue", "#3992c4"),
+    ("purple", "#8250df"),
+    ("pink", "#d6318c"),
+    ("gray", "#768390"),
+];
+
+fn palette_hex(key: &str) -> Option<&'static str> {
+    COLOR_HEX.iter().find(|(k, _)| *k == key).map(|(_, h)| *h)
+}
+
+/// Resolve the tint shown on a card/panel: the user's palette choice wins,
+/// then the icon-derived color, then a stable hash so every repo still has an
+/// identity color (e.g. when icons are disabled).
+pub fn resolve_tint(color: Option<&str>, auto_color: Option<&str>, rel: &str) -> String {
+    if let Some(hex) = color.and_then(palette_hex) {
+        return hex.to_string();
+    }
+    if let Some(hex) = auto_color.filter(|h| !h.is_empty()) {
+        return hex.to_string();
+    }
+    crate::color::hash_color(rel)
+}
+
 /// One swatch in the metadata color picker.
 #[derive(Debug, Clone)]
 pub struct ColorChoiceView {
@@ -199,6 +229,7 @@ pub struct RepoCard {
     pub size_human: String,
     pub color: String,       // palette key or empty = no tint
     pub color_class: String, // "dot-N" or empty (detail header)
+    pub tint: String,        // resolved #rrggbb tint for the card
     pub has_icon: bool,      // stored owner avatar
 }
 
@@ -415,6 +446,11 @@ pub async fn build_list_ctx(st: &Arc<AppState>, tags: &[String], q: &str, folder
                     .and_then(color_class)
                     .unwrap_or_default()
                     .to_string(),
+                tint: resolve_tint(
+                    r.manifest.color.as_deref(),
+                    r.manifest.auto_color.as_deref(),
+                    &r.rel,
+                ),
                 has_icon: r.has_icon,
             }
         })
@@ -583,6 +619,7 @@ pub struct DetailCtx {
     pub last_checked_exact: String, // exact timestamp (tooltip)
     pub color: String,           // palette key or empty
     pub color_class: String,     // "dot-N" or empty
+    pub tint: String,            // resolved #rrggbb tint for the About panel
     pub color_choices: Vec<ColorChoiceView>,
     pub has_icon: bool,          // stored owner avatar
     pub remote_state: String,
@@ -817,6 +854,7 @@ pub async fn build_detail_ctx(st: &Arc<AppState>, repo: &crate::index::RepoEntry
         last_checked_exact,
         color: m.color.clone().unwrap_or_default(),
         color_class: m.color.as_deref().and_then(color_class).unwrap_or_default().to_string(),
+        tint: resolve_tint(m.color.as_deref(), m.auto_color.as_deref(), &repo.rel),
         color_choices: color_choices(),
         has_icon: repo.has_icon,
         remote_state: m.remote_state.clone().unwrap_or_default(),
@@ -1390,8 +1428,25 @@ pub fn stats_ctx_from(
 
 #[cfg(test)]
 mod tests {
-    use super::{humanize_ago_from, settings_ctx_from, stats_ctx_from};
+    use super::{humanize_ago_from, resolve_tint, settings_ctx_from, stats_ctx_from};
     use time::macros::datetime;
+
+    #[test]
+    fn user_color_wins_over_auto_color() {
+        assert_eq!(resolve_tint(Some("blue"), Some("#ff00ff"), "a/b"), "#3992c4");
+    }
+
+    #[test]
+    fn auto_color_is_used_when_no_user_color() {
+        assert_eq!(resolve_tint(None, Some("#ff00ff"), "a/b"), "#ff00ff");
+    }
+
+    #[test]
+    fn empty_auto_color_falls_back_to_a_stable_hash() {
+        let a = resolve_tint(None, Some(""), "a/b");
+        assert_eq!(a, resolve_tint(None, None, "a/b"));
+        assert!(a.starts_with('#') && a.len() == 7, "expected a hex tint, got {a}");
+    }
 
     #[test]
     fn settings_ctx_includes_verify_toggle() {

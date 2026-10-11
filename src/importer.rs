@@ -543,6 +543,7 @@ pub async fn import_one(
             suggested_tags: Vec::new(),
             stars: None,
             color: None,
+            auto_color: None,
             unidentified: unknown,
         }
     };

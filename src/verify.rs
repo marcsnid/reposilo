@@ -175,6 +175,7 @@ mod tests {
                 suggested_tags: vec![],
                 stars: None,
                 color: None,
+                auto_color: None,
                 unidentified: false,
             })
             .unwrap(),

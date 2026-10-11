@@ -75,7 +75,7 @@
     {% else %}
     <div class="grid">
       {% for r in ctx.repos %}
-      <div class="card{% if !r.color.is_empty() %} tinted{% endif %}"{% if !r.color.is_empty() %} data-color="{{ r.color }}"{% endif %} draggable="true" data-rel="{{ r.rel }}" ondragstart="dragRepo(event)">
+      <div class="card{% if !r.tint.is_empty() %} tinted{% endif %}"{% if !r.tint.is_empty() %} style="--tint: {{ r.tint }}"{% endif %} draggable="true" data-rel="{{ r.rel }}" ondragstart="dragRepo(event)">
         <div class="card-head">
           <input type="checkbox" class="bulk-check" value="{{ r.rel }}" onclick="event.stopPropagation(); updateBulkBar()" aria-label="select {{ r.name }}">
           {% if r.has_icon %}<img class="repo-icon" src="/repo-icon/{{ r.rel }}" alt="" width="20" height="20" loading="lazy">{% endif %}

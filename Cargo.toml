@@ -31,6 +31,7 @@ opentelemetry-appender-tracing = "0.33"
 tracing-opentelemetry = { version = "0.34", default-features = false }
 askama = "0.14"
 pulldown-cmark = "0.13"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 zip = "4"
 tar = "0.4"
 zstd = "0.13"

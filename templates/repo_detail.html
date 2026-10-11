@@ -53,7 +53,7 @@
         {% include "tags_edit.html" %}
       </section>
 
-      <section class="panel{% if !ctx.color.is_empty() %} tinted{% endif %}"{% if !ctx.color.is_empty() %} data-color="{{ ctx.color }}"{% endif %}>
+      <section class="panel{% if !ctx.tint.is_empty() %} tinted{% endif %}"{% if !ctx.tint.is_empty() %} style="--tint: {{ ctx.tint }}"{% endif %}>
         <h2>About</h2>
         <details class="metadata-editor">
           <summary>&#9998; Edit metadata</summary>

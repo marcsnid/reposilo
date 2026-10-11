@@ -224,8 +224,8 @@ button:hover, button[type="submit"]:hover { background: var(--chip-hover); }
 .card[data-color="pink"], .panel[data-color="pink"] { --tint: #d6318c; }
 .card[data-color="gray"], .panel[data-color="gray"] { --tint: #768390; }
 .card.tinted, .panel.tinted {
-  background: color-mix(in srgb, var(--tint) 13%, var(--bg-panel));
-  border-color: color-mix(in srgb, var(--tint) 40%, var(--border));
+  background: color-mix(in srgb, var(--tint) 5%, var(--bg-panel));
+  border-color: color-mix(in srgb, var(--tint) 18%, var(--border));
 }
 .card.tinted:hover { box-shadow: 0 0 0 1px var(--tint), 0 10px 26px #00000040; }
 .card-head { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }

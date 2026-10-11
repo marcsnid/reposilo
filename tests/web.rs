@@ -1153,10 +1153,10 @@ async fn metadata_color_badge_roundtrips() -> Result<()> {
 
     let page = client.get(format!("{base}/")).send().await?.text().await?;
     assert!(page.contains("card tinted"), "card should be tinted: {page}");
-    assert!(page.contains("data-color=\"blue\""), "card should carry the color: {page}");
+    assert!(page.contains("--tint: #3992c4"), "card should carry the blue tint: {page}");
     let detail = client.get(format!("{base}/repos/owner-demo")).send().await?.text().await?;
     assert!(detail.contains("panel tinted"), "About panel should be tinted: {detail}");
-    assert!(detail.contains("data-color=\"blue\""), "About panel should carry the color: {detail}");
+    assert!(detail.contains("--tint: #3992c4"), "About panel should carry the blue tint: {detail}");
     assert!(detail.contains("name=\"color\""), "metadata should offer color swatches: {detail}");
 
     // clearing the color removes the badge

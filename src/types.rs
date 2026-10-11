@@ -82,6 +82,11 @@ pub struct RepoManifest {
     /// User-chosen color label (a palette key like "blue"), shown as a badge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// Card tint derived from the stored icon at add time (normalized
+    /// `#rrggbb`). `color` overrides it when set; when both are absent the UI
+    /// falls back to a stable hash of the repo path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_color: Option<String>,
     /// True for imported zips whose origin could not be determined.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unidentified: bool,

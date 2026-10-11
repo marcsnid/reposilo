@@ -546,6 +546,30 @@ impl Archiver {
             tags
         };
 
+        // Fetch the avatar before the manifest is written so the tint can be
+        // recorded alongside it. Decoding is CPU work, so keep it off the
+        // async runtime.
+        let icon_bytes = if self.cfg.fetch_icons() {
+            match avatar_url {
+                Some(avatar) => crate::forgeapi::fetch_avatar(&self.cfg, &self.governor, &avatar).await,
+                None => None,
+            }
+        } else {
+            None
+        };
+        // An empty string marks "icon present but no usable color" so a gray
+        // avatar is not re-decoded on the next refresh.
+        let auto_color = match icon_bytes.clone() {
+            Some(bytes) => {
+                let hex = tokio::task::spawn_blocking(move || crate::color::extract_auto_color(&bytes))
+                    .await
+                    .ok()
+                    .flatten();
+                Some(hex.unwrap_or_default())
+            }
+            None => None,
+        };
+
         let manifest = RepoManifest {
             origin: Some(url.to_string()),
             forge: info.kind.id().to_string(),
@@ -564,17 +588,14 @@ impl Archiver {
             remote_state: None,
             unavailable_since: None,
             color: None,
+            auto_color,
             unidentified: false,
         };
         crate::types::write_json(&manifest_path, &manifest)?;
 
-        // store the owner avatar locally so the repo icon survives the remote
-        if self.cfg.fetch_icons() {
-            if let Some(avatar) = avatar_url {
-                if let Some(bytes) = crate::forgeapi::fetch_avatar(&self.cfg, &self.governor, &avatar).await {
-                    let _ = fs::write(repo_dir.join("icon"), bytes);
-                }
-            }
+        // Store the owner avatar locally so the repo icon survives the remote.
+        if let Some(bytes) = icon_bytes {
+            let _ = fs::write(repo_dir.join("icon"), bytes);
         }
 
         if self.cfg.scheduler.run_on_add {
@@ -1034,6 +1055,22 @@ impl Archiver {
                 }
                 // generic remotes and unidentified imports have no avatar API
                 _ => {}
+            }
+        }
+
+        // Derive the card tint from the stored icon once. The color is stable
+        // identity, so there is no reason to decode again on later refreshes;
+        // an empty string records "icon present but no usable color" so a gray
+        // avatar is not re-decoded either.
+        if manifest.auto_color.is_none() {
+            if let Ok(bytes) = fs::read(repo_dir.join("icon")) {
+                if !bytes.is_empty() {
+                    let hex = tokio::task::spawn_blocking(move || crate::color::extract_auto_color(&bytes))
+                        .await
+                        .ok()
+                        .flatten();
+                    manifest.auto_color = Some(hex.unwrap_or_default());
+                }
             }
         }
 
