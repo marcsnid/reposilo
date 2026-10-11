@@ -1467,14 +1467,7 @@ pub async fn build_notifications_ctx(
     week: Option<&str>,
 ) -> NotificationsCtx {
     let color_on = st.cfg().await.ui.color;
-    let all: Vec<crate::server::Notification> = st
-        .notifications
-        .lock()
-        .await
-        .items
-        .iter()
-        .cloned()
-        .collect();
+    let all: Vec<crate::server::Notification> = st.notifications.lock().await.items.to_vec();
     let (cutoff, week_text) = notif_week_cutoff(week);
     let tabs = notif_tabs(&all, filter, cutoff);
 
