@@ -175,6 +175,24 @@ pub struct SnapshotSidecar {
     pub zip: ZipInfo,
 }
 
+impl SnapshotSidecar {
+    /// Stable HTML anchor used for deep links from notifications. It is derived
+    /// from the zip file name, which is unique within a repo. The `snap-` prefix
+    /// keeps the id valid even when the name starts with a digit.
+    pub fn anchor(&self) -> String {
+        let stem = self.zip.file.strip_suffix(".zip").unwrap_or(&self.zip.file);
+        let mut out = String::from("snap-");
+        out.extend(stem.chars().map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        }));
+        out
+    }
+}
+
 /// Write `contents` to `path` atomically: temp file in the same directory,
 /// then rename over the target. A crash or full disk can never leave a
 /// half-written manifest/sidecar that would then fail to parse.
@@ -225,6 +243,28 @@ mod tests {
             .filter(|n| n != "x.json")
             .collect();
         assert!(leftovers.is_empty(), "unexpected leftover files: {leftovers:?}");
+    }
+
+    #[test]
+    fn snapshot_anchor_is_stable_and_css_safe() {
+        let sidecar: SnapshotSidecar = serde_json::from_value(serde_json::json!({
+            "kind": "branch-snapshot",
+            "repo": "owner/demo",
+            "origin": "https://github.com/owner/demo",
+            "ref": "main",
+            "commit": "abc",
+            "archived_at": "2025-01-01T00:00:00Z",
+            "zip": {
+                "file": "demo-main@2025-01-22_abc1234.zip",
+                "bytes": 1,
+                "sha256": "x"
+            },
+        }))
+        .unwrap();
+        let a = sidecar.anchor();
+        assert_eq!(a, "snap-demo-main-2025-01-22_abc1234");
+        assert!(a.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert_eq!(a, sidecar.anchor());
     }
 
     #[test]

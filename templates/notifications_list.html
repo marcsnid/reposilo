@@ -3,8 +3,13 @@
 {% block content %}
 <div class="detail narrow">
   <div class="detail-head"><h1>Notifications</h1></div>
+  <div class="notif-tabs">
+    {% for t in ctx.tabs %}
+    <a class="notif-tab{% if t.active %} active{% endif %}" href="{{ t.url }}">{{ t.label }} <span class="count">{{ t.count }}</span></a>
+    {% endfor %}
+  </div>
   {% if ctx.items.is_empty() %}
-  <p class="dim">No notifications yet</p>
+  <p class="dim">No notifications here</p>
   {% else %}
   {% include "notif_rows.html" %}
   {% endif %}

@@ -217,6 +217,7 @@ async fn web_ui_full_flow() -> Result<()> {
     assert!(detail.contains("hello.txt"), "root file listed");
     assert!(detail.contains("tag-editor"), "tag editor present");
     assert!(detail.contains("keep newest 1 release"), "retention shown");
+    assert!(detail.contains("id=\"snap-"), "snapshots should carry deep-link anchors: {detail}");
 
     // blob view: grab the zip-based URL straight from the detail page
     let detail = client
@@ -1513,9 +1514,15 @@ async fn viewing_notifications_clears_the_bell_without_accounts() -> Result<()> 
     let (base, st) = spawn_server(test_cfg(&root)).await;
     let client = reqwest::Client::new();
 
-    st.push_notification("new_release", "owner-demo", "new release 1.0.0".into(), None)
-        .await;
-    st.push_notification("new_snapshot", "owner-demo", "3 new commits".into(), None)
+    st.push_notification(
+        "new_release",
+        "owner-demo",
+        "new release 1.0.0".into(),
+        None,
+        Some("snap-demo-v1.0.0".to_string()),
+    )
+    .await;
+    st.push_notification("new_snapshot", "owner-demo", "3 new commits".into(), None, None)
         .await;
 
     let bell = client.get(format!("{base}/api/bell")).send().await?.text().await?;
@@ -1529,7 +1536,7 @@ async fn viewing_notifications_clears_the_bell_without_accounts() -> Result<()> 
     assert!(bell.is_empty(), "bell must clear after viewing, got {bell:?}");
 
     // a new notification after viewing shows up again (state advanced, not reset)
-    st.push_notification("remote_gone", "owner-demo", "remote gone".into(), None)
+    st.push_notification("remote_gone", "owner-demo", "remote gone".into(), None, None)
         .await;
     let bell = client.get(format!("{base}/api/bell")).send().await?.text().await?;
     assert_eq!(bell, "1");
@@ -1589,7 +1596,7 @@ async fn notifications_paginate_and_stop_at_the_limit() -> Result<()> {
     // The store drops the oldest once it crosses the limit, so load-more can
     // never run past it.
     for i in 0..(limit + 5) {
-        st.push_notification("new_snapshot", "owner-repo", format!("cap {i}"), None)
+        st.push_notification("new_snapshot", "owner-repo", format!("cap {i}"), None, None)
             .await;
     }
     assert_eq!(
@@ -1803,5 +1810,71 @@ async fn settings_migrate_backfills_card_colors() -> Result<()> {
         "expected a derived tint, got {}",
         m["auto_color"]
     );
+    Ok(())
+}
+
+/// Deep links jump to the exact snapshot, and the kind tabs filter the feed.
+#[tokio::test]
+async fn notifications_deep_link_and_kind_tabs() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    fs::create_dir_all(&root)?;
+    let (base, st) = spawn_server(test_cfg(&root)).await;
+    let client = reqwest::Client::new();
+
+    st.push_notification(
+        "new_release",
+        "owner-demo",
+        "release one".into(),
+        None,
+        Some("snap-demo-v1.0.0".into()),
+    )
+    .await;
+    st.push_notification(
+        "new_snapshot",
+        "owner-demo",
+        "snap one".into(),
+        None,
+        Some("snap-demo-main-abc".into()),
+    )
+    .await;
+    st.push_notification("remote_gone", "owner-demo", "gone".into(), None, None)
+        .await;
+    st.push_notification("corrupt", "", "bad zip".into(), None, None).await;
+
+    let page = client.get(format!("{base}/notifications")).send().await?.text().await?;
+    assert!(
+        page.contains("href=\"/repos/owner-demo#snap-demo-v1.0.0\""),
+        "release deep link missing: {page}"
+    );
+    assert!(
+        page.contains("href=\"/repos/owner-demo#snap-demo-main-abc\""),
+        "snapshot deep link missing: {page}"
+    );
+    assert!(page.contains("notif-tabs"), "tabs missing: {page}");
+    assert!(page.contains("Releases <span class=\"count\">1</span>"), "{page}");
+    assert!(page.contains("Snapshots <span class=\"count\">1</span>"), "{page}");
+    assert!(page.contains("Errors <span class=\"count\">2</span>"), "{page}");
+
+    // the release tab hides everything else
+    let rel = client
+        .get(format!("{base}/notifications?kind=release"))
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert!(rel.contains("release one"), "{rel}");
+    assert!(!rel.contains("snap one"), "snapshot leaked into the release tab: {rel}");
+    assert!(!rel.contains("bad zip"), "corrupt leaked into the release tab: {rel}");
+
+    // the scroll sentinel keeps the active filter
+    let more = client
+        .get(format!("{base}/notifications/more?kind=release&offset=0"))
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert!(more.contains("release one"), "{more}");
+    assert!(!more.contains("snap one"), "{more}");
     Ok(())
 }

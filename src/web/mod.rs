@@ -1655,7 +1655,11 @@ async fn import_commit(
 // ---------- notifications page (bell target) ----------
 
 
-async fn notifications_page(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+async fn notifications_page(
+    State(st): State<Arc<AppState>>,
+    Query(map): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
     // Viewing the page reads everything: clear the bell for the current user
     // (or the server-wide marker when accounts are not configured).
     let user = crate::auth::current_user(&st, &headers);
@@ -1663,7 +1667,8 @@ async fn notifications_page(State(st): State<Arc<AppState>>, headers: HeaderMap)
         Some(u) => st.mark_notifications_seen_for(u).await,
         None => st.mark_notifications_seen().await,
     }
-    let ctx = views::build_notifications_ctx(&st, 0).await;
+    let filter = views::normalize_notif_filter(map.get("kind").map(String::as_str).unwrap_or(""));
+    let ctx = views::build_notifications_ctx(&st, 0, filter).await;
     render(&views::NotificationsT { ctx })
 }
 
@@ -1678,7 +1683,8 @@ async fn notifications_more(
         .get("offset")
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(0);
-    let ctx = views::build_notifications_ctx(&st, offset).await;
+    let filter = views::normalize_notif_filter(map.get("kind").map(String::as_str).unwrap_or(""));
+    let ctx = views::build_notifications_ctx(&st, offset, filter).await;
     render(&views::NotifRowsT { ctx })
 }
 

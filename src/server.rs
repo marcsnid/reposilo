@@ -62,6 +62,10 @@ pub struct Notification {
     #[serde(default)]
     pub body: Option<String>, // markdown (changelogs for new_release)
     pub at: String,
+    /// Snapshot anchor within the repo page, for a deep link to the exact
+    /// release or branch snapshot. Empty for repo-wide events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -328,7 +332,14 @@ impl AppState {
         self.running.lock().unwrap().remove(Self::lock_key(rel));
     }
 
-    pub async fn push_notification(&self, kind: &str, repo: &str, title: String, body: Option<String>) {
+    pub async fn push_notification(
+        &self,
+        kind: &str,
+        repo: &str,
+        title: String,
+        body: Option<String>,
+        target: Option<String>,
+    ) {
         let n = Notification {
             id: 0, // assigned below
             kind: kind.into(),
@@ -336,6 +347,7 @@ impl AppState {
             title,
             body,
             at: now_rfc3339(),
+            target,
         };
         // Resolve the root before taking the notifications lock: `root()` awaits
         // the config lock, and we don't want to hold one lock across another.
@@ -376,7 +388,7 @@ impl AppState {
         }
         let payload = serde_json::json!({
             "event": n.kind, "repo": n.repo, "title": n.title,
-            "body": n.body, "at": n.at,
+            "body": n.body, "at": n.at, "target": n.target,
         });
         let st2 = self;
         let _n = n.clone();
@@ -1171,17 +1183,32 @@ pub async fn spawn_refresh_job(
                         &rel,
                         format!("new release {v}"),
                         summary.release_changelog.clone(),
+                        summary.release_snapshot_anchor.clone(),
                     )
                     .await;
                     fields.push("new_releases");
                 }
                 if summary.new_branch_snapshot {
                     let title = snapshot_notification_title(summary.branch_commits);
-                    st.push_notification("new_snapshot", &rel, title, summary.branch_changelog).await;
+                    st.push_notification(
+                        "new_snapshot",
+                        &rel,
+                        title,
+                        summary.branch_changelog,
+                        summary.branch_snapshot_anchor.clone(),
+                    )
+                    .await;
                     fields.push("new_snapshots");
                 }
                 if summary.remote_unavailable {
-                    st.push_notification("remote_gone", &rel, "remote unreachable; local copy intact".to_string(), None).await;
+                    st.push_notification(
+                        "remote_gone",
+                        &rel,
+                        "remote unreachable; local copy intact".to_string(),
+                        None,
+                        None,
+                    )
+                    .await;
                     fields.push("remote_gone");
                 }
                 let _ = st.reindex().await;
@@ -1224,7 +1251,7 @@ pub async fn spawn_migrate_job(st: &Arc<AppState>) -> u64 {
         }
         st2.set_job_note(id, msg.clone()).await;
         st2.finish_job(id, None).await;
-        st2.push_notification("migrate", "", msg, None).await;
+        st2.push_notification("migrate", "", msg, None, None).await;
     });
     id
 }
@@ -1282,7 +1309,7 @@ async fn spawn_verify_job_inner(st: &Arc<AppState>, scheduled: bool) -> u64 {
                 if scheduled && problems > 0 {
                     let title = format!("integrity check found {problems} problem(s)");
                     let body = integrity_body(&report);
-                    st2.push_notification("corrupt", "", title, Some(body)).await;
+                    st2.push_notification("corrupt", "", title, Some(body), None).await;
                 }
                 tracing::info!(
                     scheduled,
@@ -1555,7 +1582,7 @@ async fn autotag_trigger(State(st): State<Arc<AppState>>) -> Result<Response, Ap
         let cfg = st2.cfg().await;
         let report = crate::tagging::run_autotag(&cfg, &repos, false).await;
         let _ = st2.reindex().await;
-        st2.push_notification("autotag", "", format!("AI tagged {} repos", report.changed), None).await;
+        st2.push_notification("autotag", "", format!("AI tagged {} repos", report.changed), None, None).await;
         st2.finish_job(id, None).await;
     });
     Ok((StatusCode::ACCEPTED, Json(json!({ "job_id": id, "repos": n }))).into_response())

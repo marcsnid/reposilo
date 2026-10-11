@@ -119,7 +119,8 @@ reposilo serve --bind 0.0.0.0:8765           # or REPOSILO_BIND=0.0.0.0:8765
 #   - select repos with the checkboxes to refresh, tag, move or remove them in bulk
 #   - edit metadata (name, description, notes, origin, folder, tags) per repo
 #   - import zips from Settings; assign origins to _unknown repos
-#   - notifications with readable release changelogs
+#   - notifications with readable release changelogs, deep links to the exact
+    release/snapshot, and kind filter tabs
 #   - verify the whole archive from Settings (hashes every zip)
 #   - dark/light theme, settings (retention, scheduler, llama.cpp)
 #   - a REST API; downloads stream straight from disk

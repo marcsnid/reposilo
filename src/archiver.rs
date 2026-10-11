@@ -49,6 +49,10 @@ pub struct RefreshSummary {
     pub branch_changelog: Option<String>,
     /// Markdown changelog for the new release (release notes or CHANGELOG.md).
     pub release_changelog: Option<String>,
+    /// Anchor of the new branch snapshot on the repo page, for deep links.
+    pub branch_snapshot_anchor: Option<String>,
+    /// Anchor of the new release snapshot on the repo page, for deep links.
+    pub release_snapshot_anchor: Option<String>,
 }
 
 /// Make a string safe to use as a single filesystem path component.
@@ -1223,8 +1227,10 @@ impl Archiver {
             } else {
                 None
             };
-            self.snapshot_ref(repo_dir, git_dir, &rel, &name, &origin, &branch, SnapshotKind::Branch, None, None, changelog.as_deref())
+            let sc = self
+                .snapshot_ref(repo_dir, git_dir, &rel, &name, &origin, &branch, SnapshotKind::Branch, None, None, changelog.as_deref())
                 .await?;
+            summary.branch_snapshot_anchor = Some(sc.anchor());
             summary.branch_changelog = changelog;
             summary.new_branch_snapshot = true;
         }
@@ -1242,6 +1248,7 @@ impl Archiver {
                     }
                     summary.new_release = Some(version);
                     summary.release_changelog = sc.changelog.clone();
+                    summary.release_snapshot_anchor = Some(sc.anchor());
                 }
             }
         }

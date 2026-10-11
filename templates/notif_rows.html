@@ -8,7 +8,7 @@
         <span class="notif-dot" style="background: {{ n.tint }}"></span>
         {% endif %}
         {% if !n.repo.is_empty() %}
-        <a class="notif-repo" href="/repos/{{ n.repo }}">{{ n.repo_name }}</a>
+        <a class="notif-repo" href="{{ n.url }}">{{ n.repo_name }}</a>
         {% else %}
         <span class="notif-repo dim">reposilo</span>
         {% endif %}
@@ -17,7 +17,7 @@
       <div class="notif-body">
         <div class="notif-head">
           <span class="badge notif-kind">{{ n.kind_label }}</span>
-          <b>{{ n.title }}</b>
+          {% if !n.url.is_empty() %}<a href="{{ n.url }}"><b>{{ n.title }}</b></a>{% else %}<b>{{ n.title }}</b>{% endif %}
         </div>
         {% if !n.changelog_html.is_empty() %}
         {% if n.kind == "new_snapshot" %}

@@ -592,6 +592,7 @@ pub struct SnapView {
     pub size_human: String,
     pub download_url: String,
     pub version: String, // empty = not a versioned release
+    pub anchor: String,  // HTML id for deep links from notifications
     pub changelog_html: String, // rendered markdown release notes
     /// Release binaries bundled with this release (empty for branch snapshots).
     pub assets: Vec<AssetView>,
@@ -798,6 +799,7 @@ pub async fn build_detail_ctx(st: &Arc<AppState>, repo: &crate::index::RepoEntry
                 })
                 .collect()
         },
+        anchor: e.sidecar.anchor(),
         }
     };
 
@@ -1254,6 +1256,8 @@ pub struct NotifView {
     pub kind_label: String,
     pub repo: String,
     pub repo_name: String,
+    /// Link target: the exact snapshot anchor, or the repo when there is none.
+    pub url: String,
     pub title: String,
     pub at: String,       // "3d ago"
     pub at_exact: String, // exact date/time (tooltip)
@@ -1278,12 +1282,25 @@ pub fn notif_kind_label(kind: &str) -> String {
 }
 
 #[derive(Debug, Clone)]
+pub struct NotifTab {
+    pub key: String,
+    pub label: String,
+    pub url: String,
+    pub active: bool,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone)]
 pub struct NotificationsCtx {
     pub items: Vec<NotifView>,
     /// True when older notifications remain (the list loads them on scroll).
     pub has_more: bool,
     /// URL the list's sentinel requests for the next page.
     pub more_url: String,
+    /// Active kind filter ("" for all).
+    pub filter: String,
+    /// Kind filter tabs with their counts.
+    pub tabs: Vec<NotifTab>,
 }
 
 #[derive(askama::Template)]
@@ -1301,11 +1318,56 @@ pub struct NotifRowsT {
 /// How many notifications render per page; the list loads older ones on scroll.
 pub const NOTIF_PAGE_SIZE: usize = 50;
 
+/// Normalize a `?kind=` value to one of the known filter keys.
+pub fn normalize_notif_filter(kind: &str) -> &'static str {
+    match kind {
+        "release" => "release",
+        "snapshot" => "snapshot",
+        "error" => "error",
+        _ => "",
+    }
+}
+
+/// True when a notification kind belongs to the given filter.
+fn notif_matches(filter: &str, kind: &str) -> bool {
+    match filter {
+        "release" => kind == "new_release",
+        "snapshot" => kind == "new_snapshot",
+        "error" => matches!(kind, "remote_gone" | "corrupt"),
+        _ => true,
+    }
+}
+
+fn notif_tabs(all: &[crate::server::Notification], active: &str) -> Vec<NotifTab> {
+    let count = |filter: &str| all.iter().filter(|n| notif_matches(filter, &n.kind)).count();
+    [("", "All"), ("release", "Releases"), ("snapshot", "Snapshots"), ("error", "Errors")]
+        .iter()
+        .map(|(key, label)| {
+            let url = if key.is_empty() {
+                "/notifications".to_string()
+            } else {
+                format!("/notifications?kind={key}")
+            };
+            NotifTab {
+                key: (*key).to_string(),
+                label: (*label).to_string(),
+                url,
+                active: *key == active,
+                count: count(key),
+            }
+        })
+        .collect()
+}
+
 /// Build one page of the notification list. `offset` walks back through the
 /// store, which keeps at most [`crate::server::NOTIFICATION_LIMIT`] items, so
-/// the feed cannot load past that cap.
-pub async fn build_notifications_ctx(st: &Arc<AppState>, offset: usize) -> NotificationsCtx {
-    let items: Vec<crate::server::Notification> = st
+/// the feed cannot load past that cap. `filter` is a normalized kind filter.
+pub async fn build_notifications_ctx(
+    st: &Arc<AppState>,
+    offset: usize,
+    filter: &str,
+) -> NotificationsCtx {
+    let all: Vec<crate::server::Notification> = st
         .notifications
         .lock()
         .await
@@ -1314,6 +1376,7 @@ pub async fn build_notifications_ctx(st: &Arc<AppState>, offset: usize) -> Notif
         .take(crate::server::NOTIFICATION_LIMIT)
         .cloned()
         .collect();
+    let tabs = notif_tabs(&all, filter);
 
     // Resolve each notification's repo tint, icon and display name once, so the
     // marker and avatar on the left match the repo's card.
@@ -1332,11 +1395,16 @@ pub async fn build_notifications_ctx(st: &Arc<AppState>, offset: usize) -> Notif
             .collect()
     };
 
-    let total = items.len();
+    let filtered: Vec<&crate::server::Notification> = all
+        .iter()
+        .filter(|n| notif_matches(filter, &n.kind))
+        .collect();
+    let total = filtered.len();
     let offset = offset.min(total);
     let end = (offset + NOTIF_PAGE_SIZE).min(total);
-    let views: Vec<NotifView> = items[offset..end]
+    let views: Vec<NotifView> = filtered[offset..end]
         .iter()
+        .copied()
         .map(|n| {
             let (at, at_exact) = humanize_ago(&n.at).unwrap_or_else(|| {
                 let t: String = n.at.chars().take(16).collect();
@@ -1348,11 +1416,20 @@ pub async fn build_notifications_ctx(st: &Arc<AppState>, offset: usize) -> Notif
                 None if !n.repo.is_empty() => (resolve_tint(None, None, &n.repo), false, n.repo.clone()),
                 None => (String::new(), false, String::new()),
             };
+            let url = if n.repo.is_empty() {
+                String::new()
+            } else {
+                match n.target.as_deref().filter(|t| !t.is_empty()) {
+                    Some(target) => format!("/repos/{}#{target}", n.repo),
+                    None => format!("/repos/{}", n.repo),
+                }
+            };
             NotifView {
                 kind: n.kind.clone(),
                 kind_label: notif_kind_label(&n.kind),
                 repo: n.repo.clone(),
                 repo_name,
+                url,
                 title: n.title.clone(),
                 at,
                 at_exact,
@@ -1368,8 +1445,12 @@ pub async fn build_notifications_ctx(st: &Arc<AppState>, offset: usize) -> Notif
         .collect();
 
     let has_more = end < total;
-    let more_url = format!("/notifications/more?offset={end}");
-    NotificationsCtx { items: views, has_more, more_url }
+    let more_url = if filter.is_empty() {
+        format!("/notifications/more?offset={end}")
+    } else {
+        format!("/notifications/more?kind={filter}&offset={end}")
+    };
+    NotificationsCtx { items: views, has_more, more_url, filter: filter.to_string(), tabs }
 }
 
 // ---------- stats view ----------
