@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     pub server: ServerCfg,
     pub archive: ArchiveCfg,
+    pub ui: UiCfg,
     pub scheduler: SchedulerCfg,
     pub retention: RetentionCfg,
     pub notifications: NotificationsCfg,
@@ -80,6 +81,20 @@ impl Default for ArchiveCfg {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct UiCfg {
+    /// Tint cards, panels and notification markers with each repo's color.
+    /// Turn off to give every card the same theme color.
+    pub color: bool,
+}
+
+impl Default for UiCfg {
+    fn default() -> Self {
+        Self { color: true }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SchedulerCfg {
     /// Default-branch snapshot cadence.
     pub default_interval_days: u32,
@@ -140,11 +155,20 @@ impl Default for RetentionCfg {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NotificationsCfg {
     /// Optional webhook URL notified on new releases / dead remotes.
     pub webhook_url: Option<String>,
+    /// Drop notifications older than this many days. 0 keeps everything.
+    /// Notifications are alerts, not a log; history lives in metrics and OTLP.
+    pub keep_days: u32,
+}
+
+impl Default for NotificationsCfg {
+    fn default() -> Self {
+        Self { webhook_url: None, keep_days: 14 }
+    }
 }
 
 /// Optional OpenTelemetry OTLP export (logs + metrics).
@@ -524,6 +548,32 @@ mod tests {
         assert!(!explicit.fetch_icons());
         let on: Config = toml::from_str("[icons]\nenabled = true\n").unwrap();
         assert!(on.fetch_icons());
+    }
+
+    #[test]
+    fn notifications_keep_days_defaults_to_two_weeks() {
+        assert_eq!(Config::default().notifications.keep_days, 14);
+        let missing: Config = toml::from_str("[notifications]\n").unwrap();
+        assert_eq!(missing.notifications.keep_days, 14, "missing field uses the default");
+        let explicit: Config = toml::from_str("[notifications]\nkeep_days = 30\n").unwrap();
+        assert_eq!(explicit.notifications.keep_days, 30);
+        let off: Config = toml::from_str("[notifications]\nkeep_days = 0\n").unwrap();
+        assert_eq!(off.notifications.keep_days, 0);
+    }
+
+    #[test]
+    fn example_config_parses() {
+        let s = include_str!("../docker/config.example.toml");
+        let cfg: Config = toml::from_str(s).expect("docker/config.example.toml must parse");
+        assert_eq!(cfg.notifications.keep_days, 14);
+        assert!(cfg.ui.color);
+    }
+
+    #[test]
+    fn ui_color_mode_defaults_on_and_parses() {
+        assert!(Config::default().ui.color, "color mode is on by default");
+        let off: Config = toml::from_str("[ui]\ncolor = false\n").unwrap();
+        assert!(!off.ui.color);
     }
 
     #[test]

@@ -3,34 +3,15 @@
 {% block content %}
 <div class="detail narrow">
   <div class="detail-head"><h1>Notifications</h1></div>
-  {% if !ctx.items.is_empty() %}
-  {% if ctx.can_mark_read %}
-  <form method="post" action="/notifications" style="margin:0.5rem 0">
-    <button type="submit" class="chip">Mark all read</button>
-  </form>
-    {% endif %}
-  {% endif %}
-  {% if ctx.items.is_empty() %}
-  <p class="dim">No notifications yet</p>
-  {% else %}
-  {% for n in ctx.items %}
-  <div class="panel notification {% if n.kind == "new_release" %}new-release{% endif %}">
-    <div class="notif-head">
-      <b>{{ n.title }}</b>
-      <span class="dim"><span title="{{ n.at_exact }}">{{ n.at }}</span>{% if !n.repo.is_empty() %} · <a href="/repos/{{ n.repo }}">{{ n.repo }}</a>{% endif %}</span>
-    </div>
-    {% if !n.changelog_html.is_empty() %}
-    {% if n.kind == "new_snapshot" %}
-    <details class="notif-details">
-      <summary class="dim">Show changes</summary>
-      <div class="readme">{{ n.changelog_html|safe }}</div>
-    </details>
-    {% else %}
-    <div class="readme">{{ n.changelog_html|safe }}</div>
-    {% endif %}
-    {% endif %}
+  <div class="notif-tabs">
+    {% for t in ctx.tabs %}
+    <a class="notif-tab{% if t.active %} active{% endif %}" href="{{ t.url }}" title="notifications in the past week">{{ t.label }} <span class="count" title="notifications in the past week">{{ t.count }}</span></a>
+    {% endfor %}
   </div>
-  {% endfor %}
+  {% if ctx.items.is_empty() %}
+  <p class="dim">No notifications here</p>
+  {% else %}
+  {% include "notif_rows.html" %}
   {% endif %}
 </div>
 {% endblock %}

@@ -53,7 +53,7 @@
         {% include "tags_edit.html" %}
       </section>
 
-      <section class="panel{% if !ctx.color.is_empty() %} tinted{% endif %}"{% if !ctx.color.is_empty() %} data-color="{{ ctx.color }}"{% endif %}>
+      <section class="panel{% if !ctx.tint.is_empty() %} tinted{% endif %}"{% if !ctx.tint.is_empty() %} style="--tint: {{ ctx.tint }}"{% endif %}>
         <h2>About</h2>
         <details class="metadata-editor">
           <summary>&#9998; Edit metadata</summary>
@@ -109,7 +109,7 @@
         <h2>Releases</h2>
         <ul class="snaps">
           {% for s in ctx.releases %}
-          <li>
+          <li id="{{ s.anchor }}">
             <a class="dl" href="{{ s.download_url }}" download>{{ s.version }} <span class="dim" style="font-weight:400">source</span></a>
             <span class="snap-meta">{{ s.commit_short }} · <span title="{{ s.date_exact }}">{{ s.date }}</span> · {{ s.size_human }}</span>
             {% if !s.assets.is_empty() %}
@@ -139,7 +139,7 @@
         <h2>Branch snapshots</h2>
         <ul class="snaps">
           {% for s in ctx.branch_snapshots %}
-          <li>
+          <li id="{{ s.anchor }}">
             <a class="dl" href="{{ s.download_url }}" download>{{ s.label }}@{{ s.commit_short }}</a>
             <span class="snap-meta"><span title="{{ s.date_exact }}">{{ s.date }}</span> · {{ s.size_human }}</span>
             {% if !s.changelog_html.is_empty() %}

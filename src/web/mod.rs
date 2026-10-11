@@ -25,17 +25,20 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(index_page))
         .route("/healthz", get(healthz))
-        .route("/notifications", get(notifications_page).post(notifications_mark_read))
+        .route("/notifications", get(notifications_page))
+        .route("/notifications/more", get(notifications_more))
         .route("/stats", get(stats_page))
         .route("/import", get(import_page))
         .route("/settings", get(settings_page).post(settings_save))
         .route("/settings/verify", post(settings_verify))
+        .route("/settings/migrate", post(settings_migrate))
         .route("/settings/verify/{id}", get(settings_verify_status))
         .route("/import/scan", post(import_scan))
         .route("/import/suggest", get(import_suggest))
         .route("/import/llm", post(import_llm))
         .route("/import/commit", post(import_commit))
         .route("/repos/add", post(add_repo_form))
+        .route("/repos/more", get(repos_more))
         .route("/repos/job-status/{id}", get(job_status))
         .route("/folders/new", get(folders_new))
         .route("/folders/close", get(folders_close))
@@ -72,7 +75,7 @@ async fn oob_app_refresh(st: &Arc<AppState>) -> String {
 /// an in-page action (for example a background add) does not reset the view the
 /// user is looking at.
 async fn oob_app_refresh_with(st: &Arc<AppState>, tags: &[String], q: &str, folder: &str) -> String {
-    let ctx = views::build_list_ctx(st, tags, q, folder).await;
+    let ctx = views::build_list_ctx(st, tags, q, folder, 0).await;
     let inner = views::FragmentT { ctx }.render().unwrap_or_default();
     let options = folder_options_html(st).await;
     format!(
@@ -244,12 +247,30 @@ async fn index_page(
     let tags = csv_param(&map, "tags");
     let q = map.get("q").cloned().unwrap_or_default();
     let folder = map.get("folder").cloned().unwrap_or_default();
-    let ctx = build_list_ctx(&st, &tags, &q, &folder).await;
+    let ctx = build_list_ctx(&st, &tags, &q, &folder, 0).await;
     if headers.contains_key("hx-request") {
         render(&FragmentT { ctx })
     } else {
         render(&IndexT { ctx })
     }
+}
+
+/// GET /repos/more: one more page of repo cards for the grid's scroll sentinel.
+/// Returns cards plus the next sentinel, so an outerHTML swap keeps the feed
+/// going. Filters are carried in the URL so the feed never shifts mid-scroll.
+async fn repos_more(
+    State(st): State<Arc<AppState>>,
+    Query(map): Query<HashMap<String, String>>,
+) -> Response {
+    let tags = csv_param(&map, "tags");
+    let q = map.get("q").cloned().unwrap_or_default();
+    let folder = map.get("folder").cloned().unwrap_or_default();
+    let offset = map
+        .get("offset")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0);
+    let ctx = build_list_ctx(&st, &tags, &q, &folder, offset).await;
+    render(&views::RepoMoreT { ctx })
 }
 
 /// POST /repos/add: form-encoded { url, tags?, notes? }. Kicks off the same
@@ -1224,7 +1245,22 @@ async fn folders_update(
 
 async fn settings_page(State(st): State<Arc<AppState>>) -> Response {
     let cfg = st.cfg().await;
-    render(&views::SettingsT { ctx: views::settings_ctx_from(&cfg, false) })
+    let outdated = st.outdated_count().await;
+    render(&views::SettingsT { ctx: views::settings_ctx_from(&cfg, false, outdated) })
+}
+
+/// POST /settings/migrate: run on-disk schema migrations as a background job.
+async fn settings_migrate(State(st): State<Arc<AppState>>) -> Response {
+    let id = crate::server::spawn_migrate_job(&st).await;
+    let ctx = views::JobCtx {
+        id,
+        message: "Migrating archive".to_string(),
+        done: false,
+        failed: false,
+        view_url: String::new(),
+        oob_app: String::new(),
+    };
+    render(&views::JobT { ctx })
 }
 
 /// GET /stats: totals + a 7-day chart + recent days, no collector required.
@@ -1319,6 +1355,27 @@ async fn settings_save(
     cfg.tags.take_suggested = f.0.get("take_suggested_tags").map(|v| v == "1").unwrap_or(false);
     cfg.tags.folders = f.0.get("tags_folders").map(|v| v == "1").unwrap_or(false);
     cfg.icons.enabled = Some(f.0.get("fetch_icons").map(|v| v == "1").unwrap_or(false));
+    cfg.ui.color = f.0.get("color_mode").map(|v| v == "1").unwrap_or(false);
+    cfg.notifications.webhook_url = f
+        .0
+        .get("webhook_url")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    cfg.notifications.keep_days = num(&f, "notif_keep_days", cfg.notifications.keep_days);
+    cfg.scheduler.run_on_add = f.0.get("run_on_add").map(|v| v == "1").unwrap_or(false);
+    cfg.scheduler.max_concurrent = num(&f, "max_concurrent", cfg.scheduler.max_concurrent).max(1);
+    cfg.llm.max_tags = num(&f, "llm_max_tags", cfg.llm.max_tags).max(1);
+    cfg.llm.request_timeout_secs = num(&f, "llm_timeout", cfg.llm.request_timeout_secs).max(1);
+    cfg.otel.logs = f.0.get("otel_logs").map(|v| v == "1").unwrap_or(false);
+    cfg.otel.metrics = f.0.get("otel_metrics").map(|v| v == "1").unwrap_or(false);
+    cfg.otel.traces = f.0.get("otel_traces").map(|v| v == "1").unwrap_or(false);
+    cfg.remote.enabled = f.0.get("remote_enabled").map(|v| v == "1").unwrap_or(false);
+    cfg.remote.min_interval_ms = num(&f, "remote_min_interval", cfg.remote.min_interval_ms);
+    cfg.remote.jitter_ms = num(&f, "remote_jitter", cfg.remote.jitter_ms);
+    cfg.remote.respect_rate_limits = f.0.get("remote_respect").map(|v| v == "1").unwrap_or(false);
+    cfg.remote.max_wait_secs = num(&f, "remote_max_wait", cfg.remote.max_wait_secs);
+    cfg.remote.max_cooldown_secs = num(&f, "remote_max_cooldown", cfg.remote.max_cooldown_secs);
+    cfg.cache.conditional = f.0.get("cache_conditional").map(|v| v == "1").unwrap_or(false);
 
     // apply live
     *st.cfg.write().await = cfg.clone();
@@ -1334,7 +1391,8 @@ async fn settings_save(
     }
     // Re-render just the form body (not the whole page) into #settings-area,
     // while an OOB toast confirms the save at the bottom of the viewport.
-    let form = views::SettingsFormT { ctx: views::settings_ctx_from(&cfg, false) }
+    let outdated = st.outdated_count().await;
+    let form = views::SettingsFormT { ctx: views::settings_ctx_from(&cfg, false, outdated) }
         .render()
         .unwrap_or_default();
     html(format!("{}{form}", oob_toast("Settings saved")))
@@ -1618,7 +1676,11 @@ async fn import_commit(
 // ---------- notifications page (bell target) ----------
 
 
-async fn notifications_page(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+async fn notifications_page(
+    State(st): State<Arc<AppState>>,
+    Query(map): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
     // Viewing the page reads everything: clear the bell for the current user
     // (or the server-wide marker when accounts are not configured).
     let user = crate::auth::current_user(&st, &headers);
@@ -1626,43 +1688,25 @@ async fn notifications_page(State(st): State<Arc<AppState>>, headers: HeaderMap)
         Some(u) => st.mark_notifications_seen_for(u).await,
         None => st.mark_notifications_seen().await,
     }
-    let items: Vec<crate::server::Notification> =
-        st.notifications.lock().await.items.iter().take(100).cloned().collect();
-    let views: Vec<views::NotifView> = items
-        .iter()
-        .map(|n| {
-            let (at, at_exact) = views::humanize_ago(&n.at).unwrap_or_else(|| {
-                let t: String = n.at.chars().take(16).collect();
-                (t.clone(), t)
-            });
-            views::NotifView {
-                kind: n.kind.clone(),
-                repo: n.repo.clone(),
-                title: n.title.clone(),
-                at,
-                at_exact,
-                changelog_html: n
-                    .body
-                    .as_deref()
-                    .map(crate::files::markdown_to_html)
-                    .unwrap_or_default(),
-            }
-        })
-        .collect();
-    let ctx = views::NotificationsCtx { items: views, can_mark_read: true };
+    let filter = views::normalize_notif_filter(map.get("kind").map(String::as_str).unwrap_or(""));
+    let ctx = views::build_notifications_ctx(&st, 0, filter, map.get("week").map(String::as_str)).await;
     render(&views::NotificationsT { ctx })
 }
 
-async fn notifications_mark_read(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    match crate::auth::current_user(&st, &headers) {
-        Some(user) => st.mark_notifications_seen_for(&user).await,
-        None => st.mark_notifications_seen().await,
-    }
-    Response::builder()
-        .status(StatusCode::SEE_OTHER)
-        .header("location", "/notifications")
-        .body(Body::empty())
-        .unwrap()
+/// GET /notifications/more: the next page of notifications for the list's
+/// scroll sentinel. Read state is not touched here; viewing the first page
+/// already cleared the bell.
+async fn notifications_more(
+    State(st): State<Arc<AppState>>,
+    Query(map): Query<HashMap<String, String>>,
+) -> Response {
+    let offset = map
+        .get("offset")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0);
+    let filter = views::normalize_notif_filter(map.get("kind").map(String::as_str).unwrap_or(""));
+    let ctx = views::build_notifications_ctx(&st, offset, filter, map.get("week").map(String::as_str)).await;
+    render(&views::NotifRowsT { ctx })
 }
 
 #[cfg(test)]

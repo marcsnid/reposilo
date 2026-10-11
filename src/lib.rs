@@ -5,6 +5,7 @@
 
 pub mod archiver;
 pub mod auth;
+pub mod color;
 pub mod config;
 pub mod files;
 pub mod forge;
@@ -14,6 +15,7 @@ pub mod importer;
 pub mod index;
 pub mod llm;
 pub mod metrics;
+pub mod migrations;
 pub mod platform;
 pub mod ratelimit;
 pub mod releaseapi;

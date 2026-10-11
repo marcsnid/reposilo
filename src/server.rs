@@ -59,6 +59,10 @@ pub struct Notification {
     #[serde(default)]
     pub body: Option<String>, // markdown (changelogs for new_release)
     pub at: String,
+    /// Snapshot anchor within the repo page, for a deep link to the exact
+    /// release or branch snapshot. Empty for repo-wide events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -93,6 +97,18 @@ impl NotificationStore {
             seen_at: self.seen_at.clone(),
             items: self.items.clone(),
         }
+    }
+
+    /// Drop notifications older than `keep_days` (0 keeps everything). A
+    /// malformed timestamp is kept rather than silently discarded.
+    fn prune(&mut self, keep_days: u32) {
+        if keep_days == 0 {
+            return;
+        }
+        let cutoff = OffsetDateTime::now_utc() - time::Duration::days(i64::from(keep_days));
+        self.items.retain(|n| {
+            OffsetDateTime::parse(&n.at, &Rfc3339).map(|t| t >= cutoff).unwrap_or(true)
+        });
     }
 
     /// Count items newer than `since`; when `since` is empty, use the
@@ -161,9 +177,10 @@ impl AppState {
         }
         let index = Index::load(&root)?;
         let refresh_sem = Arc::new(Semaphore::new(cfg.scheduler.max_concurrent.max(1)));
-        let notifications = crate::types::read_json::<NotificationsFile>(&root.join("notifications.json"))
+        let mut notifications = crate::types::read_json::<NotificationsFile>(&root.join("notifications.json"))
             .map(NotificationStore::from_file)
             .unwrap_or_default();
+        notifications.prune(cfg.notifications.keep_days);
         Ok(Self {
             cfg: RwLock::new(cfg),
             config_path,
@@ -325,7 +342,14 @@ impl AppState {
         self.running.lock().unwrap().remove(Self::lock_key(rel));
     }
 
-    pub async fn push_notification(&self, kind: &str, repo: &str, title: String, body: Option<String>) {
+    pub async fn push_notification(
+        &self,
+        kind: &str,
+        repo: &str,
+        title: String,
+        body: Option<String>,
+        target: Option<String>,
+    ) {
         let n = Notification {
             id: 0, // assigned below
             kind: kind.into(),
@@ -333,17 +357,17 @@ impl AppState {
             title,
             body,
             at: now_rfc3339(),
+            target,
         };
-        // Resolve the root before taking the notifications lock: `root()` awaits
-        // the config lock, and we don't want to hold one lock across another.
+        // Resolve config-dependent values before taking the notifications lock:
+        // those awaits take other locks, and we don't hold one across another.
+        let keep_days = self.cfg().await.notifications.keep_days;
         let notif_path = self.root().await.join("notifications.json");
         let mut store = self.notifications.lock().await;
         let id = store.items.first().map(|i| i.id + 1).unwrap_or(1);
         let n = Notification { id, ..n };
         store.items.insert(0, n.clone());
-        if store.items.len() > 500 {
-            store.items.truncate(500);
-        }
+        store.prune(keep_days);
         let file = store.to_file();
         let _ = write_json(&notif_path, &file);
         drop(store);
@@ -373,7 +397,7 @@ impl AppState {
         }
         let payload = serde_json::json!({
             "event": n.kind, "repo": n.repo, "title": n.title,
-            "body": n.body, "at": n.at,
+            "body": n.body, "at": n.at, "target": n.target,
         });
         let st2 = self;
         let _n = n.clone();
@@ -393,6 +417,17 @@ impl AppState {
 
     pub async fn notification_count(&self, since: Option<&str>) -> usize {
         self.notifications.lock().await.unread(since)
+    }
+
+    /// Repos whose manifest is behind the current on-disk schema.
+    pub async fn outdated_count(&self) -> usize {
+        self.index
+            .read()
+            .await
+            .repos
+            .iter()
+            .filter(|r| r.manifest.schema < crate::migrations::SCHEMA_VERSION)
+            .count()
     }
 
     /// Get (building + caching if needed) the parsed listing for an archive.
@@ -1152,16 +1187,37 @@ pub async fn spawn_refresh_job(
             Ok(summary) => {
                 let mut fields: Vec<&str> = vec!["refresh_ok"];
                 if let Some(v) = &summary.new_release {
-                    st.push_notification("new_release", &rel, format!("new release {v}"), None).await;
+                    st.push_notification(
+                        "new_release",
+                        &rel,
+                        format!("new release {v}"),
+                        summary.release_changelog.clone(),
+                        summary.release_snapshot_anchor.clone(),
+                    )
+                    .await;
                     fields.push("new_releases");
                 }
                 if summary.new_branch_snapshot {
                     let title = snapshot_notification_title(summary.branch_commits);
-                    st.push_notification("new_snapshot", &rel, title, summary.branch_changelog).await;
+                    st.push_notification(
+                        "new_snapshot",
+                        &rel,
+                        title,
+                        summary.branch_changelog,
+                        summary.branch_snapshot_anchor.clone(),
+                    )
+                    .await;
                     fields.push("new_snapshots");
                 }
                 if summary.remote_unavailable {
-                    st.push_notification("remote_gone", &rel, "remote unreachable; local copy intact".to_string(), None).await;
+                    st.push_notification(
+                        "remote_gone",
+                        &rel,
+                        "remote unreachable; local copy intact".to_string(),
+                        None,
+                        None,
+                    )
+                    .await;
                     fields.push("remote_gone");
                 }
                 let _ = st.reindex().await;
@@ -1179,6 +1235,36 @@ pub async fn spawn_refresh_job(
 }
 
 /// Spawn a full-archive verify job (manual, from the Settings page).
+/// Run schema migrations over every repo as a background job. Returns the job
+/// id; progress and the summary surface through the normal job-status UI.
+pub async fn spawn_migrate_job(st: &Arc<AppState>) -> u64 {
+    let id = st.create_job("migrate", None).await;
+    let st2 = st.clone();
+    tokio::spawn(async move {
+        let cfg = st2.cfg().await;
+        let archiver =
+            Archiver::with_governor_and_cache(cfg, st2.governor.clone(), st2.http_cache.clone());
+        let repos: Vec<(String, PathBuf)> = st2
+            .index
+            .read()
+            .await
+            .repos
+            .iter()
+            .map(|r| (r.rel.clone(), r.dir.clone()))
+            .collect();
+        let report = crate::migrations::migrate_all(&archiver, &repos, false).await;
+        let _ = st2.reindex().await;
+        let mut msg = format!("migrated {} of {} repositories", report.migrated, report.scanned);
+        if !report.errors.is_empty() {
+            msg.push_str(&format!(" ({} errors)", report.errors.len()));
+        }
+        st2.set_job_note(id, msg.clone()).await;
+        st2.finish_job(id, None).await;
+        st2.push_notification("migrate", "", msg, None, None).await;
+    });
+    id
+}
+
 pub async fn spawn_verify_job(st: &Arc<AppState>) -> u64 {
     spawn_verify_job_inner(st, false).await
 }
@@ -1232,7 +1318,7 @@ async fn spawn_verify_job_inner(st: &Arc<AppState>, scheduled: bool) -> u64 {
                 if scheduled && problems > 0 {
                     let title = format!("integrity check found {problems} problem(s)");
                     let body = integrity_body(&report);
-                    st2.push_notification("corrupt", "", title, Some(body)).await;
+                    st2.push_notification("corrupt", "", title, Some(body), None).await;
                 }
                 tracing::info!(
                     scheduled,
@@ -1505,7 +1591,7 @@ async fn autotag_trigger(State(st): State<Arc<AppState>>) -> Result<Response, Ap
         let cfg = st2.cfg().await;
         let report = crate::tagging::run_autotag(&cfg, &repos, false).await;
         let _ = st2.reindex().await;
-        st2.push_notification("autotag", "", format!("AI tagged {} repos", report.changed), None).await;
+        st2.push_notification("autotag", "", format!("AI tagged {} repos", report.changed), None, None).await;
         st2.finish_job(id, None).await;
     });
     Ok((StatusCode::ACCEPTED, Json(json!({ "job_id": id, "repos": n }))).into_response())
@@ -1964,7 +2050,9 @@ mod tests {
             suggested_tags: vec![],
             stars: None,
             color: None,
+            auto_color: None,
             unidentified: false,
+            schema: 0,
         }
     }
 

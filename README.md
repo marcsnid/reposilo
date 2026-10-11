@@ -6,77 +6,59 @@ Each repo is kept as shallow snapshots and release tags (plain zips on
 disk), so the archive is still browsable and searchable if the remote ever
 goes away.
 
-[![repository gallery](screenshots/reposilo-main.png)](screenshots/reposilo-main.png)
+[![repository gallery](screenshots/reposilo-main.webp)](screenshots/reposilo-main.webp)
 
 ## What it does
 
-- **Archive** any git repo as a shallow snapshot (zip or tar.zst) + release
-  tags, on a configurable schedule, with configurable retention
-- **Survive** dead remotes: if a repo goes down, your copy stays browsable
-  forever; after 3 weeks unreachable it's marked dead and the scheduler stops
-  calling out to it
-- **Import** directories of zipped repos: offline detection (`.git/config`,
-  package manifests, READMEs), GitHub search + llama.cpp identification for
-  the hard ones, park unidentifiable ones for later
-- **Organize** with tags, folders, and search; languages are detected from
-  file contents; GitHub topics auto-import as suggested tags; llama.cpp
-  auto-tags from README content
-- **Browse** rendered READMEs, file listings, individual file viewing,
-  all read from the zip on demand (no unzip needed)
-- **Notify** on new releases with readable changelogs (GitHub release notes
-  or `CHANGELOG.md` at the tag); optional webhook for external alerts
-- **Verify** the archive on demand: hash every stored zip against the sha256
-  in its sidecar, from `reposilo verify` or a Settings button, to catch missing
-  or corrupt files. A scheduled check can be turned on in Settings (or with
-  `[verify] enabled = true`), and pushes a notification when something fails.
-  It is off by default because it reads every zip.
-- **Pace** outbound requests per host: API calls and git operations (clone,
-  fetch, ls-remote) are spaced, and API calls are paused when the forge reports
-  a rate limit, so refreshing many repos does not trip GitHub/GitLab/Forgejo
-  limits. Works with anonymous or token auth, is on by default, and can be
-  disabled.
-- **Revalidate** forge API responses with `ETag` / `If-None-Match`: an
-  unchanged answer comes back as a 304, which on GitHub does not count against
-  the rate limit, so repeat lookups are free. Cached bodies are kept under the
-  archive root (`http-cache.json`). On by default, can be disabled.
-- **Collect release binaries**: download the platform-specific assets attached
-  to a release, filtered to the OS/arch you care about. Names like
-  `foo-win64.zip`, `foo-x86_64-unknown-linux-gnu.tar.gz` and `Bar-1.0-arm64.dmg`
-  all resolve correctly.
+- Keeps any git repo as a zip (or tar.zst) snapshot plus release tags, on a
+  schedule you set, with per-repo retention.
+- Snapshots stay browsable without unzipping (README, file listing, downloads),
+  so a copy survives its remote. A repo unreachable for three weeks is marked
+  dead and stops being checked.
+- Imports folders of zipped repos, detecting origins offline from `.git/config`,
+  package manifests, and READMEs, with GitHub search and llama.cpp as fallbacks.
+- Organizes with tags, folders, and search, plus language detection and optional
+  llama.cpp auto-tagging.
+- Notifies on new releases with the changelog, supports an optional webhook, and
+  can download release binaries for the platforms you choose.
+- Verifies the archive on demand or on a schedule, hashing every zip against its
+  sidecar to catch missing or corrupt files.
+- Paces outbound requests per host and revalidates API responses with ETag, so
+  refreshing many repos does not trip forge rate limits.
 
-[![repo detail page](screenshots/reposilo-repo.png)](screenshots/reposilo-repo.png)
+[![repo detail page](screenshots/reposilo-repo.webp)](screenshots/reposilo-repo.webp)
 
-## Storage model (datahoarder-first)
+## On disk
 
 ```
-<archive_root>/<owner>-<repo>/             # flat: forks can't collide
-├── repo.json        # manifest: origin, tags, schedule, retention
-├── README.md        # plain README of the default branch (few KB)
-├── branch/<branch>/ # snapshots: repo-branch@date_sha.zip + .json sidecar
-└── releases/<tag>/  # releases: repo-tag.zip + .json sidecar
-    └── assets/       # release binaries for the platforms you enabled
+<archive_root>/<owner>-<repo>/
+├── repo.json        # origin, tags, schedule, retention
+├── README.md        # plain README of the default branch
+├── branch/<branch>/ # one zip per snapshot, plus a JSON sidecar
+└── releases/<tag>/  # one zip per release, plus a JSON sidecar
+    └── assets/       # release binaries, when enabled
 ```
 
-- **The zip is the only persistent artifact**: git clones are ephemeral
-  (temp clone → zip → delete), so disk = zips + tiny JSON/README files
-- Every generated zip carries `.reposilo.json` **inside it** (AIO:
-  copy a single zip anywhere and it's still self-describing)
-- Zip filenames start with the project name (`ripgrep-master@2025-01-15_a1b2c3d.zip`)
-- Disk is the source of truth; the index is fully rebuildable from it
-- Archive format configurable: `zip` (default, universally unzip-able) or
-  `tar.zst` (better compression for large repos)
-- Imported zips keep their original filenames and are exempt from retention
-  pruning (irreplaceable)
-- Content-addressed dedup: when a release tag points at the same commit as
-  the branch HEAD, the two archives share one file on disk (hard link). The
-  shared file keeps the original snapshot's embedded `.reposilo.json`; each
-  snapshot's external sidecar records its own kind/ref/version
+- A repo folder holds `repo.json`, a `README.md`, and one zip per snapshot or
+  release. Nothing else. Refreshing clones the remote into a temp directory,
+  writes the zip with `git archive`, then deletes the clone.
+- Each zip has a `.json` sidecar (commit, ref, version, size, sha256), and carries
+  the same metadata inside it as `.reposilo.json`, so a zip copied anywhere is
+  still self-describing.
+- Filenames start with the project name, for example
+  `ripgrep-master@2025-01-15_a1b2c3d.zip`.
+- The tree is the source of truth. Delete the index and `reposilo reindex`
+  rebuilds it from the files on disk.
+- Snapshots are zips, or `tar.zst` when configured.
+- Imported zips keep their original filenames and are never pruned.
+- When a release tag points at the same commit as the branch HEAD, the two
+  snapshots share one file through a hard link. Each sidecar still records its
+  own kind, ref, and version.
 
 ## Install
 
 Grab a prebuilt binary from the
-[releases page](https://github.com/marcsnid/reposilo/releases) (linux, macOS and
-windows; x64 and arm64), or build from source:
+[releases page](https://github.com/marcsnid/reposilo/releases), or build from source:
 
 ```sh
 cargo build --release
@@ -105,6 +87,8 @@ reposilo import /path/to/zips --copy --tag imported
 # migrate an old archive to the current layout
 reposilo migrate-folders                     # owner/repo → owner-repo folders
 reposilo prune-shallow                       # remove old git stores (zip-only)
+reposilo migrate --dry-run                   # preview schema migrations
+reposilo migrate                             # backfill card colors + icons
 
 # start the web UI + API + scheduler
 reposilo serve                               # 127.0.0.1:8765 by default
@@ -117,7 +101,9 @@ reposilo serve --bind 0.0.0.0:8765           # or REPOSILO_BIND=0.0.0.0:8765
 #   - select repos with the checkboxes to refresh, tag, move or remove them in bulk
 #   - edit metadata (name, description, notes, origin, folder, tags) per repo
 #   - import zips from Settings; assign origins to _unknown repos
-#   - notifications with readable release changelogs
+#   - notifications with readable release changelogs, deep links to the exact
+#     release/snapshot, kind filter tabs with past-week counts, and a divider
+#     between this week and older items
 #   - verify the whole archive from Settings (hashes every zip)
 #   - dark/light theme, settings (retention, scheduler, llama.cpp)
 #   - a REST API; downloads stream straight from disk
@@ -131,129 +117,30 @@ reposilo autotag                             # apply (merges, never removes)
 
 ### Configuration
 
-The config file lives at `~/.config/reposilo/config.toml` (or `--config`):
-
-```toml
-[archive]
-root = "/path/to/archive"
-format = "zip"             # or "tar.zst" (zstd level 10 by default)
-
-[retention]
-keep_branch_snapshots = 1   # -1 keeps everything
-keep_releases = 1          # -1 keeps everything
-# [[retention.tag_rules]]  # per-tag overrides:
-# tag = "cli"
-# keep_releases = -1
-
-[scheduler]
-default_interval_days = 7
-release_poll_hours = 24
-dead_after_days = 21       # stop checking after N days unreachable
-# The scheduler checks a repo when `min(default_interval_days * 24,
-# release_poll_hours)` has elapsed since its last check. For a plain weekly
-# cadence (weekly main + weekly release check) set release_poll_hours = 168.
-
-[git]
-# depth = 1                # 1 = shallow snapshot, 0 = full mirror
-# timeout_secs = 600       # hard kill for hung git subprocesses (network hangs)
-
-[remote]
-# Space outbound requests per host so a burst of repos does not trip a forge's
-# rate limiter, and honor the server's own backoff signals. Applies to API
-# calls and to git operations (clone, fetch, ls-remote) for every forge
-# (GitHub, GitLab, Forgejo/Codeberg, custom). Local and file:// remotes are
-# never paced. Set enabled = false to send immediately (the old behavior).
-enabled = true
-min_interval_ms = 500      # minimum gap between requests to the same host
-jitter_ms = 250            # extra random 0..N ms, to avoid lockstep bursts
-respect_rate_limits = true # honor Retry-After / X-RateLimit-* / RateLimit-*
-max_wait_secs = 30         # never block longer than this; skip and retry later
-max_cooldown_secs = 900    # cap on a single rate-limit pause
-
-[cache]
-# Revalidate API responses with ETag / If-None-Match. A 304 means the data is
-# unchanged and does not count against GitHub's primary rate limit. Cached
-# bodies live in http-cache.json under the archive root.
-conditional = true
-
-[verify]
-# Run a full hash check while serving (also a toggle in Settings). Off by
-# default because it reads every stored zip. When problems are found, one
-# notification is pushed and the run time is recorded so it does not repeat
-# until the interval elapses.
-enabled = false
-interval_days = 7
-
-[github]
-# token = "env:GITHUB_TOKEN"  # better rate limits for enrichment
-
-[gitlab]
-# token = "env:GITLAB_TOKEN"   # private GitLab release assets
-
-[forgejo]
-# token = "env:FORGEJO_TOKEN"  # private Forgejo/Codeberg release assets
-
-[tags]
-# Adopt forge-suggested tags (GitHub topics, etc.) automatically.
-take_suggested = false
-# Split the folder a repo is placed in into tags. Putting a repo in games/tools
-# adds the tags games and tools alongside any tags you enter.
-folders = false
-
-[icons]
-# Download the repo owner's avatar (GitHub, GitLab, Forgejo) as the repo icon.
-enabled = true
-
-[releases]
-# Also download the binary assets attached to releases, for these platforms.
-# Filters match the asset filename loosely: an OS ("linux"), an arch
-# ("arm64"), a full slug ("darwin-arm64") or "all". "win64" == "windows-x64".
-# Empty = no binaries are downloaded (the safe default). Downloads are
-# size-capped and verified against the forge's sha256 when one is published.
-platforms = ["darwin-arm64", "linux-x64"]
-# max_asset_mb = 0            # 0 = no per-file size limit
-[llm]
-enabled = false
-url = "http://192.168.0.1:11434/v1"  # any OpenAI-compatible endpoint
-# model = "Qwen3.6-27B-GGUF"
-
-[notifications]
-# webhook_url = "https://hooks.example.com/your-hook"  # new releases + dead links
-
-[otel]
-# enabled = true
-# endpoint = "http://localhost:4318"  # OTLP/HTTP collector base URL; signal paths are appended
-# service_name = "reposilo"
-# interval_secs = 60                   # metrics export interval
-# logs = true                          # bridge tracing logs to OTLP
-# metrics = true                       # export archive metrics
-# traces = true                        # export spans (HTTP requests, add/refresh/verify jobs)
-```
+The config file lives at `~/.config/reposilo/config.toml` (or `--config`).
+Every key, with its default and a short comment, is listed in
+[`docker/config.example.toml`](docker/config.example.toml). The Settings page
+in the web UI covers most of the common options at runtime.
 
 ### Stats and monitoring
 
-Every instance has a built-in **Stats** page (`/stats`, also in the top bar)
-and a JSON API at `/api/stats`. It shows current totals (repos, snapshots,
-releases, dead/unavailable remotes, untagged), a storage breakdown (archive
-total, and the snapshot / release / release-asset split) with the ten largest
-repos, a per-day 7-day bar chart of refresh successes vs failures, integrity
-check counts, API cache revalidations and fetches, and live remote rate-limit
-status (pauses, requests skipped, and any hosts paused right now). Counters are
-persisted to `<archive>/metrics.json` for 90 days, so they survive restarts.
+Every instance has a built-in Stats page (`/stats`, also in the top bar) and a
+JSON API at `/api/stats`. It shows totals (repos, snapshots, releases, dead and
+unavailable remotes, untagged), a storage breakdown with the ten largest repos, a
+7-day refresh chart, integrity check counts, API cache stats, and live
+rate-limit status. Counters persist to `<archive>/metrics.json` for 90 days, so
+they survive restarts.
 
-Setting `[otel] enabled = true` additionally exports over OTLP/HTTP to a
-collector: **metrics** (the same totals and counters, storage gauges
-`reposilo.storage.bytes`, `reposilo.storage.snapshot_bytes`,
-`reposilo.storage.release_bytes`, `reposilo.storage.asset_bytes`, per-host
-rate-limit counters `reposilo.remote.rate_limited` and
-`reposilo.remote.requests_skipped`, and cache gauges `reposilo.http.cache_hits` /
-`reposilo.http.cache_misses`), **logs** (everything
-`tracing` emits, bridged through the OpenTelemetry log appender), and
-**traces** (one span per HTTP request, plus spans for add, refresh, and
-integrity check jobs). Logs, metrics, and traces can be toggled independently.
-All are optional and best-effort, and
-log records from the exporter's own HTTP stack are filtered out to avoid a
-feedback loop.
+<a href="screenshots/reposilo-stats.webp"><img src="screenshots/reposilo-stats.webp" alt="Stats page" width="440"></a>
+
+For longer-lived history, set `[otel] enabled = true` to also export over
+OTLP/HTTP to a collector. The three signals are independent:
+
+- Logs: Everything `tracing` emits, bridged through the OpenTelemetry log appender. Log
+records from the exporter's own HTTP stack are filtered out to avoid a feedback
+loop.
+- Traces: One span per HTTP request, plus spans for add, refresh, and integrity check jobs.
+- Metrics: The same totals and counters as the Stats page, plus gauges.
 
 ### Users and auth
 
@@ -300,23 +187,6 @@ container read-only with all capabilities dropped and only `/config`,
 If you clone over SSH instead of HTTPS, add `openssh-client` to the runtime
 stage and mount your keys. The container sets `REPOSILO_BIND=0.0.0.0:8765`
 (override with `-e REPOSILO_BIND=...`).
-
-## Roadmap
-
-- **Full-text content search**: index the contents of files inside the
-  archived zips so you can search code and text, not just repo names,
-  descriptions, and tags. This is the biggest capability still missing for a
-  self-hosted archive.
-- **git bundle archives**: a full-history bundle saved alongside the
-  snapshot, so a dead repo can be re-established (re-cloned, re-pushed),
-  not just browsed
-- **Content-addressed dedup across repos**: currently dedup is per-repo
-  (a release zip and branch snapshot pointing at the same commit share one
-  file on disk), but identical content in *different* repos is stored twice
-- **Forge enrichment beyond GitHub**: stars, topics, and release notes for
-  GitLab and Forgejo
-- **Archive export/sync**: a guided way to move an archive tree between
-  machines (verify integrity, rebuild the index on the far end)
 
 ## Development
 

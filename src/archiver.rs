@@ -47,6 +47,12 @@ pub struct RefreshSummary {
     pub branch_commits: Option<u64>,
     /// Markdown changelog for the new branch snapshot (commit readout).
     pub branch_changelog: Option<String>,
+    /// Markdown changelog for the new release (release notes or CHANGELOG.md).
+    pub release_changelog: Option<String>,
+    /// Anchor of the new branch snapshot on the repo page, for deep links.
+    pub branch_snapshot_anchor: Option<String>,
+    /// Anchor of the new release snapshot on the repo page, for deep links.
+    pub release_snapshot_anchor: Option<String>,
 }
 
 /// Make a string safe to use as a single filesystem path component.
@@ -546,6 +552,30 @@ impl Archiver {
             tags
         };
 
+        // Fetch the avatar before the manifest is written so the tint can be
+        // recorded alongside it. Decoding is CPU work, so keep it off the
+        // async runtime.
+        let icon_bytes = if self.cfg.fetch_icons() {
+            match avatar_url {
+                Some(avatar) => crate::forgeapi::fetch_avatar(&self.cfg, &self.governor, &avatar).await,
+                None => None,
+            }
+        } else {
+            None
+        };
+        // An empty string marks "icon present but no usable color" so a gray
+        // avatar is not re-decoded on the next refresh.
+        let auto_color = match icon_bytes.clone() {
+            Some(bytes) => {
+                let hex = tokio::task::spawn_blocking(move || crate::color::extract_auto_color(&bytes))
+                    .await
+                    .ok()
+                    .flatten();
+                Some(hex.unwrap_or_default())
+            }
+            None => None,
+        };
+
         let manifest = RepoManifest {
             origin: Some(url.to_string()),
             forge: info.kind.id().to_string(),
@@ -564,17 +594,15 @@ impl Archiver {
             remote_state: None,
             unavailable_since: None,
             color: None,
+            auto_color,
             unidentified: false,
+            schema: crate::migrations::SCHEMA_VERSION,
         };
         crate::types::write_json(&manifest_path, &manifest)?;
 
-        // store the owner avatar locally so the repo icon survives the remote
-        if self.cfg.fetch_icons() {
-            if let Some(avatar) = avatar_url {
-                if let Some(bytes) = crate::forgeapi::fetch_avatar(&self.cfg, &self.governor, &avatar).await {
-                    let _ = fs::write(repo_dir.join("icon"), bytes);
-                }
-            }
+        // Store the owner avatar locally so the repo icon survives the remote.
+        if let Some(bytes) = icon_bytes {
+            let _ = fs::write(repo_dir.join("icon"), bytes);
         }
 
         if self.cfg.scheduler.run_on_add {
@@ -979,6 +1007,67 @@ impl Archiver {
         Ok(stored)
     }
 
+    /// Fetch and store the owner avatar when none is present and icons are
+    /// enabled. A zero-byte `icon` records "checked, no avatar" so the API is
+    /// not retried. Best effort: failures are ignored.
+    pub async fn backfill_icon(&self, repo_dir: &Path, origin: &str) {
+        if !self.cfg.fetch_icons() || repo_dir.join("icon").exists() {
+            return;
+        }
+        let info = crate::forge::detect(origin).ok();
+        match info.as_ref().map(|i| i.kind) {
+            Some(crate::forge::ForgeKind::GitHub) => {
+                if let Some(meta) = crate::forgeapi::github_repo_meta(&self.cfg, &self.governor, &self.http_cache, origin).await {
+                    match meta.avatar_url {
+                        Some(url) => {
+                            if let Some(bytes) = crate::forgeapi::fetch_avatar(&self.cfg, &self.governor, &url).await {
+                                let _ = fs::write(repo_dir.join("icon"), bytes);
+                            }
+                        }
+                        None => {
+                            let _ = fs::write(repo_dir.join("icon"), b"");
+                        }
+                    }
+                }
+            }
+            Some(crate::forge::ForgeKind::GitLab | crate::forge::ForgeKind::Forgejo) => {
+                if let Some(url) = crate::releaseapi::repo_avatar_url(&self.cfg, &self.governor, &self.http_cache, origin).await {
+                    if let Some(bytes) = crate::forgeapi::fetch_avatar(&self.cfg, &self.governor, &url).await {
+                        let _ = fs::write(repo_dir.join("icon"), bytes);
+                    }
+                }
+            }
+            // generic remotes and unidentified imports have no avatar API
+            _ => {}
+        }
+    }
+
+    /// Derive the card tint from the stored icon once. The color is stable
+    /// identity, so there is no reason to decode again later; an empty string
+    /// records "icon present but no usable color" so a gray avatar is not
+    /// re-decoded either.
+    pub async fn derive_auto_color(&self, manifest: &mut RepoManifest, repo_dir: &Path) {
+        if manifest.auto_color.is_some() {
+            return;
+        }
+        if let Ok(bytes) = fs::read(repo_dir.join("icon")) {
+            if !bytes.is_empty() {
+                let hex = tokio::task::spawn_blocking(move || crate::color::extract_auto_color(&bytes))
+                    .await
+                    .ok()
+                    .flatten();
+                manifest.auto_color = Some(hex.unwrap_or_default());
+            }
+        }
+    }
+
+    /// Fetch a missing icon (when enabled) and derive the card tint from it.
+    /// Shared by refresh and the schema migration.
+    pub async fn backfill_card_color(&self, manifest: &mut RepoManifest, repo_dir: &Path, origin: &str) {
+        self.backfill_icon(repo_dir, origin).await;
+        self.derive_auto_color(manifest, repo_dir).await;
+    }
+
     /// Refresh one repo against its remote: re-snapshot the default branch if
     /// it moved, archive a newer semver release if one exists, prune per
     /// retention, and record the check time
@@ -1004,38 +1093,9 @@ impl Archiver {
         let name = manifest.name.clone();
         let mirror = shallow.is_dir(); // full-mirror mode keeps a persistent git store
 
-        // backfill the owner avatar for archives created before icon support.
-        // GitHub resolves its avatar from the repo metadata call; GitLab and
-        // Forgejo use their own project API. A zero-byte `icon` marks
-        // "checked, no avatar" so the API is not retried.
-        if self.cfg.fetch_icons() && !repo_dir.join("icon").exists() {
-            let info = crate::forge::detect(&origin).ok();
-            match info.as_ref().map(|i| i.kind) {
-                Some(crate::forge::ForgeKind::GitHub) => {
-                    if let Some(meta) = crate::forgeapi::github_repo_meta(&self.cfg, &self.governor, &self.http_cache, &origin).await {
-                        match meta.avatar_url {
-                            Some(url) => {
-                                if let Some(bytes) = crate::forgeapi::fetch_avatar(&self.cfg, &self.governor, &url).await {
-                                    let _ = fs::write(repo_dir.join("icon"), bytes);
-                                }
-                            }
-                            None => {
-                                let _ = fs::write(repo_dir.join("icon"), b"");
-                            }
-                        }
-                    }
-                }
-                Some(crate::forge::ForgeKind::GitLab | crate::forge::ForgeKind::Forgejo) => {
-                    if let Some(url) = crate::releaseapi::repo_avatar_url(&self.cfg, &self.governor, &self.http_cache, &origin).await {
-                        if let Some(bytes) = crate::forgeapi::fetch_avatar(&self.cfg, &self.governor, &url).await {
-                            let _ = fs::write(repo_dir.join("icon"), bytes);
-                        }
-                    }
-                }
-                // generic remotes and unidentified imports have no avatar API
-                _ => {}
-            }
-        }
+        // Bring older archives up to the current card behavior: fetch a missing
+        // owner avatar when icons are enabled, then derive the tint from it.
+        self.backfill_card_color(&mut manifest, repo_dir, &origin).await;
 
         // Probe the remote first (cheap). If it's gone entirely, record that
         // state on the manifest and keep the local archive untouched.
@@ -1167,8 +1227,11 @@ impl Archiver {
             } else {
                 None
             };
-            self.snapshot_ref(repo_dir, git_dir, &rel, &name, &origin, &branch, SnapshotKind::Branch, None, None, changelog.as_deref())
+            let sc = self
+                .snapshot_ref(repo_dir, git_dir, &rel, &name, &origin, &branch, SnapshotKind::Branch, None, None, changelog.as_deref())
                 .await?;
+            summary.branch_snapshot_anchor = Some(sc.anchor());
+            tracing::info!(repo = %rel, commits = ?summary.branch_commits, "new branch snapshot archived");
             summary.branch_changelog = changelog;
             summary.new_branch_snapshot = true;
         }
@@ -1184,7 +1247,10 @@ impl Archiver {
                     if let Err(e) = self.sync_release_assets(repo_dir, &mut sc).await {
                         tracing::warn!(repo = %rel, error = %format!("{e:#}"), "release asset sync failed");
                     }
+                    tracing::info!(repo = %rel, version = %version, "new release archived");
                     summary.new_release = Some(version);
+                    summary.release_changelog = sc.changelog.clone();
+                    summary.release_snapshot_anchor = Some(sc.anchor());
                 }
             }
         }

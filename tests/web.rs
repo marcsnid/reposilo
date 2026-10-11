@@ -41,6 +41,7 @@ fn templates_render_balanced_divs() {
     for (name, tpl) in [
         ("index", include_str!("../templates/index.html")),
         ("app", include_str!("../templates/app.html")),
+        ("repo_grid", include_str!("../templates/repo_grid.html")),
         ("fragment", include_str!("../templates/fragment.html")),
         ("detail", include_str!("../templates/repo_detail.html")),
         ("blob", include_str!("../templates/blob.html")),
@@ -50,6 +51,8 @@ fn templates_render_balanced_divs() {
         ("verify", include_str!("../templates/verify_status.html")),
         ("settings", include_str!("../templates/settings.html")),
         ("settings_form", include_str!("../templates/settings_form.html")),
+        ("notif_rows", include_str!("../templates/notif_rows.html")),
+        ("notifications_list", include_str!("../templates/notifications_list.html")),
         ("stats", include_str!("../templates/stats.html")),
         ("base", include_str!("../templates/base.html")),
     ] {
@@ -214,6 +217,7 @@ async fn web_ui_full_flow() -> Result<()> {
     assert!(detail.contains("hello.txt"), "root file listed");
     assert!(detail.contains("tag-editor"), "tag editor present");
     assert!(detail.contains("keep newest 1 release"), "retention shown");
+    assert!(detail.contains("id=\"snap-"), "snapshots should carry deep-link anchors: {detail}");
 
     // blob view: grab the zip-based URL straight from the detail page
     let detail = client
@@ -1087,6 +1091,55 @@ async fn index_offers_grid_and_list_view_toggles() -> Result<()> {
     Ok(())
 }
 
+/// The repo grid paginates: the first page stops at REPO_PAGE_SIZE and leaves a
+/// scroll sentinel pointing at the next offset; /repos/more returns the rest and
+/// drops the sentinel once the feed is exhausted. Active filters ride along.
+#[tokio::test]
+async fn repo_grid_paginates_with_infinite_scroll() -> Result<()> {
+    let page_size = reposilo::web::views::REPO_PAGE_SIZE;
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    for i in 0..(page_size + 5) {
+        let dir = root.join(format!("owner-repo{i:03}"));
+        fs::create_dir_all(&dir)?;
+        let manifest = serde_json::json!({
+            "forge": "generic",
+            "name": format!("repo{i:03}"),
+            "added": "2025-01-01T00:00:00Z",
+            "default_branch": "main",
+            "tags": ["bulk"],
+        });
+        fs::write(dir.join("repo.json"), serde_json::to_vec(&manifest)?)?;
+    }
+    let (base, _st) = spawn_server(test_cfg(&root)).await;
+    let client = reqwest::Client::new();
+
+    let first = client.get(format!("{base}/")).send().await?.text().await?;
+    assert_eq!(first.matches("data-rel=\"").count(), page_size, "first page card count");
+    assert!(first.contains("hx-trigger=\"revealed\""), "sentinel missing: {first}");
+    assert!(
+        first.contains(&format!("offset={page_size}")),
+        "sentinel should point at the next offset"
+    );
+
+    let second = client
+        .get(format!("{base}/repos/more?offset={page_size}"))
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert_eq!(second.matches("data-rel=\"").count(), 5, "second page card count");
+    assert!(!second.contains("hx-trigger=\"revealed\""), "sentinel should be gone at the end");
+
+    // active filters are carried into the sentinel so the feed stays consistent
+    let filtered = client.get(format!("{base}/?tags=bulk")).send().await?.text().await?;
+    assert!(
+        filtered.contains("/repos/more?tags=bulk"),
+        "filters lost in the sentinel url: {filtered}"
+    );
+    Ok(())
+}
+
 /// Gallery cards expose hover quick actions: force-refresh and open-origin.
 #[tokio::test]
 async fn gallery_card_has_quick_actions() -> Result<()> {
@@ -1153,10 +1206,10 @@ async fn metadata_color_badge_roundtrips() -> Result<()> {
 
     let page = client.get(format!("{base}/")).send().await?.text().await?;
     assert!(page.contains("card tinted"), "card should be tinted: {page}");
-    assert!(page.contains("data-color=\"blue\""), "card should carry the color: {page}");
+    assert!(page.contains("--tint: #3992c4"), "card should carry the blue tint: {page}");
     let detail = client.get(format!("{base}/repos/owner-demo")).send().await?.text().await?;
     assert!(detail.contains("panel tinted"), "About panel should be tinted: {detail}");
-    assert!(detail.contains("data-color=\"blue\""), "About panel should carry the color: {detail}");
+    assert!(detail.contains("--tint: #3992c4"), "About panel should carry the blue tint: {detail}");
     assert!(detail.contains("name=\"color\""), "metadata should offer color swatches: {detail}");
 
     // clearing the color removes the badge
@@ -1461,9 +1514,15 @@ async fn viewing_notifications_clears_the_bell_without_accounts() -> Result<()> 
     let (base, st) = spawn_server(test_cfg(&root)).await;
     let client = reqwest::Client::new();
 
-    st.push_notification("new_release", "owner-demo", "new release 1.0.0".into(), None)
-        .await;
-    st.push_notification("new_snapshot", "owner-demo", "3 new commits".into(), None)
+    st.push_notification(
+        "new_release",
+        "owner-demo",
+        "new release 1.0.0".into(),
+        None,
+        Some("snap-demo-v1.0.0".to_string()),
+    )
+    .await;
+    st.push_notification("new_snapshot", "owner-demo", "3 new commits".into(), None, None)
         .await;
 
     let bell = client.get(format!("{base}/api/bell")).send().await?.text().await?;
@@ -1477,7 +1536,7 @@ async fn viewing_notifications_clears_the_bell_without_accounts() -> Result<()> 
     assert!(bell.is_empty(), "bell must clear after viewing, got {bell:?}");
 
     // a new notification after viewing shows up again (state advanced, not reset)
-    st.push_notification("remote_gone", "owner-demo", "remote gone".into(), None)
+    st.push_notification("remote_gone", "owner-demo", "remote gone".into(), None, None)
         .await;
     let bell = client.get(format!("{base}/api/bell")).send().await?.text().await?;
     assert_eq!(bell, "1");
@@ -1485,6 +1544,42 @@ async fn viewing_notifications_clears_the_bell_without_accounts() -> Result<()> 
     // the read marker is persisted: a fresh state over the same root stays clear
     let st2 = Arc::new(AppState::new(test_cfg(&root), None).await?);
     assert_eq!(st2.notification_count(None).await, 1, "only the post-read item is unread");
+    Ok(())
+}
+
+/// The notification list paginates the same way as the repo grid.
+#[tokio::test]
+async fn notifications_paginate() -> Result<()> {
+    let page = reposilo::web::views::NOTIF_PAGE_SIZE;
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    fs::create_dir_all(&root)?;
+    let (base, st) = spawn_server(test_cfg(&root)).await;
+    let client = reqwest::Client::new();
+
+    let seed = page + 7;
+    for i in 0..seed {
+        st.push_notification("new_snapshot", "owner-repo", format!("item {i}"), None, None)
+            .await;
+    }
+
+    let first = client.get(format!("{base}/notifications")).send().await?.text().await?;
+    assert_eq!(first.matches("class=\"panel notification").count(), page, "first page size");
+    assert!(first.contains("hx-trigger=\"revealed\""), "sentinel missing: {first}");
+    assert!(
+        first.contains(&format!("offset={page}")),
+        "sentinel should point at the next offset"
+    );
+    assert!(first.contains("week="), "sentinel should carry the week cutoff: {first}");
+
+    let more = client
+        .get(format!("{base}/notifications/more?offset={page}"))
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert_eq!(more.matches("class=\"panel notification").count(), 7, "second page size");
+    assert!(!more.contains("hx-trigger=\"revealed\""), "sentinel should be gone at the end");
     Ok(())
 }
 
@@ -1581,5 +1676,318 @@ async fn folder_path_contributes_tags_when_enabled() -> Result<()> {
     assert!(tags.contains(&"tools".to_string()), "{tags:?}");
     assert!(tags.contains(&"cool".to_string()), "{tags:?}");
     assert!(!tags.contains(&"games".to_string()), "old folder tag is dropped: {tags:?}");
+    Ok(())
+}
+
+/// Dynamic fragments that fail should report the problem in place, not return a
+/// 500 or leave a dead swap target. These paths never touch the network.
+#[tokio::test]
+async fn dynamic_fragments_report_errors_in_place() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    fs::create_dir_all(&root)?;
+    let (base, _st) = spawn_server(test_cfg(&root)).await;
+    let client = reqwest::Client::new();
+
+    // the folder form close is a no-op that clears the modal target
+    let close = client.get(format!("{base}/folders/close")).send().await?;
+    assert_eq!(close.status(), 200);
+    assert!(close.text().await?.is_empty(), "close should return an empty fragment");
+
+    // an unknown import scan is reported inline instead of erroring
+    let suggest = client
+        .get(format!("{base}/import/suggest?scan=999&i=0"))
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert!(suggest.contains("Unknown scan"), "expected inline scan error: {suggest}");
+
+    // llama.cpp is off by default, so both LLM entry points say so clearly
+    let llm = client
+        .post(format!("{base}/import/llm"))
+        .form(&[("scan", "1"), ("i", "0")])
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert!(llm.contains("not enabled"), "expected disabled note: {llm}");
+
+    let autotag = client.post(format!("{base}/api/autotag")).send().await?;
+    assert_eq!(autotag.status(), 400, "autotag should be rejected when LLM is off");
+    Ok(())
+}
+
+/// With llama.cpp enabled but no untagged repos, autotag stops before any LLM
+/// call and reports the cheap no-op.
+#[tokio::test]
+async fn autotag_is_a_noop_without_untagged_repos() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    fs::create_dir_all(&root)?;
+    let mut cfg = test_cfg(&root);
+    cfg.llm.enabled = true;
+    let (base, _st) = spawn_server(cfg).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/api/autotag"))
+        .send()
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await?;
+    assert_eq!(body["message"], "no untagged repos");
+    Ok(())
+}
+
+/// Solid-color PNG used by the migration tests.
+fn write_test_png(path: &Path, rgb: [u8; 3]) {
+    let img = image::RgbaImage::from_pixel(16, 16, image::Rgba([rgb[0], rgb[1], rgb[2], 255]));
+    let mut buf = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(img)
+        .write_to(&mut buf, image::ImageFormat::Png)
+        .unwrap();
+    fs::write(path, buf.into_inner()).unwrap();
+}
+
+/// The settings page reports the archive schema and migrates outdated manifests
+/// on demand, backfilling the card color from a stored icon.
+#[tokio::test]
+async fn settings_migrate_backfills_card_colors() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    let repo = root.join("owner-demo");
+    fs::create_dir_all(&repo)?;
+    // a solid red icon plus a manifest written before the schema field existed
+    write_test_png(&repo.join("icon"), [220, 40, 30]);
+    fs::write(
+        repo.join("repo.json"),
+        r#"{"forge":"github","name":"demo","added":"2025-01-01T00:00:00Z","default_branch":"main"}"#,
+    )?;
+    let (base, _st) = spawn_server(test_cfg(&root)).await;
+    let client = reqwest::Client::new();
+
+    let page = client.get(format!("{base}/settings")).send().await?.text().await?;
+    assert!(page.contains("Archive schema"), "schema section missing: {page}");
+    assert!(page.contains("Repositories needing migration"), "{page}");
+
+    let body = client
+        .post(format!("{base}/settings/migrate"))
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert!(body.contains("/repos/job-status/"), "expected a job fragment: {body}");
+    wait_jobs_done(&base).await;
+
+    let m: serde_json::Value = serde_json::from_str(&fs::read_to_string(repo.join("repo.json"))?)?;
+    assert_eq!(m["schema"], reposilo::migrations::SCHEMA_VERSION);
+    assert!(
+        m["auto_color"].as_str().is_some_and(|c| c.starts_with('#')),
+        "expected a derived tint, got {}",
+        m["auto_color"]
+    );
+    Ok(())
+}
+
+/// Deep links jump to the exact snapshot, and the kind tabs filter the feed.
+#[tokio::test]
+async fn notifications_deep_link_and_kind_tabs() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    fs::create_dir_all(&root)?;
+    let (base, st) = spawn_server(test_cfg(&root)).await;
+    let client = reqwest::Client::new();
+
+    st.push_notification(
+        "new_release",
+        "owner-demo",
+        "release one".into(),
+        None,
+        Some("snap-demo-v1.0.0".into()),
+    )
+    .await;
+    st.push_notification(
+        "new_snapshot",
+        "owner-demo",
+        "snap one".into(),
+        None,
+        Some("snap-demo-main-abc".into()),
+    )
+    .await;
+    st.push_notification("remote_gone", "owner-demo", "gone".into(), None, None)
+        .await;
+    st.push_notification("corrupt", "", "bad zip".into(), None, None).await;
+
+    let page = client.get(format!("{base}/notifications")).send().await?.text().await?;
+    assert!(
+        page.contains("href=\"/repos/owner-demo#snap-demo-v1.0.0\""),
+        "release deep link missing: {page}"
+    );
+    assert!(
+        page.contains("href=\"/repos/owner-demo#snap-demo-main-abc\""),
+        "snapshot deep link missing: {page}"
+    );
+    assert!(page.contains("notif-tabs"), "tabs missing: {page}");
+    assert!(page.contains("Releases <span class=\"count\" title=\"notifications in the past week\">1</span>"), "{page}");
+    assert!(page.contains("Snapshots <span class=\"count\" title=\"notifications in the past week\">1</span>"), "{page}");
+    assert!(page.contains("Errors <span class=\"count\" title=\"notifications in the past week\">2</span>"), "{page}");
+
+    // the release tab hides everything else
+    let rel = client
+        .get(format!("{base}/notifications?kind=release"))
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert!(rel.contains("release one"), "{rel}");
+    assert!(!rel.contains("snap one"), "snapshot leaked into the release tab: {rel}");
+    assert!(!rel.contains("bad zip"), "corrupt leaked into the release tab: {rel}");
+
+    // the scroll sentinel keeps the active filter
+    let more = client
+        .get(format!("{base}/notifications/more?kind=release&offset=0"))
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert!(more.contains("release one"), "{more}");
+    assert!(!more.contains("snap one"), "{more}");
+    Ok(())
+}
+
+/// Tab badges count the past week, and the list draws a divider where the week
+/// ends. The cutoff rides in the scroll URL so paging cannot move it.
+#[tokio::test]
+async fn notifications_week_counts_and_divider() -> Result<()> {
+    use time::format_description::well_known::Rfc3339;
+    use time::{Duration, OffsetDateTime};
+
+    let now = OffsetDateTime::now_utc();
+    let recent = (now - Duration::hours(1)).format(&Rfc3339).unwrap();
+    // Older than a week but inside the 14 day retention window.
+    let old = (now - Duration::days(10)).format(&Rfc3339).unwrap();
+
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    fs::create_dir_all(&root)?;
+    let items = serde_json::json!([
+        {"id": 4, "kind": "new_release", "repo": "r", "title": "recent release", "at": recent},
+        {"id": 3, "kind": "new_snapshot", "repo": "r", "title": "recent snapshot", "at": recent},
+        {"id": 2, "kind": "new_release", "repo": "r", "title": "old release", "at": old},
+        {"id": 1, "kind": "corrupt", "repo": "", "title": "old corrupt", "at": old},
+    ]);
+    fs::write(
+        root.join("notifications.json"),
+        serde_json::to_vec(&serde_json::json!({"next_id": 5, "items": items}))?,
+    )?;
+    let (base, _st) = spawn_server(test_cfg(&root)).await;
+    let client = reqwest::Client::new();
+
+    let page = client.get(format!("{base}/notifications")).send().await?.text().await?;
+    let week = "title=\"notifications in the past week\"";
+    assert!(page.contains(&format!("All <span class=\"count\" {week}>2</span>")), "{page}");
+    assert!(page.contains(&format!("Releases <span class=\"count\" {week}>1</span>")), "{page}");
+    assert!(page.contains(&format!("Snapshots <span class=\"count\" {week}>1</span>")), "{page}");
+    assert!(page.contains(&format!("Errors <span class=\"count\" {week}>0</span>")), "{page}");
+
+    let divider = page.find("Older than a week ago").expect("week divider missing");
+    let recent_pos = page.find("recent snapshot").expect("recent row");
+    let old_pos = page.find("old release").expect("old row");
+    assert!(recent_pos < divider && divider < old_pos, "divider not between the week and older: {page}");
+    Ok(())
+}
+
+/// Notifications are alerts, not a log: anything older than keep_days is dropped
+/// on load and again on push. keep_days = 0 keeps everything.
+#[tokio::test]
+async fn notifications_prune_older_than_keep_days() -> Result<()> {
+    use time::format_description::well_known::Rfc3339;
+    use time::{Duration, OffsetDateTime};
+
+    let now = OffsetDateTime::now_utc();
+    let recent = (now - Duration::hours(1)).format(&Rfc3339).unwrap();
+    let old = (now - Duration::days(30)).format(&Rfc3339).unwrap();
+
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    fs::create_dir_all(&root)?;
+    let items = serde_json::json!([
+        {"id": 2, "kind": "new_release", "repo": "r", "title": "keep-marker", "at": recent},
+        {"id": 1, "kind": "new_release", "repo": "r", "title": "prune-marker", "at": old},
+    ]);
+    fs::write(
+        root.join("notifications.json"),
+        serde_json::to_vec(&serde_json::json!({"next_id": 3, "items": items}))?,
+    )?;
+    let (base, st) = spawn_server(test_cfg(&root)).await;
+    let client = reqwest::Client::new();
+
+    // pruned on load
+    let page = client.get(format!("{base}/notifications")).send().await?.text().await?;
+    assert!(page.contains("keep-marker"), "recent notification missing: {page}");
+    assert!(!page.contains("prune-marker"), "stale notification should be pruned on load: {page}");
+
+    // and again on push: an injected stale row is dropped by the next push
+    st.notifications.lock().await.items.push(reposilo::server::Notification {
+        id: 0,
+        kind: "new_release".into(),
+        repo: "r".into(),
+        title: "inject-marker".into(),
+        body: None,
+        at: old.clone(),
+        target: None,
+    });
+    st.push_notification("new_release", "r", "fresh".into(), None, None).await;
+    assert!(
+        st.notifications.lock().await.items.iter().all(|n| n.title != "inject-marker"),
+        "push should prune stale rows"
+    );
+
+    // keep_days = 0 disables pruning
+    let root2 = tmp.path().join("archive-keepall");
+    fs::create_dir_all(&root2)?;
+    fs::write(
+        root2.join("notifications.json"),
+        serde_json::to_vec(&serde_json::json!({"next_id": 2, "items": [
+            {"id": 1, "kind": "new_release", "repo": "r", "title": "kept", "at": old},
+        ]}))?,
+    )?;
+    let mut cfg = test_cfg(&root2);
+    cfg.notifications.keep_days = 0;
+    let (_base2, st2) = spawn_server(cfg).await;
+    assert_eq!(
+        st2.notifications.lock().await.items.len(),
+        1,
+        "keep_days = 0 should keep everything"
+    );
+    Ok(())
+}
+
+/// Color mode off drops the per-repo tint so every card uses the theme color.
+#[tokio::test]
+async fn color_mode_off_removes_card_tints() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    let repo = root.join("owner-demo");
+    fs::create_dir_all(&repo)?;
+    fs::write(
+        repo.join("repo.json"),
+        r##"{"forge":"github","name":"demo","added":"2025-01-01T00:00:00Z","default_branch":"main","auto_color":"#cc3028"}"##,
+    )?;
+    let client = reqwest::Client::new();
+
+    let (on_base, _st) = spawn_server(test_cfg(&root)).await;
+    let on = client.get(format!("{on_base}/")).send().await?.text().await?;
+    assert!(on.contains("--tint: #cc3028"), "color on should tint the card: {on}");
+
+    let mut cfg = test_cfg(&root);
+    cfg.ui.color = false;
+    let (off_base, _st) = spawn_server(cfg).await;
+    let off = client.get(format!("{off_base}/")).send().await?.text().await?;
+    assert!(!off.contains("--tint:"), "color off should not emit a tint: {off}");
+    assert!(!off.contains("card tinted"), "color off should not tint cards: {off}");
+
+    let settings = client.get(format!("{off_base}/settings")).send().await?.text().await?;
+    assert!(settings.contains("name=\"color_mode\""), "settings should expose color mode: {settings}");
     Ok(())
 }

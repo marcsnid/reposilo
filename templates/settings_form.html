@@ -1,11 +1,29 @@
 <div id="settings-area">
   <section class="panel">
+    <h2>Appearance</h2>
+    <div class="settings-row"><label>Color mode</label>
+      <input type="checkbox" name="color_mode" value="1" {% if ctx.color %}checked{% endif %}></div>
+    <p class="note">Tint cards, panels, and notification markers with each repo's own color. Turn off to give every card the same theme color.</p>
+  </section>
+
+  <section class="panel">
+    <h2>Notifications</h2>
+    <div class="settings-row"><label>Webhook URL</label>
+      <input type="text" name="webhook_url" value="{{ ctx.webhook_url }}" placeholder="https://hooks.example.com/... (empty = none)"></div>
+    <p class="note">A JSON POST on new releases and dead remotes.</p>
+    <div class="settings-row"><label>Keep alerts (days)</label>
+      <input type="number" name="notif_keep_days" value="{{ ctx.notif_keep_days }}" min="0"></div>
+    <p class="note">Alerts older than this are dropped. 0 keeps everything. Long-term history lives in Stats and OTLP.</p>
+  </section>
+
+  <section class="panel">
     <h2>Retention</h2>
     <p class="note">How much history to keep per repo. <b>-1 keeps everything</b>, 1 keeps only the newest. Per-repo overrides live on each repo page.</p>
     <div class="settings-row"><label>Default-branch snapshots to keep</label>
       <input type="number" name="keep_branch" value="{{ ctx.keep_branch }}" min="-1"></div>
     <div class="settings-row"><label>Releases to keep</label>
       <input type="number" name="keep_releases" value="{{ ctx.keep_releases }}" min="-1"></div>
+    <p class="note">Per-tag retention rules (<code>[[retention.tag_rules]]</code>) are set in the config file.</p>
   </section>
 
   <section class="panel">
@@ -55,6 +73,10 @@
       <input type="number" name="poll_every" value="{{ ctx.poll_every }}" min="60"></div>
     <div class="settings-row"><label>Dead after (days unreachable)</label>
       <input type="number" name="dead_after" value="{{ ctx.dead_after }}" min="0"></div>
+    <div class="settings-row"><label>Archive on add</label>
+      <input type="checkbox" name="run_on_add" value="1" {% if ctx.run_on_add %}checked{% endif %}></div>
+    <div class="settings-row"><label>Max concurrent refreshes</label>
+      <input type="number" name="max_concurrent" value="{{ ctx.max_concurrent }}" min="1"></div>
     <p class="note">A remote unreachable for this many consecutive days is marked <b>dead</b> and the scheduler stops contacting it. 0 = never declare dead. A manual refresh resurrects it if it ever comes back.</p>
   </section>
 
@@ -78,6 +100,10 @@
       <input type="text" name="llm_model" value="{{ ctx.llm_model }}" placeholder="(server default)"></div>
     <div class="settings-row"><label>Batch size (repos per request)</label>
       <input type="number" name="llm_batch" value="{{ ctx.llm_batch }}" min="1"></div>
+    <div class="settings-row"><label>Max tags per repo</label>
+      <input type="number" name="llm_max_tags" value="{{ ctx.llm_max_tags }}" min="1"></div>
+    <div class="settings-row"><label>Request timeout (seconds)</label>
+      <input type="number" name="llm_timeout" value="{{ ctx.llm_timeout }}" min="1"></div>
     <div class="settings-row"><label>Disable thinking mode</label>
       <input type="checkbox" name="disable_thinking" value="1" {% if ctx.disable_thinking %}checked{% endif %}></div>
   </section>
@@ -93,6 +119,31 @@
       <input type="text" name="otel_service" value="{{ ctx.otel_service }}" placeholder="reposilo"></div>
     <div class="settings-row"><label>Push interval (seconds)</label>
       <input type="number" name="otel_interval" value="{{ ctx.otel_interval }}" min="10"></div>
+    <div class="settings-row"><label>Export logs</label>
+      <input type="checkbox" name="otel_logs" value="1" {% if ctx.otel_logs %}checked{% endif %}></div>
+    <div class="settings-row"><label>Export metrics</label>
+      <input type="checkbox" name="otel_metrics" value="1" {% if ctx.otel_metrics %}checked{% endif %}></div>
+    <div class="settings-row"><label>Export traces</label>
+      <input type="checkbox" name="otel_traces" value="1" {% if ctx.otel_traces %}checked{% endif %}></div>
+  </section>
+
+  <section class="panel">
+    <h2>Rate limiting</h2>
+    <p class="note">Space outbound requests per host so a burst of repos does not trip a forge's rate limiter. Applies to API calls and git operations. Local and file:// remotes are never paced.</p>
+    <div class="settings-row"><label>Enabled</label>
+      <input type="checkbox" name="remote_enabled" value="1" {% if ctx.remote_enabled %}checked{% endif %}></div>
+    <div class="settings-row"><label>Min interval (ms)</label>
+      <input type="number" name="remote_min_interval" value="{{ ctx.remote_min_interval }}" min="0"></div>
+    <div class="settings-row"><label>Jitter (ms)</label>
+      <input type="number" name="remote_jitter" value="{{ ctx.remote_jitter }}" min="0"></div>
+    <div class="settings-row"><label>Respect rate-limit headers</label>
+      <input type="checkbox" name="remote_respect" value="1" {% if ctx.remote_respect %}checked{% endif %}></div>
+    <div class="settings-row"><label>Max wait (seconds)</label>
+      <input type="number" name="remote_max_wait" value="{{ ctx.remote_max_wait }}" min="0"></div>
+    <div class="settings-row"><label>Max cooldown (seconds)</label>
+      <input type="number" name="remote_max_cooldown" value="{{ ctx.remote_max_cooldown }}" min="0"></div>
+    <div class="settings-row"><label>Conditional API cache</label>
+      <input type="checkbox" name="cache_conditional" value="1" {% if ctx.cache_conditional %}checked{% endif %}></div>
   </section>
 
   <section class="panel">
@@ -100,6 +151,15 @@
     <p class="note">Fixed for the running server: edit the config file and restart to change these.</p>
     <div class="settings-row"><label>Listen on</label><input type="text" value="{{ ctx.bind }}" disabled></div>
     <div class="settings-row"><label>Archive root</label><input type="text" value="{{ ctx.archive_root }}" disabled></div>
+    <div class="settings-row"><label>Snapshot format</label><input type="text" value="{{ ctx.archive_format }}" disabled></div>
+    <div class="settings-row"><label>zstd level</label><input type="text" value="{{ ctx.archive_zstd_level }}" disabled></div>
+    <div class="settings-row"><label>Git depth (0 = full mirror)</label><input type="text" value="{{ ctx.git_depth }}" disabled></div>
+    <div class="settings-row"><label>Git timeout (seconds)</label><input type="text" value="{{ ctx.git_timeout }}" disabled></div>
+    <div class="settings-row"><label>Git extra args</label><input type="text" value="{{ ctx.git_extra_args }}" disabled></div>
+    <div class="settings-row"><label>GitHub token</label><input type="text" value="{% if ctx.github_token_set %}set{% else %}not set{% endif %}" disabled></div>
+    <div class="settings-row"><label>GitLab token</label><input type="text" value="{% if ctx.gitlab_token_set %}set{% else %}not set{% endif %}" disabled></div>
+    <div class="settings-row"><label>Forgejo token</label><input type="text" value="{% if ctx.forgejo_token_set %}set{% else %}not set{% endif %}" disabled></div>
+    <p class="note">Tokens and the archive layout are set in the config file, not here. Tokens support <code>env:VAR</code> so the secret never lives in the file.</p>
   </section>
 
   <div class="settings-actions">

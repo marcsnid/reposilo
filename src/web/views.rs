@@ -69,6 +69,36 @@ pub fn color_class(key: &str) -> Option<&'static str> {
     COLOR_CHOICES.iter().find(|(k, _, _)| *k == key).map(|(_, _, c)| *c)
 }
 
+/// Hex value for a palette key, kept in sync with the `.dot-N` colors in
+/// `style.css`.
+const COLOR_HEX: &[(&str, &str)] = &[
+    ("red", "#e5534b"),
+    ("orange", "#e0823d"),
+    ("yellow", "#bb8009"),
+    ("green", "#57ab5a"),
+    ("blue", "#3992c4"),
+    ("purple", "#8250df"),
+    ("pink", "#d6318c"),
+    ("gray", "#768390"),
+];
+
+fn palette_hex(key: &str) -> Option<&'static str> {
+    COLOR_HEX.iter().find(|(k, _)| *k == key).map(|(_, h)| *h)
+}
+
+/// Resolve the tint shown on a card/panel: the user's palette choice wins,
+/// then the icon-derived color, then a stable hash so every repo still has an
+/// identity color (e.g. when icons are disabled).
+pub fn resolve_tint(color: Option<&str>, auto_color: Option<&str>, rel: &str) -> String {
+    if let Some(hex) = color.and_then(palette_hex) {
+        return hex.to_string();
+    }
+    if let Some(hex) = auto_color.filter(|h| !h.is_empty()) {
+        return hex.to_string();
+    }
+    crate::color::hash_color(rel)
+}
+
 /// One swatch in the metadata color picker.
 #[derive(Debug, Clone)]
 pub struct ColorChoiceView {
@@ -154,6 +184,26 @@ pub fn page_url(tags: &[String], q: &str, folder: &str) -> String {
     }
 }
 
+/// How many repo cards render per page; the grid loads more on scroll.
+pub const REPO_PAGE_SIZE: usize = 48;
+
+/// URL the grid's infinite-scroll sentinel requests for the next page of
+/// cards, carrying the current filters so the feed stays consistent.
+fn repo_more_url(tags: &[String], q: &str, folder: &str, offset: usize) -> String {
+    let mut params = Vec::new();
+    if !tags.is_empty() {
+        params.push(format!("tags={}", urlencode(&tags.join(","))));
+    }
+    if !q.is_empty() {
+        params.push(format!("q={}", urlencode(q)));
+    }
+    if !folder.is_empty() {
+        params.push(format!("folder={}", urlencode(folder)));
+    }
+    params.push(format!("offset={offset}"));
+    format!("/repos/more?{}", params.join("&"))
+}
+
 fn without(tags: &[String], tag: &str) -> Vec<String> {
     tags.iter().filter(|t| !t.eq_ignore_ascii_case(tag)).cloned().collect()
 }
@@ -199,6 +249,7 @@ pub struct RepoCard {
     pub size_human: String,
     pub color: String,       // palette key or empty = no tint
     pub color_class: String, // "dot-N" or empty (detail header)
+    pub tint: String,        // resolved #rrggbb tint for the card
     pub has_icon: bool,      // stored owner avatar
 }
 
@@ -253,11 +304,21 @@ pub struct ListCtx {
     pub popular_tags: Vec<TagLink>,
     pub repos: Vec<RepoCard>,
     pub total: usize,
+    /// True when there are more repos after this page (grid loads them on scroll).
+    pub has_more: bool,
+    /// URL the grid's sentinel requests for the next page of cards.
+    pub more_url: String,
 }
 
 #[derive(Template)]
 #[template(path = "index.html")]
 pub struct IndexT {
+    pub ctx: ListCtx,
+}
+
+#[derive(Template)]
+#[template(path = "repo_grid.html")]
+pub struct RepoMoreT {
     pub ctx: ListCtx,
 }
 
@@ -357,7 +418,14 @@ fn folder_dot_color(path: &str) -> u32 {
     path.bytes().map(|b| b as u32).fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b)) % 8
 }
 
-pub async fn build_list_ctx(st: &Arc<AppState>, tags: &[String], q: &str, folder: &str) -> ListCtx {
+pub async fn build_list_ctx(
+    st: &Arc<AppState>,
+    tags: &[String],
+    q: &str,
+    folder: &str,
+    offset: usize,
+) -> ListCtx {
+    let color_on = st.cfg().await.ui.color;
     let index = st.index.read().await;
     let mut entries = index.filter(tags, (!q.is_empty()).then_some(q));
     let folder = folder.trim_matches('/');
@@ -365,8 +433,11 @@ pub async fn build_list_ctx(st: &Arc<AppState>, tags: &[String], q: &str, folder
         entries.retain(|r| r.rel == folder || r.rel.starts_with(&format!("{folder}/")));
     }
 
-    // repo cards
-    let repos: Vec<RepoCard> = entries
+    // repo cards: one page at a time, in the index's stable order
+    let total = entries.len();
+    let offset = offset.min(total);
+    let end = (offset + REPO_PAGE_SIZE).min(total);
+    let repos: Vec<RepoCard> = entries[offset..end]
         .iter()
         .map(|r| {
             let total_bytes: u64 = r
@@ -415,6 +486,15 @@ pub async fn build_list_ctx(st: &Arc<AppState>, tags: &[String], q: &str, folder
                     .and_then(color_class)
                     .unwrap_or_default()
                     .to_string(),
+                tint: if color_on {
+                    resolve_tint(
+                        r.manifest.color.as_deref(),
+                        r.manifest.auto_color.as_deref(),
+                        &r.rel,
+                    )
+                } else {
+                    String::new()
+                },
                 has_icon: r.has_icon,
             }
         })
@@ -479,7 +559,8 @@ pub async fn build_list_ctx(st: &Arc<AppState>, tags: &[String], q: &str, folder
         chips.push(ChipLink { label: format!("“{q}”"), url: page_url(tags, "", folder) });
     }
 
-    let total = repos.len();
+    let has_more = end < total;
+    let more_url = repo_more_url(tags, q, folder, end);
     ListCtx {
         q: q.to_string(),
         active_tags_csv: tags.join(","),
@@ -490,6 +571,8 @@ pub async fn build_list_ctx(st: &Arc<AppState>, tags: &[String], q: &str, folder
         popular_tags,
         repos,
         total,
+        has_more,
+        more_url,
     }
 }
 
@@ -514,6 +597,7 @@ pub struct SnapView {
     pub size_human: String,
     pub download_url: String,
     pub version: String, // empty = not a versioned release
+    pub anchor: String,  // HTML id for deep links from notifications
     pub changelog_html: String, // rendered markdown release notes
     /// Release binaries bundled with this release (empty for branch snapshots).
     pub assets: Vec<AssetView>,
@@ -583,6 +667,7 @@ pub struct DetailCtx {
     pub last_checked_exact: String, // exact timestamp (tooltip)
     pub color: String,           // palette key or empty
     pub color_class: String,     // "dot-N" or empty
+    pub tint: String,            // resolved #rrggbb tint for the About panel
     pub color_choices: Vec<ColorChoiceView>,
     pub has_icon: bool,          // stored owner avatar
     pub remote_state: String,
@@ -654,6 +739,7 @@ pub struct JobT {
 
 /// Build the repo detail context (includes git file reads; best-effort).
 pub async fn build_detail_ctx(st: &Arc<AppState>, repo: &crate::index::RepoEntry) -> DetailCtx {
+    let color_on = st.cfg().await.ui.color;
     let m = &repo.manifest;
     let head = repo
         .branch_snapshots
@@ -719,6 +805,7 @@ pub async fn build_detail_ctx(st: &Arc<AppState>, repo: &crate::index::RepoEntry
                 })
                 .collect()
         },
+        anchor: e.sidecar.anchor(),
         }
     };
 
@@ -817,6 +904,11 @@ pub async fn build_detail_ctx(st: &Arc<AppState>, repo: &crate::index::RepoEntry
         last_checked_exact,
         color: m.color.clone().unwrap_or_default(),
         color_class: m.color.as_deref().and_then(color_class).unwrap_or_default().to_string(),
+        tint: if color_on {
+            resolve_tint(m.color.as_deref(), m.auto_color.as_deref(), &repo.rel)
+        } else {
+            String::new()
+        },
         color_choices: color_choices(),
         has_icon: repo.has_icon,
         remote_state: m.remote_state.clone().unwrap_or_default(),
@@ -976,6 +1068,9 @@ pub struct SettingsCtx {
     // read-only info
     pub bind: String,
     pub archive_root: String,
+    // archive schema
+    pub schema_version: u32,
+    pub outdated_repos: usize,
     // llm
     pub llm_enabled: bool,
     pub llm_url: String,
@@ -997,6 +1092,38 @@ pub struct SettingsCtx {
     pub tags_folders: bool,
     // icons
     pub fetch_icons: bool,
+    // appearance
+    pub color: bool,
+    // notifications
+    pub webhook_url: String,
+    pub notif_keep_days: String,
+    // scheduler extras
+    pub run_on_add: bool,
+    pub max_concurrent: String,
+    // llm extras
+    pub llm_max_tags: String,
+    pub llm_timeout: String,
+    // otel extras
+    pub otel_logs: bool,
+    pub otel_metrics: bool,
+    pub otel_traces: bool,
+    // rate limiting + cache
+    pub remote_enabled: bool,
+    pub remote_min_interval: String,
+    pub remote_jitter: String,
+    pub remote_respect: bool,
+    pub remote_max_wait: String,
+    pub remote_max_cooldown: String,
+    pub cache_conditional: bool,
+    // structural, shown read only here
+    pub archive_format: String,
+    pub archive_zstd_level: String,
+    pub git_depth: String,
+    pub git_timeout: String,
+    pub git_extra_args: String,
+    pub github_token_set: bool,
+    pub gitlab_token_set: bool,
+    pub forgejo_token_set: bool,
     pub saved: bool,
 }
 
@@ -1023,7 +1150,7 @@ pub struct SettingsFormT {
     pub ctx: SettingsCtx,
 }
 
-pub fn settings_ctx_from(cfg: &crate::config::Config, saved: bool) -> SettingsCtx {
+pub fn settings_ctx_from(cfg: &crate::config::Config, saved: bool, outdated_repos: usize) -> SettingsCtx {
     // canonicalize the configured release filters so the checkboxes reflect
     // whatever the user typed ("win64" shows up as Windows · x64)
     let canonical: Vec<String> = cfg
@@ -1059,6 +1186,8 @@ pub fn settings_ctx_from(cfg: &crate::config::Config, saved: bool) -> SettingsCt
         verify_interval_days: cfg.verify.interval_days.to_string(),
         bind: cfg.server.bind.clone(),
         archive_root: cfg.archive.root.clone(),
+        schema_version: crate::migrations::SCHEMA_VERSION,
+        outdated_repos,
         llm_enabled: cfg.llm.enabled,
         llm_url: cfg.llm.url.clone(),
         llm_model: cfg.llm.model.clone().unwrap_or_default(),
@@ -1075,6 +1204,35 @@ pub fn settings_ctx_from(cfg: &crate::config::Config, saved: bool) -> SettingsCt
         take_suggested_tags: cfg.tags.take_suggested,
         tags_folders: cfg.tags.folders,
         fetch_icons: cfg.fetch_icons(),
+        color: cfg.ui.color,
+        webhook_url: cfg.notifications.webhook_url.clone().unwrap_or_default(),
+        notif_keep_days: cfg.notifications.keep_days.to_string(),
+        run_on_add: cfg.scheduler.run_on_add,
+        max_concurrent: cfg.scheduler.max_concurrent.to_string(),
+        llm_max_tags: cfg.llm.max_tags.to_string(),
+        llm_timeout: cfg.llm.request_timeout_secs.to_string(),
+        otel_logs: cfg.otel.logs,
+        otel_metrics: cfg.otel.metrics,
+        otel_traces: cfg.otel.traces,
+        remote_enabled: cfg.remote.enabled,
+        remote_min_interval: cfg.remote.min_interval_ms.to_string(),
+        remote_jitter: cfg.remote.jitter_ms.to_string(),
+        remote_respect: cfg.remote.respect_rate_limits,
+        remote_max_wait: cfg.remote.max_wait_secs.to_string(),
+        remote_max_cooldown: cfg.remote.max_cooldown_secs.to_string(),
+        cache_conditional: cfg.cache.conditional,
+        archive_format: cfg.archive.format.clone(),
+        archive_zstd_level: cfg.archive.zstd_level.to_string(),
+        git_depth: cfg.git.depth.to_string(),
+        git_timeout: cfg.git.timeout_secs.to_string(),
+        git_extra_args: if cfg.git.extra_args.is_empty() {
+            "(none)".to_string()
+        } else {
+            cfg.git.extra_args.join(" ")
+        },
+        github_token_set: cfg.github.resolved_token().is_some(),
+        gitlab_token_set: cfg.gitlab.resolved_token().is_some(),
+        forgejo_token_set: cfg.forgejo.resolved_token().is_some(),
         saved,
     }
 }
@@ -1166,23 +1324,242 @@ pub struct LoginT {
 #[derive(Debug, Clone)]
 pub struct NotifView {
     pub kind: String,
+    pub kind_label: String,
     pub repo: String,
+    pub repo_name: String,
+    /// Link target: the exact snapshot anchor, or the repo when there is none.
+    pub url: String,
     pub title: String,
     pub at: String,       // "3d ago"
     pub at_exact: String, // exact date/time (tooltip)
     pub changelog_html: String,
+    pub tint: String,    // resolved #rrggbb, matches the repo's card
+    pub has_icon: bool,  // stored owner avatar, shown on the left
+    /// Draw the "older than a week ago" divider before this row.
+    pub show_week_divider: bool,
+}
+
+/// Short, human label for a notification kind, shown as a text badge.
+pub fn notif_kind_label(kind: &str) -> String {
+    match kind {
+        "new_release" => "release".to_string(),
+        "new_snapshot" => "snapshot".to_string(),
+        "remote_gone" => "remote gone".to_string(),
+        "repo_added" => "added".to_string(),
+        "import" => "import".to_string(),
+        "autotag" => "autotag".to_string(),
+        "migrate" => "migration".to_string(),
+        "corrupt" => "corrupt".to_string(),
+        other => other.replace('_', " "),
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NotifTab {
+    pub key: String,
+    pub label: String,
+    pub url: String,
+    pub active: bool,
+    pub count: usize,
 }
 
 #[derive(Debug, Clone)]
 pub struct NotificationsCtx {
     pub items: Vec<NotifView>,
-    pub can_mark_read: bool,
+    /// True when older notifications remain (the list loads them on scroll).
+    pub has_more: bool,
+    /// URL the list's sentinel requests for the next page.
+    pub more_url: String,
+    /// Active kind filter ("" for all).
+    pub filter: String,
+    /// Kind filter tabs with their counts.
+    pub tabs: Vec<NotifTab>,
 }
 
 #[derive(askama::Template)]
 #[template(path = "notifications_list.html")]
 pub struct NotificationsT {
     pub ctx: NotificationsCtx,
+}
+
+#[derive(askama::Template)]
+#[template(path = "notif_rows.html")]
+pub struct NotifRowsT {
+    pub ctx: NotificationsCtx,
+}
+
+/// How many notifications render per page; the list loads older ones on scroll.
+pub const NOTIF_PAGE_SIZE: usize = 50;
+
+/// Normalize a `?kind=` value to one of the known filter keys.
+pub fn normalize_notif_filter(kind: &str) -> &'static str {
+    match kind {
+        "release" => "release",
+        "snapshot" => "snapshot",
+        "error" => "error",
+        _ => "",
+    }
+}
+
+/// True when a notification kind belongs to the given filter.
+fn notif_matches(filter: &str, kind: &str) -> bool {
+    match filter {
+        "release" => kind == "new_release",
+        "snapshot" => kind == "new_snapshot",
+        "error" => matches!(kind, "remote_gone" | "corrupt"),
+        _ => true,
+    }
+}
+
+/// The boundary between "this week" and older. Passing the cutoff through the
+/// scroll URL keeps the divider and the tab counts stable while paging.
+fn notif_week_cutoff(week: Option<&str>) -> (OffsetDateTime, String) {
+    if let Some(c) = week.and_then(|s| OffsetDateTime::parse(s, &Rfc3339).ok()) {
+        let text = c.format(&Rfc3339).unwrap_or_default();
+        return (c, text);
+    }
+    let cutoff = OffsetDateTime::now_utc() - time::Duration::days(7);
+    let text = cutoff.format(&Rfc3339).unwrap_or_default();
+    (cutoff, text)
+}
+
+/// True when a notification falls inside the current week window.
+fn notif_recent(at: &str, cutoff: OffsetDateTime) -> bool {
+    OffsetDateTime::parse(at, &Rfc3339).map(|t| t >= cutoff).unwrap_or(false)
+}
+
+fn notif_tabs(
+    all: &[crate::server::Notification],
+    active: &str,
+    cutoff: OffsetDateTime,
+) -> Vec<NotifTab> {
+    let count = |filter: &str| {
+        all.iter()
+            .filter(|n| notif_matches(filter, &n.kind) && notif_recent(&n.at, cutoff))
+            .count()
+    };
+    [("", "All"), ("release", "Releases"), ("snapshot", "Snapshots"), ("error", "Errors")]
+        .iter()
+        .map(|(key, label)| {
+            let url = if key.is_empty() {
+                "/notifications".to_string()
+            } else {
+                format!("/notifications?kind={key}")
+            };
+            NotifTab {
+                key: (*key).to_string(),
+                label: (*label).to_string(),
+                url,
+                active: *key == active,
+                count: count(key),
+            }
+        })
+        .collect()
+}
+
+/// Build one page of the notification list. Retention is time-based (see
+/// `notifications.keep_days`), so the store only holds recent alerts.
+/// `filter` is a normalized kind filter.
+pub async fn build_notifications_ctx(
+    st: &Arc<AppState>,
+    offset: usize,
+    filter: &str,
+    week: Option<&str>,
+) -> NotificationsCtx {
+    let color_on = st.cfg().await.ui.color;
+    let all: Vec<crate::server::Notification> = st
+        .notifications
+        .lock()
+        .await
+        .items
+        .iter()
+        .cloned()
+        .collect();
+    let (cutoff, week_text) = notif_week_cutoff(week);
+    let tabs = notif_tabs(&all, filter, cutoff);
+
+    // Resolve each notification's repo tint, icon and display name once, so the
+    // marker and avatar on the left match the repo's card.
+    let lookup: std::collections::HashMap<String, (String, bool, String)> = {
+        let idx = st.index.read().await;
+        idx.repos
+            .iter()
+            .map(|r| {
+                let tint = resolve_tint(
+                    r.manifest.color.as_deref(),
+                    r.manifest.auto_color.as_deref(),
+                    &r.rel,
+                );
+                (r.rel.clone(), (tint, r.has_icon, r.manifest.name.clone()))
+            })
+            .collect()
+    };
+
+    let filtered: Vec<&crate::server::Notification> = all
+        .iter()
+        .filter(|n| notif_matches(filter, &n.kind))
+        .collect();
+    let total = filtered.len();
+    // The divider goes right before the first item older than the week window,
+    // and only when at least one newer item precedes it.
+    let boundary = filtered.iter().position(|n| !notif_recent(&n.at, cutoff));
+    let show_divider = boundary.is_some_and(|b| b > 0);
+    let offset = offset.min(total);
+    let end = (offset + NOTIF_PAGE_SIZE).min(total);
+    let views: Vec<NotifView> = filtered[offset..end]
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(i, n)| {
+            let (at, at_exact) = humanize_ago(&n.at).unwrap_or_else(|| {
+                let t: String = n.at.chars().take(16).collect();
+                (t.clone(), t)
+            });
+            let (tint, has_icon, repo_name) = match lookup.get(&n.repo) {
+                Some((tint, has_icon, name)) => (tint.clone(), *has_icon, name.clone()),
+                // The repo may be gone: keep a stable color from its path.
+                None if !n.repo.is_empty() => (resolve_tint(None, None, &n.repo), false, n.repo.clone()),
+                None => (String::new(), false, String::new()),
+            };
+            let tint = if color_on { tint } else { String::new() };
+            let url = if n.repo.is_empty() {
+                String::new()
+            } else {
+                match n.target.as_deref().filter(|t| !t.is_empty()) {
+                    Some(target) => format!("/repos/{}#{target}", n.repo),
+                    None => format!("/repos/{}", n.repo),
+                }
+            };
+            NotifView {
+                kind: n.kind.clone(),
+                kind_label: notif_kind_label(&n.kind),
+                repo: n.repo.clone(),
+                repo_name,
+                url,
+                title: n.title.clone(),
+                at,
+                at_exact,
+                changelog_html: n
+                    .body
+                    .as_deref()
+                    .map(crate::files::markdown_to_html)
+                    .unwrap_or_default(),
+                tint,
+                has_icon,
+                show_week_divider: show_divider && boundary == Some(offset + i),
+            }
+        })
+        .collect();
+
+    let has_more = end < total;
+    let mut params = Vec::new();
+    if !filter.is_empty() {
+        params.push(format!("kind={filter}"));
+    }
+    params.push(format!("offset={end}"));
+    params.push(format!("week={}", urlencode(&week_text)));
+    let more_url = format!("/notifications/more?{}", params.join("&"));
+    NotificationsCtx { items: views, has_more, more_url, filter: filter.to_string(), tabs }
 }
 
 // ---------- stats view ----------
@@ -1390,19 +1767,36 @@ pub fn stats_ctx_from(
 
 #[cfg(test)]
 mod tests {
-    use super::{humanize_ago_from, settings_ctx_from, stats_ctx_from};
+    use super::{humanize_ago_from, resolve_tint, settings_ctx_from, stats_ctx_from};
     use time::macros::datetime;
+
+    #[test]
+    fn user_color_wins_over_auto_color() {
+        assert_eq!(resolve_tint(Some("blue"), Some("#ff00ff"), "a/b"), "#3992c4");
+    }
+
+    #[test]
+    fn auto_color_is_used_when_no_user_color() {
+        assert_eq!(resolve_tint(None, Some("#ff00ff"), "a/b"), "#ff00ff");
+    }
+
+    #[test]
+    fn empty_auto_color_falls_back_to_a_stable_hash() {
+        let a = resolve_tint(None, Some(""), "a/b");
+        assert_eq!(a, resolve_tint(None, None, "a/b"));
+        assert!(a.starts_with('#') && a.len() == 7, "expected a hex tint, got {a}");
+    }
 
     #[test]
     fn settings_ctx_includes_verify_toggle() {
         let mut cfg = crate::config::Config::default();
-        let ctx = settings_ctx_from(&cfg, false);
+        let ctx = settings_ctx_from(&cfg, false, 0);
         assert!(!ctx.verify_enabled, "scheduled checks default to off");
         assert_eq!(ctx.verify_interval_days, "7");
 
         cfg.verify.enabled = true;
         cfg.verify.interval_days = 30;
-        let ctx = settings_ctx_from(&cfg, false);
+        let ctx = settings_ctx_from(&cfg, false, 0);
         assert!(ctx.verify_enabled);
         assert_eq!(ctx.verify_interval_days, "30");
     }

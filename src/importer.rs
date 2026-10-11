@@ -543,7 +543,9 @@ pub async fn import_one(
             suggested_tags: Vec::new(),
             stars: None,
             color: None,
+            auto_color: None,
             unidentified: unknown,
+            schema: crate::migrations::SCHEMA_VERSION,
         }
     };
     let _ = move_failed; // (moved earlier via is_err checks)
