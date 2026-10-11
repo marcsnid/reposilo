@@ -53,11 +53,16 @@ platforms = ["darwin-arm64", "linux-x64"]
 # to any tags you pass at add time.
 [tags]
 take_suggested = false
+# Split the folder a repo is placed in into tags. Putting a repo in games/tools
+# adds the tags games and tools alongside any tags you enter.
+folders = false
 
 [github]
 # token = "env:GITHUB_TOKEN"
-# Download the repo owner's avatar as the repo icon (default true).
-# fetch_avatars = true
+
+# Download the repo owner's avatar (GitHub, GitLab, Forgejo) as the repo icon.
+[icons]
+enabled = true
 
 [gitlab]
 # token = "env:GITLAB_TOKEN"
