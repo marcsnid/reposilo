@@ -1204,11 +1204,29 @@ pub struct LoginT {
 #[derive(Debug, Clone)]
 pub struct NotifView {
     pub kind: String,
+    pub kind_label: String,
     pub repo: String,
+    pub repo_name: String,
     pub title: String,
     pub at: String,       // "3d ago"
     pub at_exact: String, // exact date/time (tooltip)
     pub changelog_html: String,
+    pub tint: String,    // resolved #rrggbb, matches the repo's card
+    pub has_icon: bool,  // stored owner avatar, shown on the left
+}
+
+/// Short, human label for a notification kind, shown as a text badge.
+pub fn notif_kind_label(kind: &str) -> String {
+    match kind {
+        "new_release" => "release".to_string(),
+        "new_snapshot" => "snapshot".to_string(),
+        "remote_gone" => "remote gone".to_string(),
+        "repo_added" => "added".to_string(),
+        "import" => "import".to_string(),
+        "autotag" => "autotag".to_string(),
+        "corrupt" => "corrupt".to_string(),
+        other => other.replace('_', " "),
+    }
 }
 
 #[derive(Debug, Clone)]

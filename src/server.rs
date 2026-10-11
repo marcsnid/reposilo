@@ -1152,7 +1152,13 @@ pub async fn spawn_refresh_job(
             Ok(summary) => {
                 let mut fields: Vec<&str> = vec!["refresh_ok"];
                 if let Some(v) = &summary.new_release {
-                    st.push_notification("new_release", &rel, format!("new release {v}"), None).await;
+                    st.push_notification(
+                        "new_release",
+                        &rel,
+                        format!("new release {v}"),
+                        summary.release_changelog.clone(),
+                    )
+                    .await;
                     fields.push("new_releases");
                 }
                 if summary.new_branch_snapshot {

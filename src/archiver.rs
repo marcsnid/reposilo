@@ -47,6 +47,8 @@ pub struct RefreshSummary {
     pub branch_commits: Option<u64>,
     /// Markdown changelog for the new branch snapshot (commit readout).
     pub branch_changelog: Option<String>,
+    /// Markdown changelog for the new release (release notes or CHANGELOG.md).
+    pub release_changelog: Option<String>,
 }
 
 /// Make a string safe to use as a single filesystem path component.
@@ -1222,6 +1224,7 @@ impl Archiver {
                         tracing::warn!(repo = %rel, error = %format!("{e:#}"), "release asset sync failed");
                     }
                     summary.new_release = Some(version);
+                    summary.release_changelog = sc.changelog.clone();
                 }
             }
         }

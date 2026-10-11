@@ -1628,6 +1628,24 @@ async fn notifications_page(State(st): State<Arc<AppState>>, headers: HeaderMap)
     }
     let items: Vec<crate::server::Notification> =
         st.notifications.lock().await.items.iter().take(100).cloned().collect();
+
+    // Resolve each notification's repo tint, icon and display name once, so the
+    // ribbon and avatar on the left match the repo's card.
+    let lookup: HashMap<String, (String, bool, String)> = {
+        let idx = st.index.read().await;
+        idx.repos
+            .iter()
+            .map(|r| {
+                let tint = views::resolve_tint(
+                    r.manifest.color.as_deref(),
+                    r.manifest.auto_color.as_deref(),
+                    &r.rel,
+                );
+                (r.rel.clone(), (tint, r.has_icon, r.manifest.name.clone()))
+            })
+            .collect()
+    };
+
     let views: Vec<views::NotifView> = items
         .iter()
         .map(|n| {
@@ -1635,9 +1653,19 @@ async fn notifications_page(State(st): State<Arc<AppState>>, headers: HeaderMap)
                 let t: String = n.at.chars().take(16).collect();
                 (t.clone(), t)
             });
+            let (tint, has_icon, repo_name) = match lookup.get(&n.repo) {
+                Some((tint, has_icon, name)) => (tint.clone(), *has_icon, name.clone()),
+                // The repo may be gone: keep a stable color from its path.
+                None if !n.repo.is_empty() => {
+                    (views::resolve_tint(None, None, &n.repo), false, n.repo.clone())
+                }
+                None => (String::new(), false, String::new()),
+            };
             views::NotifView {
                 kind: n.kind.clone(),
+                kind_label: views::notif_kind_label(&n.kind),
                 repo: n.repo.clone(),
+                repo_name,
                 title: n.title.clone(),
                 at,
                 at_exact,
@@ -1646,6 +1674,8 @@ async fn notifications_page(State(st): State<Arc<AppState>>, headers: HeaderMap)
                     .as_deref()
                     .map(crate::files::markdown_to_html)
                     .unwrap_or_default(),
+                tint,
+                has_icon,
             }
         })
         .collect();

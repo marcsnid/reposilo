@@ -565,9 +565,27 @@ table.files tr:last-child td { border-bottom: none; }
 
 /* ---------- notifications ---------- */
 .notification { margin-bottom: 0.6rem; }
+/* the left ribbon carries the repo's card color; the row tint stays subtle */
+.notification.tinted { border-left: 3px solid var(--tint); }
+.notification .notif-row { display: flex; gap: 0.8rem; align-items: flex-start; }
+.notification .notif-ident {
+  flex: 0 0 12rem; min-width: 0; display: flex; align-items: center; gap: 0.4rem;
+}
+.notification .notif-repo {
+  font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.notification .notif-time { font-size: 0.78rem; margin-left: auto; flex: 0 0 auto; }
+.notification .notif-dot {
+  width: 0.6rem; height: 0.6rem; border-radius: 50%; flex: 0 0 auto; display: inline-block;
+}
+.notification .notif-body { flex: 1 1 auto; min-width: 0; }
 .notification .notif-head { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
 .notification .readme { font-size: 0.85rem; margin-top: 0.4rem; }
-.notification.new-release { border-left: 3px solid var(--accent); }
+.notification .notif-kind { flex: 0 0 auto; }
+@media (max-width: 640px) {
+  .notification .notif-row { flex-direction: column; gap: 0.35rem; }
+  .notification .notif-ident { flex: none; width: 100%; }
+}
 .login-wrap { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
 .login-card { display: flex; flex-direction: column; gap: 0.7rem; background: var(--bg-panel);
   border: 1px solid var(--border); border-radius: 12px; padding: 2rem; width: 20rem; }
