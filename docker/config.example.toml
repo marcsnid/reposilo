@@ -1,38 +1,77 @@
-# Copy to docker/config.toml before `docker compose up`.
-# The app does not terminate TLS; run a reverse proxy in front and publish
-# this port on the host loopback only.
+# reposilo configuration. Every key is listed here with its default (or an
+# example) and a short comment.
+#
+# Docker: copy this to docker/config.toml, then `docker compose up`.
+# Native: `reposilo init --root /path/to/archive` writes a config to
+# ~/.config/reposilo/config.toml (override the path with --config).
 
 [server]
 # The container sets REPOSILO_BIND=0.0.0.0:8765, which overrides this.
 # Change it with `-e REPOSILO_BIND=...` or `serve --bind ...`.
-bind = "0.0.0.0:8765"
+bind = "127.0.0.1:8765"
 
 [archive]
 root = "/archive"
+# "zip" (default, universally unzip-able) or "tar.zst" (better compression).
 format = "zip"
+# zstd level for tar.zst snapshots (1-22).
+zstd_level = 10
+
+[ui]
+# Tint cards, panels and notification markers with each repo's own color.
+# Set false to give every card the same theme color.
+color = true
 
 [retention]
+# Newest N default-branch snapshots and releases to keep. -1 keeps everything.
 keep_branch_snapshots = 1
 keep_releases = 1
+# Per-tag overrides: the first rule whose tag matches a repo overrides the
+# global defaults above. Manifest-level overrides still win.
+# [[retention.tag_rules]]
+# tag = "cli"
+# keep_branch_snapshots = -1
+# keep_releases = -1
 
 [scheduler]
+# Whether the background scheduler runs while serving.
 enabled = true
+# Default-branch snapshot cadence.
 default_interval_days = 7
+# How often to poll remotes for new tags and releases.
 release_poll_hours = 24
+# Archive immediately when a repo is added.
+run_on_add = true
+# How often (seconds) the scheduler loop looks for due repos.
+poll_every_secs = 900
+# Max concurrent background refreshes.
+max_concurrent = 2
+# Consecutive days a remote may be unreachable before it is marked dead and
+# the scheduler stops checking it. 0 = never declare dead.
 dead_after_days = 21
 
 [git]
+# Fetch depth. 1 = shallow (default). 0 = full mirror clone.
 depth = 1
+# Extra args passed to `git clone`.
+extra_args = []
+# Hard timeout (seconds) for each git subprocess.
 timeout_secs = 600
 
 [remote]
-# Space outbound requests per host and honor the server's backoff signals.
-# Applies to API calls and git operations (clone, fetch, ls-remote).
+# Space outbound requests per host so a burst of repos does not trip a forge's
+# rate limiter. Applies to API calls and git operations (clone, fetch,
+# ls-remote). Local and file:// remotes are never paced.
 enabled = true
+# Minimum gap between requests to the same host, in milliseconds.
 min_interval_ms = 500
+# Extra random 0..N ms, to avoid lockstep bursts.
 jitter_ms = 250
+# Honor Retry-After and rate-limit-reset headers.
 respect_rate_limits = true
+# Never block longer than this for a paused host; skip and retry later.
 max_wait_secs = 30
+# Cap on a single rate-limit cooldown.
 max_cooldown_secs = 900
 
 [cache]
@@ -40,29 +79,37 @@ max_cooldown_secs = 900
 conditional = true
 
 [verify]
-# Scheduled integrity checks of every stored zip. Off by default.
+# Scheduled integrity checks of every stored zip. Off by default because a
+# check reads the whole archive.
 enabled = false
 interval_days = 7
 
-# Download release binaries for the platforms you want. Empty = none.
 [releases]
-platforms = ["darwin-arm64", "linux-x64"]
-# max_asset_mb = 0
+# Also download the binary assets attached to releases, for these platforms.
+# Empty = none. Each entry is a full slug ("linux-x64"), an OS ("linux"), an
+# arch ("arm64") or "all"; "win64" == "windows-x64".
+platforms = []
+# Skip any single asset larger than this many MiB (0 = no limit).
+max_asset_mb = 0
 
-# Automatically adopt forge-suggested tags (e.g. GitHub topics) in addition
-# to any tags you pass at add time.
 [tags]
+# Adopt forge-suggested tags (GitHub topics, etc.) automatically.
 take_suggested = false
-# Split the folder a repo is placed in into tags. Putting a repo in games/tools
-# adds the tags games and tools alongside any tags you enter.
+# Split the folder a repo is placed in into tags (games/tools -> games, tools).
 folders = false
 
-[github]
-# token = "env:GITHUB_TOKEN"
+[notifications]
+# Optional webhook, POSTed on new releases and dead remotes.
+# webhook_url = "https://hooks.example.com/your-hook"
+# Drop alerts older than this many days. 0 keeps everything. Notifications are
+# alerts; long-term history lives in Stats and OTLP.
+keep_days = 14
 
-# Download the repo owner's avatar (GitHub, GitLab, Forgejo) as the repo icon.
-[icons]
-enabled = true
+[github]
+# Token for API enrichment and suggestions; supports "env:VAR" indirection.
+# token = "env:GITHUB_TOKEN"
+# Legacy icon key. Prefer [icons] enabled.
+fetch_avatars = true
 
 [gitlab]
 # token = "env:GITLAB_TOKEN"
@@ -70,14 +117,36 @@ enabled = true
 [forgejo]
 # token = "env:FORGEJO_TOKEN"
 
+[icons]
+# Download the repo owner's avatar (GitHub, GitLab, Forgejo) as the repo icon.
+enabled = true
+
 [llm]
+# Any OpenAI-compatible endpoint (llama.cpp, Ollama, and similar). Used for
+# auto-tagging and import review.
 enabled = false
-# url = "http://192.168.0.1:11434/v1"
+url = "http://127.0.0.1:8080/v1"
+# Optional model name passed through to the server.
+# model = "Qwen3.6-27B-GGUF"
+# Repos per chat-completion request.
+batch_size = 10
+# Cap on tags merged per repo.
+max_tags = 5
+# Disable Qwen-style thinking mode (avoids thousands of hidden tokens on CPU).
+disable_thinking = false
+# Per-request timeout (seconds).
+request_timeout_secs = 600
 
 [otel]
+# Optional OTLP/HTTP export. The built-in Stats page always works without it.
 enabled = false
-# endpoint = "http://localhost:4318"
-# service_name = "reposilo"
-# logs = true
-# metrics = true
-# traces = true
+endpoint = "http://localhost:4318"
+service_name = "reposilo"
+# Metrics export interval (seconds).
+interval_secs = 60
+# Bridge tracing logs to OTLP.
+logs = true
+# Export archive metrics.
+metrics = true
+# Export spans (HTTP requests, add/refresh/verify jobs).
+traces = true

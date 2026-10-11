@@ -1355,6 +1355,27 @@ async fn settings_save(
     cfg.tags.take_suggested = f.0.get("take_suggested_tags").map(|v| v == "1").unwrap_or(false);
     cfg.tags.folders = f.0.get("tags_folders").map(|v| v == "1").unwrap_or(false);
     cfg.icons.enabled = Some(f.0.get("fetch_icons").map(|v| v == "1").unwrap_or(false));
+    cfg.ui.color = f.0.get("color_mode").map(|v| v == "1").unwrap_or(false);
+    cfg.notifications.webhook_url = f
+        .0
+        .get("webhook_url")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    cfg.notifications.keep_days = num(&f, "notif_keep_days", cfg.notifications.keep_days);
+    cfg.scheduler.run_on_add = f.0.get("run_on_add").map(|v| v == "1").unwrap_or(false);
+    cfg.scheduler.max_concurrent = num(&f, "max_concurrent", cfg.scheduler.max_concurrent).max(1);
+    cfg.llm.max_tags = num(&f, "llm_max_tags", cfg.llm.max_tags).max(1);
+    cfg.llm.request_timeout_secs = num(&f, "llm_timeout", cfg.llm.request_timeout_secs).max(1);
+    cfg.otel.logs = f.0.get("otel_logs").map(|v| v == "1").unwrap_or(false);
+    cfg.otel.metrics = f.0.get("otel_metrics").map(|v| v == "1").unwrap_or(false);
+    cfg.otel.traces = f.0.get("otel_traces").map(|v| v == "1").unwrap_or(false);
+    cfg.remote.enabled = f.0.get("remote_enabled").map(|v| v == "1").unwrap_or(false);
+    cfg.remote.min_interval_ms = num(&f, "remote_min_interval", cfg.remote.min_interval_ms);
+    cfg.remote.jitter_ms = num(&f, "remote_jitter", cfg.remote.jitter_ms);
+    cfg.remote.respect_rate_limits = f.0.get("remote_respect").map(|v| v == "1").unwrap_or(false);
+    cfg.remote.max_wait_secs = num(&f, "remote_max_wait", cfg.remote.max_wait_secs);
+    cfg.remote.max_cooldown_secs = num(&f, "remote_max_cooldown", cfg.remote.max_cooldown_secs);
+    cfg.cache.conditional = f.0.get("cache_conditional").map(|v| v == "1").unwrap_or(false);
 
     // apply live
     *st.cfg.write().await = cfg.clone();

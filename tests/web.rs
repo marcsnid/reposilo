@@ -1962,3 +1962,32 @@ async fn notifications_prune_older_than_keep_days() -> Result<()> {
     );
     Ok(())
 }
+
+/// Color mode off drops the per-repo tint so every card uses the theme color.
+#[tokio::test]
+async fn color_mode_off_removes_card_tints() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    let repo = root.join("owner-demo");
+    fs::create_dir_all(&repo)?;
+    fs::write(
+        repo.join("repo.json"),
+        r##"{"forge":"github","name":"demo","added":"2025-01-01T00:00:00Z","default_branch":"main","auto_color":"#cc3028"}"##,
+    )?;
+    let client = reqwest::Client::new();
+
+    let (on_base, _st) = spawn_server(test_cfg(&root)).await;
+    let on = client.get(format!("{on_base}/")).send().await?.text().await?;
+    assert!(on.contains("--tint: #cc3028"), "color on should tint the card: {on}");
+
+    let mut cfg = test_cfg(&root);
+    cfg.ui.color = false;
+    let (off_base, _st) = spawn_server(cfg).await;
+    let off = client.get(format!("{off_base}/")).send().await?.text().await?;
+    assert!(!off.contains("--tint:"), "color off should not emit a tint: {off}");
+    assert!(!off.contains("card tinted"), "color off should not tint cards: {off}");
+
+    let settings = client.get(format!("{off_base}/settings")).send().await?.text().await?;
+    assert!(settings.contains("name=\"color_mode\""), "settings should expose color mode: {settings}");
+    Ok(())
+}

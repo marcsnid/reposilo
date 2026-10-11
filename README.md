@@ -135,105 +135,10 @@ reposilo autotag                             # apply (merges, never removes)
 
 ### Configuration
 
-The config file lives at `~/.config/reposilo/config.toml` (or `--config`):
-
-```toml
-[archive]
-root = "/path/to/archive"
-format = "zip"             # or "tar.zst" (zstd level 10 by default)
-
-[retention]
-keep_branch_snapshots = 1   # -1 keeps everything
-keep_releases = 1          # -1 keeps everything
-# [[retention.tag_rules]]  # per-tag overrides:
-# tag = "cli"
-# keep_releases = -1
-
-[scheduler]
-default_interval_days = 7
-release_poll_hours = 24
-dead_after_days = 21       # stop checking after N days unreachable
-# The scheduler checks a repo when `min(default_interval_days * 24,
-# release_poll_hours)` has elapsed since its last check. For a plain weekly
-# cadence (weekly main + weekly release check) set release_poll_hours = 168.
-
-[git]
-# depth = 1                # 1 = shallow snapshot, 0 = full mirror
-# timeout_secs = 600       # hard kill for hung git subprocesses (network hangs)
-
-[remote]
-# Space outbound requests per host so a burst of repos does not trip a forge's
-# rate limiter, and honor the server's own backoff signals. Applies to API
-# calls and to git operations (clone, fetch, ls-remote) for every forge
-# (GitHub, GitLab, Forgejo/Codeberg, custom). Local and file:// remotes are
-# never paced. Set enabled = false to send immediately (the old behavior).
-enabled = true
-min_interval_ms = 500      # minimum gap between requests to the same host
-jitter_ms = 250            # extra random 0..N ms, to avoid lockstep bursts
-respect_rate_limits = true # honor Retry-After / X-RateLimit-* / RateLimit-*
-max_wait_secs = 30         # never block longer than this; skip and retry later
-max_cooldown_secs = 900    # cap on a single rate-limit pause
-
-[cache]
-# Revalidate API responses with ETag / If-None-Match. A 304 means the data is
-# unchanged and does not count against GitHub's primary rate limit. Cached
-# bodies live in http-cache.json under the archive root.
-conditional = true
-
-[verify]
-# Run a full hash check while serving (also a toggle in Settings). Off by
-# default because it reads every stored zip. When problems are found, one
-# notification is pushed and the run time is recorded so it does not repeat
-# until the interval elapses.
-enabled = false
-interval_days = 7
-
-[github]
-# token = "env:GITHUB_TOKEN"  # better rate limits for enrichment
-
-[gitlab]
-# token = "env:GITLAB_TOKEN"   # private GitLab release assets
-
-[forgejo]
-# token = "env:FORGEJO_TOKEN"  # private Forgejo/Codeberg release assets
-
-[tags]
-# Adopt forge-suggested tags (GitHub topics, etc.) automatically.
-take_suggested = false
-# Split the folder a repo is placed in into tags. Putting a repo in games/tools
-# adds the tags games and tools alongside any tags you enter.
-folders = false
-
-[icons]
-# Download the repo owner's avatar (GitHub, GitLab, Forgejo) as the repo icon.
-enabled = true
-
-[releases]
-# Also download the binary assets attached to releases, for these platforms.
-# Filters match the asset filename loosely: an OS ("linux"), an arch
-# ("arm64"), a full slug ("darwin-arm64") or "all". "win64" == "windows-x64".
-# Empty = no binaries are downloaded (the safe default). Downloads are
-# size-capped and verified against the forge's sha256 when one is published.
-platforms = ["darwin-arm64", "linux-x64"]
-# max_asset_mb = 0            # 0 = no per-file size limit
-[llm]
-enabled = false
-url = "http://192.168.0.1:11434/v1"  # any OpenAI-compatible endpoint
-# model = "Qwen3.6-27B-GGUF"
-
-[notifications]
-# webhook_url = "https://hooks.example.com/your-hook"  # new releases + dead links
-# keep_days = 14                                       # drop alerts older than this (0 = keep all)
-
-[otel]
-# enabled = true
-# endpoint = "http://localhost:4318"  # OTLP/HTTP collector base URL; signal paths are appended
-# service_name = "reposilo"
-# interval_secs = 60                   # metrics export interval
-# logs = true                          # bridge tracing logs to OTLP
-# metrics = true                       # export archive metrics
-# traces = true                        # export spans (HTTP requests, add/refresh/verify jobs)
-```
+The config file lives at `~/.config/reposilo/config.toml` (or `--config`).
+Every key, with its default and a short comment, is listed in
+[`docker/config.example.toml`](docker/config.example.toml). The Settings page
+in the web UI covers most of the common options at runtime.
 
 ### Stats and monitoring
 

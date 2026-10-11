@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     pub server: ServerCfg,
     pub archive: ArchiveCfg,
+    pub ui: UiCfg,
     pub scheduler: SchedulerCfg,
     pub retention: RetentionCfg,
     pub notifications: NotificationsCfg,
@@ -75,6 +76,20 @@ pub struct ArchiveCfg {
 impl Default for ArchiveCfg {
     fn default() -> Self {
         Self { root: ".".into(), format: "zip".into(), zstd_level: 10 }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiCfg {
+    /// Tint cards, panels and notification markers with each repo's color.
+    /// Turn off to give every card the same theme color.
+    pub color: bool,
+}
+
+impl Default for UiCfg {
+    fn default() -> Self {
+        Self { color: true }
     }
 }
 
@@ -544,6 +559,21 @@ mod tests {
         assert_eq!(explicit.notifications.keep_days, 30);
         let off: Config = toml::from_str("[notifications]\nkeep_days = 0\n").unwrap();
         assert_eq!(off.notifications.keep_days, 0);
+    }
+
+    #[test]
+    fn example_config_parses() {
+        let s = include_str!("../docker/config.example.toml");
+        let cfg: Config = toml::from_str(s).expect("docker/config.example.toml must parse");
+        assert_eq!(cfg.notifications.keep_days, 14);
+        assert!(cfg.ui.color);
+    }
+
+    #[test]
+    fn ui_color_mode_defaults_on_and_parses() {
+        assert!(Config::default().ui.color, "color mode is on by default");
+        let off: Config = toml::from_str("[ui]\ncolor = false\n").unwrap();
+        assert!(!off.ui.color);
     }
 
     #[test]

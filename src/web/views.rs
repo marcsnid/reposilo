@@ -425,6 +425,7 @@ pub async fn build_list_ctx(
     folder: &str,
     offset: usize,
 ) -> ListCtx {
+    let color_on = st.cfg().await.ui.color;
     let index = st.index.read().await;
     let mut entries = index.filter(tags, (!q.is_empty()).then_some(q));
     let folder = folder.trim_matches('/');
@@ -485,11 +486,15 @@ pub async fn build_list_ctx(
                     .and_then(color_class)
                     .unwrap_or_default()
                     .to_string(),
-                tint: resolve_tint(
-                    r.manifest.color.as_deref(),
-                    r.manifest.auto_color.as_deref(),
-                    &r.rel,
-                ),
+                tint: if color_on {
+                    resolve_tint(
+                        r.manifest.color.as_deref(),
+                        r.manifest.auto_color.as_deref(),
+                        &r.rel,
+                    )
+                } else {
+                    String::new()
+                },
                 has_icon: r.has_icon,
             }
         })
@@ -734,6 +739,7 @@ pub struct JobT {
 
 /// Build the repo detail context (includes git file reads; best-effort).
 pub async fn build_detail_ctx(st: &Arc<AppState>, repo: &crate::index::RepoEntry) -> DetailCtx {
+    let color_on = st.cfg().await.ui.color;
     let m = &repo.manifest;
     let head = repo
         .branch_snapshots
@@ -898,7 +904,11 @@ pub async fn build_detail_ctx(st: &Arc<AppState>, repo: &crate::index::RepoEntry
         last_checked_exact,
         color: m.color.clone().unwrap_or_default(),
         color_class: m.color.as_deref().and_then(color_class).unwrap_or_default().to_string(),
-        tint: resolve_tint(m.color.as_deref(), m.auto_color.as_deref(), &repo.rel),
+        tint: if color_on {
+            resolve_tint(m.color.as_deref(), m.auto_color.as_deref(), &repo.rel)
+        } else {
+            String::new()
+        },
         color_choices: color_choices(),
         has_icon: repo.has_icon,
         remote_state: m.remote_state.clone().unwrap_or_default(),
@@ -1082,6 +1092,38 @@ pub struct SettingsCtx {
     pub tags_folders: bool,
     // icons
     pub fetch_icons: bool,
+    // appearance
+    pub color: bool,
+    // notifications
+    pub webhook_url: String,
+    pub notif_keep_days: String,
+    // scheduler extras
+    pub run_on_add: bool,
+    pub max_concurrent: String,
+    // llm extras
+    pub llm_max_tags: String,
+    pub llm_timeout: String,
+    // otel extras
+    pub otel_logs: bool,
+    pub otel_metrics: bool,
+    pub otel_traces: bool,
+    // rate limiting + cache
+    pub remote_enabled: bool,
+    pub remote_min_interval: String,
+    pub remote_jitter: String,
+    pub remote_respect: bool,
+    pub remote_max_wait: String,
+    pub remote_max_cooldown: String,
+    pub cache_conditional: bool,
+    // structural, shown read only here
+    pub archive_format: String,
+    pub archive_zstd_level: String,
+    pub git_depth: String,
+    pub git_timeout: String,
+    pub git_extra_args: String,
+    pub github_token_set: bool,
+    pub gitlab_token_set: bool,
+    pub forgejo_token_set: bool,
     pub saved: bool,
 }
 
@@ -1162,6 +1204,35 @@ pub fn settings_ctx_from(cfg: &crate::config::Config, saved: bool, outdated_repo
         take_suggested_tags: cfg.tags.take_suggested,
         tags_folders: cfg.tags.folders,
         fetch_icons: cfg.fetch_icons(),
+        color: cfg.ui.color,
+        webhook_url: cfg.notifications.webhook_url.clone().unwrap_or_default(),
+        notif_keep_days: cfg.notifications.keep_days.to_string(),
+        run_on_add: cfg.scheduler.run_on_add,
+        max_concurrent: cfg.scheduler.max_concurrent.to_string(),
+        llm_max_tags: cfg.llm.max_tags.to_string(),
+        llm_timeout: cfg.llm.request_timeout_secs.to_string(),
+        otel_logs: cfg.otel.logs,
+        otel_metrics: cfg.otel.metrics,
+        otel_traces: cfg.otel.traces,
+        remote_enabled: cfg.remote.enabled,
+        remote_min_interval: cfg.remote.min_interval_ms.to_string(),
+        remote_jitter: cfg.remote.jitter_ms.to_string(),
+        remote_respect: cfg.remote.respect_rate_limits,
+        remote_max_wait: cfg.remote.max_wait_secs.to_string(),
+        remote_max_cooldown: cfg.remote.max_cooldown_secs.to_string(),
+        cache_conditional: cfg.cache.conditional,
+        archive_format: cfg.archive.format.clone(),
+        archive_zstd_level: cfg.archive.zstd_level.to_string(),
+        git_depth: cfg.git.depth.to_string(),
+        git_timeout: cfg.git.timeout_secs.to_string(),
+        git_extra_args: if cfg.git.extra_args.is_empty() {
+            "(none)".to_string()
+        } else {
+            cfg.git.extra_args.join(" ")
+        },
+        github_token_set: cfg.github.resolved_token().is_some(),
+        gitlab_token_set: cfg.gitlab.resolved_token().is_some(),
+        forgejo_token_set: cfg.forgejo.resolved_token().is_some(),
         saved,
     }
 }
@@ -1395,6 +1466,7 @@ pub async fn build_notifications_ctx(
     filter: &str,
     week: Option<&str>,
 ) -> NotificationsCtx {
+    let color_on = st.cfg().await.ui.color;
     let all: Vec<crate::server::Notification> = st
         .notifications
         .lock()
@@ -1449,6 +1521,7 @@ pub async fn build_notifications_ctx(
                 None if !n.repo.is_empty() => (resolve_tint(None, None, &n.repo), false, n.repo.clone()),
                 None => (String::new(), false, String::new()),
             };
+            let tint = if color_on { tint } else { String::new() };
             let url = if n.repo.is_empty() {
                 String::new()
             } else {
