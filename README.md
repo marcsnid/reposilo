@@ -6,7 +6,7 @@ Each repo is kept as shallow snapshots and release tags (plain zips on
 disk), so the archive is still browsable and searchable if the remote ever
 goes away.
 
-[![repository gallery](screenshots/reposilo-main.png)](screenshots/reposilo-main.png)
+[![repository gallery](screenshots/reposilo-main.webp)](screenshots/reposilo-main.webp)
 
 ## What it does
 
@@ -26,7 +26,7 @@ goes away.
 - Paces outbound requests per host and revalidates API responses with ETag, so
   refreshing many repos does not trip forge rate limits.
 
-[![repo detail page](screenshots/reposilo-repo.png)](screenshots/reposilo-repo.png)
+[![repo detail page](screenshots/reposilo-repo.webp)](screenshots/reposilo-repo.webp)
 
 ## On disk
 
@@ -102,8 +102,8 @@ reposilo serve --bind 0.0.0.0:8765           # or REPOSILO_BIND=0.0.0.0:8765
 #   - edit metadata (name, description, notes, origin, folder, tags) per repo
 #   - import zips from Settings; assign origins to _unknown repos
 #   - notifications with readable release changelogs, deep links to the exact
-    release/snapshot, kind filter tabs with past-week counts, and a divider
-    between this week and older items
+#     release/snapshot, kind filter tabs with past-week counts, and a divider
+#     between this week and older items
 #   - verify the whole archive from Settings (hashes every zip)
 #   - dark/light theme, settings (retention, scheduler, llama.cpp)
 #   - a REST API; downloads stream straight from disk
@@ -130,6 +130,8 @@ unavailable remotes, untagged), a storage breakdown with the ten largest repos, 
 7-day refresh chart, integrity check counts, API cache stats, and live
 rate-limit status. Counters persist to `<archive>/metrics.json` for 90 days, so
 they survive restarts.
+
+<a href="screenshots/reposilo-stats.webp"><img src="screenshots/reposilo-stats.webp" alt="Stats page" width="440"></a>
 
 For longer-lived history, set `[otel] enabled = true` to also export over
 OTLP/HTTP to a collector. The three signals are independent:
