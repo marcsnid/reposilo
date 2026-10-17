@@ -1111,6 +1111,10 @@ impl Archiver {
             summary.remote_unavailable = true;
             return Ok(summary);
         }
+        if respect_branch_interval && manifest.schedule.interval_days == 0 {
+            tracing::debug!(repo = %rel, "automatic updates disabled; skipping scheduled refresh");
+            return Ok(summary);
+        }
         let name = manifest.name.clone();
         let mirror = shallow.is_dir(); // full-mirror mode keeps a persistent git store
 
@@ -1480,6 +1484,9 @@ fn latest_branch_snapshot(repo_dir: &Path, branch: &str) -> Option<SnapshotSidec
 /// or unparseable timestamp is treated as due so a broken sidecar cannot pin a
 /// repo to an old snapshot forever.
 fn branch_snapshot_is_due(archived_at: &str, interval_days: u32) -> bool {
+    if interval_days == 0 {
+        return false;
+    }
     let Ok(t) = OffsetDateTime::parse(archived_at, &Rfc3339) else {
         return true;
     };
@@ -1522,7 +1529,7 @@ mod tests {
         assert!(branch_snapshot_is_due(&ago(8), 7));
         assert!(!branch_snapshot_is_due(&ago(6), 7));
         assert!(branch_snapshot_is_due("not a timestamp", 7));
-        assert!(branch_snapshot_is_due(&ago(0), 0));
+        assert!(!branch_snapshot_is_due(&ago(30), 0), "0 days = never update");
     }
 
     #[test]

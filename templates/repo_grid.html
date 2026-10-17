@@ -6,6 +6,7 @@
           <a class="card-title" href="/repos/{{ r.rel }}">{{ r.name }}</a>
           <span class="badge forge-{{ r.forge }}">{{ r.forge }}</span>
           {% if r.remote_dead %}<span class="badge">remote dead</span>{% else if r.remote_gone %}<span class="badge">remote gone</span>{% endif %}
+          {% if r.archive_only %}<span class="badge">archive only</span>{% endif %}
           <div class="card-actions">
             <button type="button" class="card-action" title="Force refresh"
                     hx-post="/repos/{{ r.rel }}/refresh" hx-target="#toast" hx-swap="innerHTML"

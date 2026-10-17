@@ -1720,6 +1720,10 @@ async fn compute_due(st: &Arc<AppState>) -> Vec<String> {
             if r.manifest.remote_state.as_deref() == Some("dead") {
                 return None;
             }
+            // 0 = archive-only: no automatic branch or release checks.
+            if r.manifest.schedule.interval_days == 0 {
+                return None;
+            }
             // Wake up at whichever cadence is sooner: release polling or the
             // branch-snapshot interval. `refresh_repo_scheduled` then enforces
             // the branch interval, so daily release polls do not create daily
@@ -2124,6 +2128,11 @@ mod tests {
     async fn scheduler_due_selection() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
+        let never_update = {
+            let mut m = manifest(Some("file:///r/archive-only"), Some(rfc_days_ago(30)), None);
+            m.schedule.interval_days = 0;
+            m
+        };
         let cases = [
             ("fresh", manifest(Some("file:///r/fresh"), Some(rfc_days_ago(0)), None)),
             ("stale", manifest(Some("file:///r/stale"), Some(rfc_days_ago(30)), None)),
@@ -2131,6 +2140,7 @@ mod tests {
             ("imported", manifest(None, Some(rfc_days_ago(30)), None)),
             ("empty-origin", manifest(Some(""), Some(rfc_days_ago(30)), None)),
             ("never", manifest(Some("file:///r/never"), None, None)),
+            ("archive-only", never_update),
         ];
         for (name, m) in &cases {
             let dir = root.join(name);

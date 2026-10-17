@@ -9,6 +9,8 @@ use std::path::Path;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ScheduleCfg {
+    /// Days between automatic branch/release checks. `0` disables automatic
+    /// updates entirely; manual refreshes still work.
     pub interval_days: u32,
 }
 
