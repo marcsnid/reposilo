@@ -134,9 +134,10 @@ async fn add_snapshots_branch_and_release() -> Result<()> {
         let mut z = zip::ZipArchive::new(fs::File::open(&zips[0])?)?;
         let meta_name = z
             .file_names()
+            .filter_map(|n| n.ok())
             .find(|n| n.ends_with(".reposilo.json"))
-            .expect(".reposilo.json embedded in zip")
-            .to_string();
+            .map(|n| n.into_owned())
+            .expect(".reposilo.json embedded in zip");
         assert!(meta_name.starts_with("fixture/"), "embedded under project prefix: {meta_name}");
         let mut content = String::new();
         z.by_name(&meta_name)?.read_to_string(&mut content)?;
