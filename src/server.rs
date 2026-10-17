@@ -158,6 +158,11 @@ pub struct AppState {
     pub http_cache: Arc<std::sync::Mutex<crate::httpcache::HttpCache>>,
     /// Bounds concurrent refresh jobs, shared by the scheduler and bulk actions.
     pub refresh_sem: Arc<Semaphore>,
+    /// Consecutive failed refreshes and the earliest retry time, keyed by repo
+    /// rel. In-memory: a restart retries immediately. Prevents a repo with a
+    /// persistent failure (bad clone, permission error, extended rate limit)
+    /// from being retried on every scheduler pass.
+    refresh_retry: Mutex<HashMap<String, (u32, std::time::Instant)>>,
     /// True while a full-archive integrity check is running, so the scheduled
     /// loop does not start one on top of a manual check.
     pub verify_active: std::sync::atomic::AtomicBool,
@@ -197,6 +202,7 @@ impl AppState {
             governor: Arc::new(RemoteGovernor::new()),
             http_cache: Arc::new(std::sync::Mutex::new(crate::httpcache::HttpCache::load(&root))),
             refresh_sem,
+            refresh_retry: Mutex::new(HashMap::new()),
             verify_active: std::sync::atomic::AtomicBool::new(false),
             users: std::sync::Mutex::new(crate::auth::Users::load(&root)),
             sessions: crate::auth::SessionStore::new(),
@@ -208,6 +214,38 @@ impl AppState {
     /// Clone of the current (live) config.
     pub async fn cfg(&self) -> Config {
         self.cfg.read().await.clone()
+    }
+
+    /// A repo is eligible for a scheduled retry only after its backoff expires.
+    async fn refresh_retry_ready(&self, rel: &str) -> bool {
+        let retries = self.refresh_retry.lock().await;
+        retries
+            .get(rel)
+            .is_none_or(|(_, at)| std::time::Instant::now() >= *at)
+    }
+
+    /// Record a failed refresh and exponentially back off (15m, 30m, 1h, ...).
+    /// The scheduler polls every 15 minutes by default, so the first retry
+    /// still happens on the next pass; persistent failures stop hammering the
+    /// remote on every pass.
+    async fn note_refresh_failure(&self, rel: &str) {
+        const BASE_SECS: u64 = 15 * 60;
+        const MAX_SECS: u64 = 6 * 60 * 60;
+        let mut retries = self.refresh_retry.lock().await;
+        let failures = retries
+            .get(rel)
+            .map(|(n, _)| n.saturating_add(1))
+            .unwrap_or(1);
+        let factor = 1u64 << failures.saturating_sub(1).min(8);
+        let secs = BASE_SECS.saturating_mul(factor).min(MAX_SECS);
+        retries.insert(
+            rel.to_string(),
+            (failures, std::time::Instant::now() + std::time::Duration::from_secs(secs)),
+        );
+    }
+
+    async fn clear_refresh_failure(&self, rel: &str) {
+        self.refresh_retry.lock().await.remove(rel);
     }
 
     /// Store a scan, keeping only the most recent 8.
@@ -1165,6 +1203,7 @@ pub async fn spawn_refresh_job(
     permit: Option<OwnedSemaphorePermit>,
 ) -> u64 {
     let id = st.create_job(kind, Some(rel.clone())).await;
+    let scheduled = kind == "scheduled-refresh";
     let _ = permit; // moved into the task below to bound concurrency
     tokio::spawn(async move {
         // Caller already locked the repo; this releases it on completion or panic.
@@ -1173,18 +1212,22 @@ pub async fn spawn_refresh_job(
         let dir = { st.index.read().await.find(&rel).cloned().map(|r| r.dir) };
         let result = match dir {
             Some(dir) => {
-                Archiver::with_governor_and_cache(
+                let archiver = Archiver::with_governor_and_cache(
                     st.cfg().await,
                     st.governor.clone(),
                     st.http_cache.clone(),
-                )
-                .refresh_repo(&dir)
-                .await
+                );
+                if scheduled {
+                    archiver.refresh_repo_scheduled(&dir).await
+                } else {
+                    archiver.refresh_repo(&dir).await
+                }
             }
             None => Err(anyhow::anyhow!("repo disappeared from index")),
         };
         match result {
             Ok(summary) => {
+                st.clear_refresh_failure(&rel).await;
                 let mut fields: Vec<&str> = vec!["refresh_ok"];
                 if let Some(v) = &summary.new_release {
                     st.push_notification(
@@ -1226,6 +1269,7 @@ pub async fn spawn_refresh_job(
             }
             Err(e) => {
                 tracing::error!(repo = %rel, "refresh failed: {e:#}");
+                st.note_refresh_failure(&rel).await;
                 st.finish_job(id, Some(format!("{e:#}"))).await;
                 st.record(&["refresh_fail"]).await;
             }
@@ -1667,12 +1711,19 @@ async fn compute_due(st: &Arc<AppState>) -> Vec<String> {
         .iter()
         .filter_map(|r| {
             // unidentified imports have no origin; nothing to schedule
-            r.manifest.origin.as_ref()?;
+            let origin = r.manifest.origin.as_ref()?;
+            if origin.is_empty() {
+                return None;
+            }
             // dead remotes: we already know; stop reaching out (manual refresh
             // can still resurrect them)
             if r.manifest.remote_state.as_deref() == Some("dead") {
                 return None;
             }
+            // Wake up at whichever cadence is sooner: release polling or the
+            // branch-snapshot interval. `refresh_repo_scheduled` then enforces
+            // the branch interval, so daily release polls do not create daily
+            // branch snapshots.
             let branch_h = r.manifest.schedule.interval_days as f64 * 24.0;
             let due_h = branch_h.min(poll_h);
             match r.manifest.last_checked.as_deref().and_then(hours_since_rfc3339) {
@@ -1726,6 +1777,10 @@ async fn scheduler_loop(st: Arc<AppState>) {
         }
         tracing::info!(count = due.len(), "scheduler: refreshing due repos");
         for rel in due {
+            if !st.refresh_retry_ready(&rel).await {
+                tracing::debug!(repo = %rel, "scheduled refresh is backing off after a failure");
+                continue;
+            }
             if !st.try_lock_repo(&rel).await {
                 continue; // already running
             }
@@ -2074,6 +2129,7 @@ mod tests {
             ("stale", manifest(Some("file:///r/stale"), Some(rfc_days_ago(30)), None)),
             ("dead", manifest(Some("file:///r/dead"), Some(rfc_days_ago(30)), Some("dead"))),
             ("imported", manifest(None, Some(rfc_days_ago(30)), None)),
+            ("empty-origin", manifest(Some(""), Some(rfc_days_ago(30)), None)),
             ("never", manifest(Some("file:///r/never"), None, None)),
         ];
         for (name, m) in &cases {
@@ -2088,6 +2144,29 @@ mod tests {
         let mut due = compute_due(&st).await;
         due.sort();
         assert_eq!(due, vec!["never".to_string(), "stale".to_string()]);
+    }
+
+    /// A failed refresh must not be retried on every scheduler pass forever.
+    #[tokio::test]
+    async fn failed_refreshes_back_off_until_a_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.archive.root = tmp.path().to_string_lossy().into_owned();
+        let st = AppState::new(cfg, None).await.unwrap();
+
+        assert!(st.refresh_retry_ready("owner-repo").await);
+        st.note_refresh_failure("owner-repo").await;
+        assert!(
+            !st.refresh_retry_ready("owner-repo").await,
+            "first failure should defer the next attempt"
+        );
+        st.note_refresh_failure("owner-repo").await;
+        assert!(!st.refresh_retry_ready("owner-repo").await);
+        st.clear_refresh_failure("owner-repo").await;
+        assert!(
+            st.refresh_retry_ready("owner-repo").await,
+            "a successful refresh clears the backoff"
+        );
     }
 
     /// Locks must be keyed by basename so a full relative path (refresh) and a

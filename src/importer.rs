@@ -534,7 +534,9 @@ pub async fn import_one(
             description: row.detected_description.clone(),
             language: row.detected_language.clone(),
             default_branch: "unknown".into(),
-            schedule: Default::default(),
+            schedule: crate::types::ScheduleCfg {
+                interval_days: cfg.scheduler.default_interval_days,
+            },
             retention: Default::default(),
             last_checked: None,
             notes: None,
