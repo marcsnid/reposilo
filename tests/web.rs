@@ -300,6 +300,44 @@ async fn web_ui_full_flow() -> Result<()> {
 
     Ok(())
 }
+
+/// The add form offers an Auto update checkbox (on by default); unchecking it
+/// archives the repo immediately but disables all future automatic checks.
+#[tokio::test]
+async fn add_repo_can_start_archive_only() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let remote = make_remote(tmp.path(), "hoard");
+    let (base, _st) = spawn_server(test_cfg(&tmp.path().join("archive"))).await;
+    let client = reqwest::Client::new();
+
+    let page = client.get(format!("{base}/")).send().await?.text().await?;
+    assert!(page.contains("Auto update"), "add form should offer Auto update: {page}");
+    assert!(
+        page.contains("id=\"add-auto-update\"") && page.contains("value=\"1\" checked"),
+        "Auto update should default to checked: {page}"
+    );
+
+    // Browser-style submit with the box unchecked: the presence marker is sent,
+    // the value itself is not.
+    client
+        .post(format!("{base}/repos/add"))
+        .form(&[
+            ("url", file_url(&remote).as_str()),
+            ("auto_update_present", "1"),
+        ])
+        .send()
+        .await?;
+    wait_jobs_done(&base).await;
+
+    let manifest: serde_json::Value = serde_json::from_str(&fs::read_to_string(
+        tmp.path().join("archive/remotes-hoard/repo.json"),
+    )?)?;
+    assert_eq!(manifest["schedule"]["interval_days"], 0);
+    let page = client.get(format!("{base}/")).send().await?.text().await?;
+    assert!(page.contains("archive only"), "card should show archive-only: {page}");
+    Ok(())
+}
+
 #[tokio::test]
 async fn folder_management_flow() -> Result<()> {
     let tmp = tempfile::tempdir()?;

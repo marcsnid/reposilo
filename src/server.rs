@@ -979,6 +979,7 @@ pub async fn spawn_add_job(
     tags: &[String],
     notes: Option<String>,
     folder: Option<String>,
+    auto_update: bool,
 ) -> u64 {
     let job_url = url.to_string();
     let id = st.create_job("add", Some(job_url.clone())).await;
@@ -1020,7 +1021,7 @@ pub async fn spawn_add_job(
             st2.governor.clone(),
             st2.http_cache.clone(),
         )
-        .add_repo_in_folder(&url, &tags, notes, folder.as_deref())
+        .add_repo_in_folder(&url, &tags, notes, folder.as_deref(), auto_update)
         .await;
         match result {
             Ok(dir) => {
@@ -1155,8 +1156,9 @@ async fn create_repo(
         .unwrap_or_default();
     let notes = body["notes"].as_str().map(String::from);
     let folder = body["folder"].as_str().map(String::from);
+    let auto_update = body["auto_update"].as_bool().unwrap_or(true);
 
-    let id = spawn_add_job(&st, url, &tags, notes, folder).await;
+    let id = spawn_add_job(&st, url, &tags, notes, folder, auto_update).await;
     Ok((StatusCode::ACCEPTED, Json(json!({ "job_id": id, "url": url }))).into_response())
 }
 

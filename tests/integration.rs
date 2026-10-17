@@ -562,7 +562,7 @@ async fn add_into_a_folder_scopes_manifest_and_sidecars() -> Result<()> {
 
     let archiver = Archiver::new(test_cfg(&archive));
     let repo_dir = archiver
-        .add_repo_in_folder(&file_url(&remote), &[], None, Some("tools/rust"))
+        .add_repo_in_folder(&file_url(&remote), &[], None, Some("tools/rust"), true)
         .await?;
     assert_eq!(repo_dir, archive.join("tools/rust/remotes-scoped"));
 

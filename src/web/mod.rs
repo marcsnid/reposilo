@@ -287,7 +287,17 @@ async fn add_repo_form(
     let tags: Vec<String> = csv_param(&form, "tags");
     let notes = form.get("notes").map(|s| s.to_string()).filter(|s| !s.is_empty());
     let folder = form.get("folder").map(|s| s.to_string()).filter(|s| !s.trim().is_empty());
-    let id = crate::server::spawn_add_job(&st, &url, &tags, notes, folder).await;
+    // The form always submits `auto_update_present`; when it is absent the
+    // caller is an older client/API and keeps the historical default (on).
+    let auto_update = if form.contains_key("auto_update_present") {
+        matches!(
+            form.get("auto_update").map(String::as_str),
+            Some("1" | "on" | "true")
+        )
+    } else {
+        true
+    };
+    let id = crate::server::spawn_add_job(&st, &url, &tags, notes, folder, auto_update).await;
     let ctx = JobCtx {
         id,
         message: format!("Archiving {url}…"),

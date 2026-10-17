@@ -411,7 +411,7 @@ impl Archiver {
     /// [`add_repo_in_folder`].
     #[tracing::instrument(skip(self, notes))]
     pub async fn add_repo(&self, url: &str, tags: &[String], notes: Option<String>) -> Result<PathBuf> {
-        self.add_repo_in_folder(url, tags, notes, None).await
+        self.add_repo_in_folder(url, tags, notes, None, true).await
     }
 
     /// Add a repo, optionally under a category folder. The archive path
@@ -430,6 +430,7 @@ impl Archiver {
         tags: &[String],
         notes: Option<String>,
         folder: Option<&str>,
+        auto_update: bool,
     ) -> Result<PathBuf> {
         let info = forge::detect(url)?;
         let root = Path::new(&self.cfg.archive.root);
@@ -471,7 +472,7 @@ impl Archiver {
         // leave the on-disk snapshots alone rather than destroying user data.
         let pre_existing = repo_dir.exists();
         match self
-            .add_repo_inner(url, &info, &repo_dir, &rel, tags, notes)
+            .add_repo_inner(url, &info, &repo_dir, &rel, tags, notes, auto_update)
             .await
         {
             Ok(()) => Ok(repo_dir),
@@ -493,6 +494,7 @@ impl Archiver {
         rel: &str,
         tags: &[String],
         notes: Option<String>,
+        auto_update: bool,
     ) -> Result<()> {
         fs::create_dir_all(repo_dir)
             .with_context(|| format!("cannot create {}", repo_dir.display()))?;
@@ -588,7 +590,11 @@ impl Archiver {
             suggested_tags,
             default_branch: branch.clone(),
             schedule: crate::types::ScheduleCfg {
-                interval_days: self.cfg.scheduler.default_interval_days,
+                interval_days: if auto_update {
+                    self.cfg.scheduler.default_interval_days
+                } else {
+                    0
+                },
             },
             retention: Default::default(),
             last_checked: Some(now_rfc3339()),
