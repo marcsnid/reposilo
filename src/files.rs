@@ -754,14 +754,23 @@ pub fn list_zip(zip_path: &Path) -> Option<Vec<ZipEntryView>> {
 fn zip_entry_names(zip_path: &Path) -> Option<Vec<String>> {
     let f = File::open(zip_path).ok()?;
     let z = ZipArchive::new(f).ok()?;
-    Some(z.file_names().map(String::from).collect())
+    Some(
+        z.file_names()
+            .filter_map(|n| n.ok())
+            .map(|n| n.into_owned())
+            .collect(),
+    )
 }
 
 fn entry_sizes(zip_path: &Path) -> std::collections::HashMap<String, u64> {
     let mut out = std::collections::HashMap::new();
     let Ok(f) = File::open(zip_path) else { return out };
     let Ok(mut z) = ZipArchive::new(f) else { return out };
-    let names: Vec<String> = z.file_names().map(String::from).collect();
+    let names: Vec<String> = z
+        .file_names()
+        .filter_map(|n| n.ok())
+        .map(|n| n.into_owned())
+        .collect();
     for n in names {
         if let Ok(e) = z.by_name(&n) {
             out.insert(n, e.size());

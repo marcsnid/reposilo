@@ -184,6 +184,11 @@
             <label for="add-folder">Folder</label>
             <input id="add-folder" name="folder" list="add-folder-list" placeholder="e.g. tools/rust (optional)">
             <datalist id="add-folder-list" hx-get="/folders/options" hx-trigger="load" hx-target="this" hx-swap="innerHTML"></datalist>
+            <input type="hidden" name="auto_update_present" value="1">
+            <label class="add-check" for="add-auto-update">
+              <input id="add-auto-update" name="auto_update" type="checkbox" value="1" checked>
+              Auto update
+            </label>
             <button type="submit"><span class="spinner htmx-indicator"></span>Archive</button>
           </form>
         </div>

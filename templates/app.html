@@ -60,6 +60,7 @@
       <div class="bulk-actions">
         <button type="button" class="chip" hx-post="/repos/bulk" hx-target="#toast" hx-swap="innerHTML"
                 hx-vals='js:{action:"refresh", repos: JSON.stringify(selectedRepos())}'>Refresh</button>
+        <button type="button" class="chip" hx-get="/repos/bulk/edit" hx-target="#modal-root" hx-swap="innerHTML">Edit</button>
         <button type="button" class="chip" hx-get="/repos/bulk/tag" hx-target="#modal-root" hx-swap="innerHTML">Tag</button>
         <button type="button" class="chip" hx-get="/repos/bulk/move" hx-target="#modal-root" hx-swap="innerHTML">Move</button>
         <button type="button" class="chip danger" hx-post="/repos/bulk" hx-target="#toast" hx-swap="innerHTML"

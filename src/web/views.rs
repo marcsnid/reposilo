@@ -88,8 +88,12 @@ fn palette_hex(key: &str) -> Option<&'static str> {
 
 /// Resolve the tint shown on a card/panel: the user's palette choice wins,
 /// then the icon-derived color, then a stable hash so every repo still has an
-/// identity color (e.g. when icons are disabled).
+/// identity color (e.g. when icons are disabled). `"none"` is an explicit
+/// no-tint choice.
 pub fn resolve_tint(color: Option<&str>, auto_color: Option<&str>, rel: &str) -> String {
+    if color == Some("none") {
+        return String::new();
+    }
     if let Some(hex) = color.and_then(palette_hex) {
         return hex.to_string();
     }
@@ -238,6 +242,8 @@ pub struct RepoCard {
     pub tags: Vec<TagUrl>,
     pub remote_gone: bool,
     pub remote_dead: bool,
+    /// Automatic updates are disabled (`interval_days = 0`).
+    pub archive_only: bool,
     pub branch: String,
     pub language: String,
     pub lang_class: String,
@@ -460,6 +466,7 @@ pub async fn build_list_ctx(
                     .collect(),
                 remote_gone: r.manifest.remote_state.as_deref() == Some("unavailable"),
                 remote_dead: r.manifest.remote_state.as_deref() == Some("dead"),
+                archive_only: r.manifest.schedule.interval_days == 0,
                 branch: r.manifest.default_branch.clone(),
                 language: r.manifest.language.clone().unwrap_or_default(),
                 lang_class: r.manifest.language.as_deref().map(lang_class).unwrap_or_default().to_string(),
@@ -689,6 +696,36 @@ pub struct DetailCtx {
 #[template(path = "repo_detail.html")]
 pub struct DetailT {
     pub ctx: DetailCtx,
+}
+
+/// Shared single-repo / bulk edit dialog.
+#[derive(Debug, Clone)]
+pub struct RepoEditCtx {
+    pub rel: String,
+    pub post_url: String,
+    /// True when editing the current multi-selection: per-repo identity fields
+    /// are hidden and blank inputs mean "leave unchanged".
+    pub is_bulk: bool,
+    pub name: String,
+    pub description: String,
+    pub notes: String,
+    pub tags: String,
+    pub origin: String,
+    pub folder: String,
+    pub folder_options: Vec<String>,
+    pub schedule_days: String,
+    pub keep_branch: String,
+    pub keep_releases: String,
+    pub color: String,
+    /// Bulk mode starts on "keep current color" so untouched repos stay as-is.
+    pub keep_color: bool,
+    pub color_choices: Vec<ColorChoiceView>,
+}
+
+#[derive(Template)]
+#[template(path = "repo_edit.html")]
+pub struct RepoEditT {
+    pub ctx: RepoEditCtx,
 }
 
 #[derive(Debug, Clone)]
@@ -930,6 +967,74 @@ pub async fn build_detail_ctx(st: &Arc<AppState>, repo: &crate::index::RepoEntry
         total_size: human_bytes(total_bytes),
         back_url: "/".to_string(),
         head_commit: head,
+    }
+}
+
+/// Build the shared edit dialog for one repo. Retention values are the
+/// effective values (per-repo override or the global default).
+pub async fn build_repo_edit_ctx(
+    st: &Arc<AppState>,
+    repo: &crate::index::RepoEntry,
+) -> RepoEditCtx {
+    let cfg = st.cfg().await;
+    let m = &repo.manifest;
+    let folder = repo
+        .rel
+        .rsplit_once('/')
+        .map(|(p, _)| p.to_string())
+        .unwrap_or_default();
+    let folder_options = {
+        let index = st.index.read().await;
+        all_folder_paths(&index)
+    };
+    RepoEditCtx {
+        rel: repo.rel.clone(),
+        post_url: format!("/repos/{}/edit", repo.rel),
+        is_bulk: false,
+        name: m.name.clone(),
+        description: m.description.clone().unwrap_or_default(),
+        notes: m.notes.clone().unwrap_or_default(),
+        tags: m.tags.join(", "),
+        origin: m.origin.clone().unwrap_or_default(),
+        folder,
+        folder_options,
+        schedule_days: m.schedule.interval_days.to_string(),
+        keep_branch: m
+            .retention
+            .keep_branch_snapshots
+            .unwrap_or(cfg.retention.keep_branch_snapshots)
+            .to_string(),
+        keep_releases: m
+            .retention
+            .keep_releases
+            .unwrap_or(cfg.retention.keep_releases)
+            .to_string(),
+        color: m.color.clone().unwrap_or_default(),
+        keep_color: false,
+        color_choices: color_choices(),
+    }
+}
+
+/// Build the bulk edit dialog. Blank numeric inputs and the "keep current"
+/// color option mean "leave that field unchanged".
+pub async fn build_bulk_edit_ctx(_st: &Arc<AppState>) -> RepoEditCtx {
+    RepoEditCtx {
+        rel: String::new(),
+        post_url: "/repos/bulk/edit".to_string(),
+        is_bulk: true,
+        name: String::new(),
+        description: String::new(),
+        notes: String::new(),
+        tags: String::new(),
+        origin: String::new(),
+        folder: String::new(),
+        folder_options: Vec::new(),
+        schedule_days: String::new(),
+        keep_branch: String::new(),
+        keep_releases: String::new(),
+        color: String::new(),
+        keep_color: true,
+        color_choices: color_choices(),
     }
 }
 
@@ -1771,6 +1876,11 @@ mod tests {
     #[test]
     fn auto_color_is_used_when_no_user_color() {
         assert_eq!(resolve_tint(None, Some("#ff00ff"), "a/b"), "#ff00ff");
+    }
+
+    #[test]
+    fn none_disables_the_tint_entirely() {
+        assert_eq!(resolve_tint(Some("none"), Some("#ff00ff"), "a/b"), "");
     }
 
     #[test]

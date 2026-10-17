@@ -44,6 +44,7 @@ fn templates_render_balanced_divs() {
         ("repo_grid", include_str!("../templates/repo_grid.html")),
         ("fragment", include_str!("../templates/fragment.html")),
         ("detail", include_str!("../templates/repo_detail.html")),
+        ("repo_edit", include_str!("../templates/repo_edit.html")),
         ("blob", include_str!("../templates/blob.html")),
         ("tags", include_str!("../templates/tags_edit.html")),
         ("folder_form", include_str!("../templates/folder_form.html")),
@@ -299,6 +300,44 @@ async fn web_ui_full_flow() -> Result<()> {
 
     Ok(())
 }
+
+/// The add form offers an Auto update checkbox (on by default); unchecking it
+/// archives the repo immediately but disables all future automatic checks.
+#[tokio::test]
+async fn add_repo_can_start_archive_only() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let remote = make_remote(tmp.path(), "hoard");
+    let (base, _st) = spawn_server(test_cfg(&tmp.path().join("archive"))).await;
+    let client = reqwest::Client::new();
+
+    let page = client.get(format!("{base}/")).send().await?.text().await?;
+    assert!(page.contains("Auto update"), "add form should offer Auto update: {page}");
+    assert!(
+        page.contains("id=\"add-auto-update\"") && page.contains("value=\"1\" checked"),
+        "Auto update should default to checked: {page}"
+    );
+
+    // Browser-style submit with the box unchecked: the presence marker is sent,
+    // the value itself is not.
+    client
+        .post(format!("{base}/repos/add"))
+        .form(&[
+            ("url", file_url(&remote).as_str()),
+            ("auto_update_present", "1"),
+        ])
+        .send()
+        .await?;
+    wait_jobs_done(&base).await;
+
+    let manifest: serde_json::Value = serde_json::from_str(&fs::read_to_string(
+        tmp.path().join("archive/remotes-hoard/repo.json"),
+    )?)?;
+    assert_eq!(manifest["schedule"]["interval_days"], 0);
+    let page = client.get(format!("{base}/")).send().await?.text().await?;
+    assert!(page.contains("archive only"), "card should show archive-only: {page}");
+    Ok(())
+}
+
 #[tokio::test]
 async fn folder_management_flow() -> Result<()> {
     let tmp = tempfile::tempdir()?;
@@ -1210,7 +1249,12 @@ async fn metadata_color_badge_roundtrips() -> Result<()> {
     let detail = client.get(format!("{base}/repos/owner-demo")).send().await?.text().await?;
     assert!(detail.contains("panel tinted"), "About panel should be tinted: {detail}");
     assert!(detail.contains("--tint: #3992c4"), "About panel should carry the blue tint: {detail}");
-    assert!(detail.contains("name=\"color\""), "metadata should offer color swatches: {detail}");
+    assert!(
+        detail.contains("/repos/owner-demo/edit"),
+        "detail should offer the shared edit dialog: {detail}"
+    );
+    let edit = client.get(format!("{base}/repos/owner-demo/edit")).send().await?.text().await?;
+    assert!(edit.contains("name=\"color\""), "edit dialog should offer color swatches: {edit}");
 
     // clearing the color removes the badge
     client
@@ -1220,6 +1264,163 @@ async fn metadata_color_badge_roundtrips() -> Result<()> {
         .await?;
     let m2: serde_json::Value = serde_json::from_str(&fs::read_to_string(repo.join("repo.json"))?)?;
     assert!(m2["color"].is_null(), "empty color should clear the badge: {m2}");
+    Ok(())
+}
+
+/// The single-repo edit dialog edits identity, schedule, retention and color,
+/// including the archive-only "never update" value.
+#[tokio::test]
+async fn repo_edit_dialog_updates_the_whole_record() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    write_min_repo(&root, "owner-demo", "demo");
+    let (base, _st) = spawn_server(test_cfg(&root)).await;
+    let client = reqwest::Client::new();
+
+    let modal = client
+        .get(format!("{base}/repos/owner-demo/edit"))
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert!(modal.contains("id=\"repo-edit-modal\""), "edit modal missing: {modal}");
+    assert!(modal.contains("name=\"schedule_days\""), "schedule field missing: {modal}");
+    assert!(modal.contains("Days per remote check"), "schedule label should be explicit: {modal}");
+    assert!(modal.contains("name=\"keep_branch\""), "snapshot retention missing: {modal}");
+    assert!(modal.contains("name=\"keep_releases\""), "release retention missing: {modal}");
+    assert!(modal.contains("name=\"tags\""), "tags field missing: {modal}");
+    assert!(modal.contains("0 = never update automatically"), "never-update hint missing: {modal}");
+
+    let resp = client
+        .post(format!("{base}/repos/owner-demo/edit"))
+        .form(&[
+            ("name", "demo-renamed"),
+            ("tags", "cli, rust, cli"),
+            ("description", "edited description"),
+            ("notes", "edited notes"),
+            ("origin", ""),
+            ("folder", ""),
+            ("schedule_days", "0"),
+            ("keep_branch", "5"),
+            ("keep_releases", "-1"),
+            ("color", "purple"),
+        ])
+        .send()
+        .await?;
+    assert_eq!(resp.status(), 200);
+    assert!(
+        resp.headers().get("HX-Redirect").is_some(),
+        "modal save should redirect to the refreshed detail page"
+    );
+
+    let m: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(root.join("owner-demo/repo.json"))?)?;
+    assert_eq!(m["name"], "demo-renamed");
+    assert_eq!(m["tags"], serde_json::json!(["cli", "rust"]));
+    assert_eq!(m["description"], "edited description");
+    assert_eq!(m["notes"], "edited notes");
+    assert_eq!(m["schedule"]["interval_days"], 0);
+    assert_eq!(m["retention"]["keep_branch_snapshots"], 5);
+    assert_eq!(m["retention"]["keep_releases"], -1);
+    assert_eq!(m["color"], "purple");
+
+    let detail = client
+        .get(format!("{base}/repos/owner-demo"))
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert!(detail.contains("Never (manual refresh only)"), "{detail}");
+    assert!(detail.contains("Keep newest 5 snapshot(s)"), "{detail}");
+    assert!(detail.contains("keep all releases"), "{detail}");
+    let edit_at = detail.find("/repos/owner-demo/edit").expect("edit action");
+    let refresh_at = detail.find("/repos/owner-demo/refresh").expect("refresh action");
+    let delete_at = detail.find("/repos/owner-demo/delete").expect("delete action");
+    assert!(
+        edit_at < refresh_at && refresh_at < delete_at,
+        "Actions must be Edit, Force Refresh, Delete"
+    );
+    Ok(())
+}
+
+/// Bulk edit applies only shared fields and leaves per-repo identity alone.
+#[tokio::test]
+async fn bulk_edit_updates_schedule_retention_and_color() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("archive");
+    write_min_repo(&root, "owner-a", "a");
+    write_min_repo(&root, "owner-b", "b");
+    let (base, _st) = spawn_server(test_cfg(&root)).await;
+    let client = reqwest::Client::new();
+
+    let modal = client
+        .get(format!("{base}/repos/bulk/edit"))
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert!(modal.contains("Edit selection"), "{modal}");
+    assert!(modal.contains("Leave fields blank to keep current values."), "{modal}");
+    assert!(modal.contains("Days per remote check"), "schedule label should be explicit: {modal}");
+    assert!(modal.contains("placeholder=\"—\""), "blank fields need a clear placeholder: {modal}");
+    assert!(!modal.contains("type=\"checkbox\""), "bulk edit should not use enable checkboxes: {modal}");
+    assert!(modal.contains("name=\"color\""), "bulk color picker missing: {modal}");
+    assert!(!modal.contains("name=\"origin\""), "bulk edit must not edit origin: {modal}");
+
+    let rels = serde_json::json!(["owner-a", "owner-b"]).to_string();
+    let resp = client
+        .post(format!("{base}/repos/bulk/edit"))
+        .form(&[
+            ("repos", rels.as_str()),
+            ("schedule_days", "0"),
+            ("keep_branch", "2"),
+            ("keep_releases", "-1"),
+            ("color", "red"),
+        ])
+        .send()
+        .await?;
+    let body = resp.text().await?;
+    assert!(body.contains("Updated 2 repositories"), "{body}");
+
+    for rel in ["owner-a", "owner-b"] {
+        let m: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(root.join(rel).join("repo.json"))?)?;
+        assert_eq!(m["name"], if rel == "owner-a" { "a" } else { "b" });
+        assert_eq!(m["schedule"]["interval_days"], 0);
+        assert_eq!(m["retention"]["keep_branch_snapshots"], 2);
+        assert_eq!(m["retention"]["keep_releases"], -1);
+        assert_eq!(m["color"], "red");
+    }
+    let page = client.get(format!("{base}/")).send().await?.text().await?;
+    assert!(page.contains("archive only"), "cards should show the archive-only state: {page}");
+
+    // "None" is an explicit no-tint choice, not just "clear the user color".
+    let resp = client
+        .post(format!("{base}/repos/bulk/edit"))
+        .form(&[("repos", rels.as_str()), ("color", "none")])
+        .send()
+        .await?;
+    let body = resp.text().await?;
+    assert!(body.contains("Updated 2 repositories"), "{body}");
+    for rel in ["owner-a", "owner-b"] {
+        let m: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(root.join(rel).join("repo.json"))?)?;
+        assert_eq!(m["color"], "none");
+        // Blank fields must not overwrite values set by the previous bulk edit.
+        assert_eq!(m["schedule"]["interval_days"], 0);
+        assert_eq!(m["retention"]["keep_branch_snapshots"], 2);
+        assert_eq!(m["retention"]["keep_releases"], -1);
+    }
+    let page = client.get(format!("{base}/")).send().await?.text().await?;
+    assert!(!page.contains("card tinted"), "None should remove card tints: {page}");
+
+    // With every field left on "unchanged", the form is a no-op.
+    let resp = client
+        .post(format!("{base}/repos/bulk/edit"))
+        .form(&[("repos", rels.as_str()), ("color", "__keep")])
+        .send()
+        .await?;
+    assert!(resp.text().await?.contains("Choose at least one field to change"));
     Ok(())
 }
 

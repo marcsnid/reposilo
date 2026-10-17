@@ -88,7 +88,11 @@ async fn add_snapshots_branch_and_release() -> Result<()> {
     let remote = make_remote(tmp.path(), "fixture");
     push_tag(&tmp.path().join("work-fixture"), "v1.0.0");
 
-    let archiver = Archiver::new(test_cfg(&archive));
+    let archiver = Archiver::new({
+        let mut cfg = test_cfg(&archive);
+        cfg.scheduler.default_interval_days = 14;
+        cfg
+    });
     let repo_dir = archiver.add_repo(&file_url(&remote), &["cli".into(), "rust".into()], None).await?;
 
     // zip-only storage: NO persistent git store at default depth
@@ -103,6 +107,7 @@ async fn add_snapshots_branch_and_release() -> Result<()> {
     assert_eq!(m["forge"], "generic");
     assert_eq!(m["default_branch"], "master");
     assert_eq!(m["language"], "Rust", "language detected at add time");
+    assert_eq!(m["schedule"]["interval_days"], 14, "new repos inherit the configured default");
     assert_eq!(m["tags"][0], "cli");
 
     // branch snapshot zip + sidecar
@@ -129,9 +134,10 @@ async fn add_snapshots_branch_and_release() -> Result<()> {
         let mut z = zip::ZipArchive::new(fs::File::open(&zips[0])?)?;
         let meta_name = z
             .file_names()
+            .filter_map(|n| n.ok())
             .find(|n| n.ends_with(".reposilo.json"))
-            .expect(".reposilo.json embedded in zip")
-            .to_string();
+            .map(|n| n.into_owned())
+            .expect(".reposilo.json embedded in zip");
         assert!(meta_name.starts_with("fixture/"), "embedded under project prefix: {meta_name}");
         let mut content = String::new();
         z.by_name(&meta_name)?.read_to_string(&mut content)?;
@@ -193,6 +199,78 @@ async fn refresh_picks_up_new_branch_and_release_and_prunes() -> Result<()> {
     let summary2 = archiver.refresh_repo(&repo_dir).await?;
     assert!(!summary2.new_branch_snapshot);
     assert!(summary2.new_release.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn scheduled_refresh_respects_branch_cadence() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let archive = tmp.path().join("archive");
+    fs::create_dir_all(&archive)?;
+
+    let remote = make_remote(tmp.path(), "cadence");
+    let work = tmp.path().join("work-cadence");
+    let archiver = Archiver::new(test_cfg(&archive));
+    let repo_dir = archiver.add_repo(&file_url(&remote), &[], None).await?;
+
+    push_commit(&work, "new.txt", "new\n", "second");
+    push_tag(&work, "v1.1.0");
+
+    // A scheduled check during the 7-day window polls and archives the release
+    // but leaves the branch alone (the default branch snapshot cadence is 7d).
+    let summary = archiver.refresh_repo_scheduled(&repo_dir).await?;
+    assert!(!summary.new_branch_snapshot, "daily release poll must not force a branch snapshot");
+    assert_eq!(summary.new_release.as_deref(), Some("1.1.0"));
+
+    let branch_dir = repo_dir.join("branch").join("master");
+    let branch_sidecars: Vec<_> = fs::read_dir(&branch_dir)?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .collect();
+    assert_eq!(branch_sidecars.len(), 1, "still only the snapshot from add");
+
+    // Age that snapshot past the cadence; the next scheduled check catches up.
+    let path = branch_sidecars[0].clone();
+    let mut sc = read_json::<reposilo::types::SnapshotSidecar>(&path)?;
+    sc.archived_at = (time::OffsetDateTime::now_utc() - time::Duration::days(8))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+    fs::write(&path, serde_json::to_string_pretty(&sc)?)?;
+
+    let summary = archiver.refresh_repo_scheduled(&repo_dir).await?;
+    assert!(summary.new_branch_snapshot, "cadence elapsed -> branch snapshot");
+    Ok(())
+}
+
+#[tokio::test]
+async fn archive_only_repo_skips_scheduled_updates_but_manual_refresh_works() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let archive = tmp.path().join("archive");
+    fs::create_dir_all(&archive)?;
+
+    let remote = make_remote(tmp.path(), "hoarded");
+    let work = tmp.path().join("work-hoarded");
+    let archiver = Archiver::new(test_cfg(&archive));
+    let repo_dir = archiver.add_repo(&file_url(&remote), &[], None).await?;
+
+    let manifest_path = repo_dir.join("repo.json");
+    let mut manifest = read_json::<reposilo::types::RepoManifest>(&manifest_path)?;
+    manifest.schedule.interval_days = 0;
+    write_manifest(&manifest_path, &manifest)?;
+
+    push_commit(&work, "new.txt", "new\n", "second");
+    push_tag(&work, "v1.1.0");
+
+    // Scheduled work is a no-op for an archive-only repo.
+    let summary = archiver.refresh_repo_scheduled(&repo_dir).await?;
+    assert!(!summary.new_branch_snapshot);
+    assert!(summary.new_release.is_none());
+
+    // Manual refresh is still allowed and picks up both changes.
+    let summary = archiver.refresh_repo(&repo_dir).await?;
+    assert!(summary.new_branch_snapshot);
+    assert_eq!(summary.new_release.as_deref(), Some("1.1.0"));
     Ok(())
 }
 
@@ -485,7 +563,7 @@ async fn add_into_a_folder_scopes_manifest_and_sidecars() -> Result<()> {
 
     let archiver = Archiver::new(test_cfg(&archive));
     let repo_dir = archiver
-        .add_repo_in_folder(&file_url(&remote), &[], None, Some("tools/rust"))
+        .add_repo_in_folder(&file_url(&remote), &[], None, Some("tools/rust"), true)
         .await?;
     assert_eq!(repo_dir, archive.join("tools/rust/remotes-scoped"));
 

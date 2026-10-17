@@ -18,7 +18,7 @@ use crate::server::AppState;
 pub mod views;
 use views::{
     build_detail_ctx, build_list_ctx, page_url, BlobCtx, BlobT, DetailT, FolderFormCtx, FolderFormT,
-    FragmentT, IndexT, JobCtx, JobT, TagsCtx, TagsT,
+    FragmentT, IndexT, JobCtx, JobT, RepoEditT, TagsCtx, TagsT,
 };
 
 pub fn router() -> Router<Arc<AppState>> {
@@ -48,6 +48,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/folders/options", get(folders_options))
         .route("/repos/move", post(repo_move))
         .route("/repos/bulk", post(bulk_action))
+        .route("/repos/bulk/edit", get(bulk_edit_modal).post(bulk_edit_save))
         .route("/repos/bulk/tag", get(bulk_tag_modal))
         .route("/repos/bulk/move", get(bulk_move_modal))
         .route(
@@ -286,7 +287,17 @@ async fn add_repo_form(
     let tags: Vec<String> = csv_param(&form, "tags");
     let notes = form.get("notes").map(|s| s.to_string()).filter(|s| !s.is_empty());
     let folder = form.get("folder").map(|s| s.to_string()).filter(|s| !s.trim().is_empty());
-    let id = crate::server::spawn_add_job(&st, &url, &tags, notes, folder).await;
+    // The form always submits `auto_update_present`; when it is absent the
+    // caller is an older client/API and keeps the historical default (on).
+    let auto_update = if form.contains_key("auto_update_present") {
+        matches!(
+            form.get("auto_update").map(String::as_str),
+            Some("1" | "on" | "true")
+        )
+    } else {
+        true
+    };
+    let id = crate::server::spawn_add_job(&st, &url, &tags, notes, folder, auto_update).await;
     let ctx = JobCtx {
         id,
         message: format!("Archiving {url}…"),
@@ -361,6 +372,9 @@ async fn repo_page(
     }
     if let Some(rel) = rest.strip_suffix("/delete") {
         return delete_confirm_ui(&st, rel).await;
+    }
+    if let Some(rel) = rest.strip_suffix("/edit") {
+        return edit_repo_modal(&st, rel).await;
     }
     let repo = match st.find_repo(&rest).await {
         Some(r) => r,
@@ -546,7 +560,9 @@ async fn repo_post(
         let edit = OriginForm { value: form.get("value").cloned().unwrap_or_default() };
         assign_origin_ui(&st, rel, edit).await
     } else if let Some(rel) = rest.strip_suffix("/metadata") {
-        save_metadata_ui(&st, rel, form).await
+        save_metadata_ui(&st, rel, form, false).await
+    } else if let Some(rel) = rest.strip_suffix("/edit") {
+        save_metadata_ui(&st, rel, form, true).await
     } else if let Some(rel) = rest.strip_suffix("/delete") {
         delete_repo_ui(&st, rel, form).await
     } else {
@@ -554,10 +570,76 @@ async fn repo_post(
     }
 }
 
-/// POST /repos/{rel}/metadata (form): Jellyfin-style metadata editing:
-/// name, description, notes, origin. Writes the manifest, reindexes, and
-/// refreshes the page content in place.
-async fn save_metadata_ui(st: &Arc<AppState>, rel: &str, form: HashMap<String, String>) -> Response {
+/// Parse an optional whole-number form field. Blank/missing means "leave
+/// unchanged" (used by bulk edit); invalid text is an error.
+fn optional_u32(
+    form: &HashMap<String, String>,
+    key: &str,
+    label: &str,
+) -> Result<Option<u32>, String> {
+    match form.get(key).map(|s| s.trim()) {
+        None | Some("") => Ok(None),
+        Some(v) => v
+            .parse::<u32>()
+            .map(Some)
+            .map_err(|_| format!("{label} must be a whole number")),
+    }
+}
+
+/// Parse an optional retention count. `-1` means keep all; other negative
+/// values are rejected so a typo cannot silently behave like "keep all".
+fn optional_i64(
+    form: &HashMap<String, String>,
+    key: &str,
+    label: &str,
+) -> Result<Option<i64>, String> {
+    match form.get(key).map(|s| s.trim()) {
+        None | Some("") => Ok(None),
+        Some(v) => match v.parse::<i64>() {
+            Ok(n) if n >= -1 => Ok(Some(n)),
+            _ => Err(format!("{label} must be -1 (keep all) or a non-negative count")),
+        },
+    }
+}
+
+/// Parse a comma-separated tag list, trimming and case-insensitively
+/// deduplicating entries. Used by the single-repo edit dialog; the dedicated
+/// tag editor remains the quick add/remove path.
+fn parse_tags(raw: &str) -> Vec<String> {
+    let mut tags: Vec<String> = Vec::new();
+    for tag in raw.split(',') {
+        let tag = tag.trim();
+        if tag.is_empty() || tags.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
+            continue;
+        }
+        tags.push(tag.to_string());
+    }
+    tags.sort();
+    tags
+}
+
+/// POST /repos/{rel}/metadata or /repos/{rel}/edit (form): edit the whole
+/// repo record. The edit modal uses `/edit` (and gets a page redirect); the
+/// older `/metadata` endpoint keeps its fragment response for compatibility.
+async fn save_metadata_ui(
+    st: &Arc<AppState>,
+    rel: &str,
+    form: HashMap<String, String>,
+    from_modal: bool,
+) -> Response {
+    let schedule_days = match optional_u32(&form, "schedule_days", "Update interval") {
+        Ok(v) => v,
+        Err(e) => return html(format!(r#"<div class="import-error">{e}</div>"#)),
+    };
+    let keep_branch = match optional_i64(&form, "keep_branch", "Branch snapshot retention") {
+        Ok(v) => v,
+        Err(e) => return html(format!(r#"<div class="import-error">{e}</div>"#)),
+    };
+    let keep_releases = match optional_i64(&form, "keep_releases", "Release retention") {
+        Ok(v) => v,
+        Err(e) => return html(format!(r#"<div class="import-error">{e}</div>"#)),
+    };
+
     let Some(repo) = st.find_repo(rel).await else {
         return (StatusCode::NOT_FOUND, "no such repo").into_response();
     };
@@ -608,9 +690,22 @@ async fn save_metadata_ui(st: &Arc<AppState>, rel: &str, form: HashMap<String, S
         }
         manifest.description = form.get("description").map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
         manifest.notes = form.get("notes").map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-        // color radio always submits (empty = no color); a missing field leaves it alone
-        if let Some(c) = form.get("color") {
-            manifest.color = Some(c.trim().to_string()).filter(|s| !s.is_empty());
+        if let Some(raw) = form.get("tags") {
+            manifest.tags = parse_tags(raw);
+        }
+        if let Some(days) = schedule_days {
+            manifest.schedule.interval_days = days;
+        }
+        if let Some(keep) = keep_branch {
+            manifest.retention.keep_branch_snapshots = Some(keep);
+        }
+        if let Some(keep) = keep_releases {
+            manifest.retention.keep_releases = Some(keep);
+        }
+        // color radio always submits (empty = no color, __keep = bulk leave alone);
+        // a missing field leaves it alone
+        if let Some(c) = form.get("color").map(|s| s.trim()).filter(|s| *s != "__keep") {
+            manifest.color = Some(c.to_string()).filter(|s| !s.is_empty());
         }
         if let Err(e) = crate::types::write_json(&manifest_path, &manifest) {
             st.unlock_repo(rel).await;
@@ -631,7 +726,29 @@ async fn save_metadata_ui(st: &Arc<AppState>, rel: &str, form: HashMap<String, S
     } else {
         "&#10003; Metadata saved".to_string()
     };
-    html(format!(r#"<div class="job-status ok">{msg}</div>{oob}"#))
+    let close = if from_modal {
+        oob_close_modal("repo-edit-modal")
+    } else {
+        String::new()
+    };
+    let mut resp = html(format!(
+        r#"<div class="job-status ok">{msg}</div>{oob}{close}"#
+    ));
+    if from_modal {
+        if let Ok(location) = axum::http::HeaderValue::from_str(&format!("/repos/{new_rel}")) {
+            resp.headers_mut().insert("HX-Redirect", location);
+        }
+    }
+    resp
+}
+
+/// GET /repos/{rel}/edit: the shared edit dialog in single-repo mode.
+async fn edit_repo_modal(st: &Arc<AppState>, rel: &str) -> Response {
+    let Some(repo) = st.find_repo(rel).await else {
+        return (StatusCode::NOT_FOUND, "no such repo").into_response();
+    };
+    let ctx = views::build_repo_edit_ctx(st, &repo).await;
+    render(&RepoEditT { ctx })
 }
 
 /// POST /repos/{rel}/origin (form): assign an origin to a repo (promotes
@@ -904,6 +1021,118 @@ async fn bulk_move_modal() -> Response {
 </div>"##
             .to_string(),
     )
+}
+
+/// GET /repos/bulk/edit: shared edit dialog for the current selection.
+async fn bulk_edit_modal(State(st): State<Arc<AppState>>) -> Response {
+    let ctx = views::build_bulk_edit_ctx(&st).await;
+    render(&RepoEditT { ctx })
+}
+
+/// POST /repos/bulk/edit: apply shared scheduling, retention and color fields
+/// to every selected repo. Blank fields leave that value unchanged.
+async fn bulk_edit_save(
+    State(st): State<Arc<AppState>>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    let rels: Vec<String> = serde_json::from_str::<Vec<String>>(
+        form.get("repos").map(String::as_str).unwrap_or("[]"),
+    )
+    .unwrap_or_default()
+    .into_iter()
+    .map(|r| r.trim().trim_matches('/').to_string())
+    .filter(|r| !r.is_empty())
+    .collect();
+    if rels.is_empty() {
+        return bulk_toast(false, "Select at least one repository");
+    }
+
+    let schedule_days = match optional_u32(&form, "schedule_days", "Update interval") {
+        Ok(v) => v,
+        Err(e) => return bulk_toast(false, &e),
+    };
+    let keep_branch = match optional_i64(&form, "keep_branch", "Branch snapshot retention") {
+        Ok(v) => v,
+        Err(e) => return bulk_toast(false, &e),
+    };
+    let keep_releases = match optional_i64(&form, "keep_releases", "Release retention") {
+        Ok(v) => v,
+        Err(e) => return bulk_toast(false, &e),
+    };
+    let color = form
+        .get("color")
+        .map(|s| s.trim())
+        .filter(|s| *s != "__keep")
+        .map(str::to_string);
+
+    if schedule_days.is_none()
+        && keep_branch.is_none()
+        && keep_releases.is_none()
+        && color.is_none()
+    {
+        return bulk_toast(false, "Choose at least one field to change");
+    }
+
+    let mut changed = 0usize;
+    let mut skipped = 0usize;
+    for rel in &rels {
+        let Some(repo) = st.find_repo(rel).await else {
+            skipped += 1;
+            continue;
+        };
+        if !st.try_lock_repo(rel).await {
+            skipped += 1;
+            continue;
+        }
+        let path = repo.dir.join("repo.json");
+        let result = match crate::types::read_json::<crate::types::RepoManifest>(&path) {
+            Ok(mut manifest) => {
+                let before = serde_json::to_string(&manifest).unwrap_or_default();
+                if let Some(days) = schedule_days {
+                    manifest.schedule.interval_days = days;
+                }
+                if let Some(keep) = keep_branch {
+                    manifest.retention.keep_branch_snapshots = Some(keep);
+                }
+                if let Some(keep) = keep_releases {
+                    manifest.retention.keep_releases = Some(keep);
+                }
+                if let Some(c) = &color {
+                    manifest.color = Some(c.clone()).filter(|s| !s.is_empty());
+                }
+                let after = serde_json::to_string(&manifest).unwrap_or_default();
+                if before == after {
+                    Ok(false)
+                } else {
+                    crate::types::write_json(&path, &manifest).map(|_| true).map_err(|_| ())
+                }
+            }
+            Err(_) => Err(()),
+        };
+        st.unlock_repo(rel).await;
+        match result {
+            Ok(true) => changed += 1,
+            Ok(false) => {}
+            Err(()) => skipped += 1,
+        }
+    }
+    st.reindex().await.ok();
+    tracing::info!(changed, skipped, "bulk edit applied");
+    edit_done(
+        &st,
+        format!("Updated {changed} repositories{}", skip_note(skipped)),
+    )
+    .await
+}
+
+/// Success toast + close the shared edit modal + refresh the grid.
+async fn edit_done(st: &Arc<AppState>, msg: String) -> Response {
+    html(format!(
+        r#"<div class="job-status ok">{}</div>{}{}"#,
+        html_escape(&msg),
+        oob_close_modal("repo-edit-modal"),
+        oob_app_refresh(st).await
+    ))
 }
 
 /// Queue a refresh for each selected repo. A coordinator task takes permits

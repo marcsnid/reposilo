@@ -1,0 +1,110 @@
+<div class="modal-backdrop" id="repo-edit-modal" onclick="if(event.target===this)this.remove()">
+  <div class="modal modal-edit" role="dialog" aria-modal="true" aria-labelledby="repo-edit-title">
+    <div class="edit-head">
+      <div>
+        <h2 id="repo-edit-title">{% if ctx.is_bulk %}Edit selection{% else %}Edit repository{% endif %}</h2>
+        <div class="edit-sub">{% if ctx.is_bulk %}Leave fields blank to keep current values.{% else %}{{ ctx.rel }}{% endif %}</div>
+      </div>
+      <button type="button" class="edit-close" aria-label="Close" onclick="document.getElementById('repo-edit-modal').remove()">&times;</button>
+    </div>
+
+    <form class="edit-form" hx-post="{{ ctx.post_url }}" hx-target="#toast" hx-swap="innerHTML" hx-indicator="find .spinner"
+          {% if ctx.is_bulk %}hx-vals='js:{repos: JSON.stringify(selectedRepos())}'{% endif %}>
+      <div class="edit-body">
+        {% if !ctx.is_bulk %}
+        <section class="edit-section">
+          <h3 class="edit-section-title">Repository</h3>
+          <div class="edit-list">
+            <div class="edit-row"><label for="repo-edit-name">Name</label>
+              <input id="repo-edit-name" type="text" name="name" value="{{ ctx.name }}" autofocus></div>
+            <div class="edit-row"><label for="repo-edit-tags">Tags</label>
+              <input id="repo-edit-tags" type="text" name="tags" value="{{ ctx.tags }}" placeholder="cli, rust, tools"></div>
+            <div class="edit-row edit-stacked"><label for="repo-edit-description">Description</label>
+              <textarea id="repo-edit-description" name="description" rows="2" placeholder="Shown on the card">{{ ctx.description }}</textarea></div>
+            <div class="edit-row edit-stacked"><label for="repo-edit-notes">Notes</label>
+              <textarea id="repo-edit-notes" name="notes" rows="2" placeholder="Private notes">{{ ctx.notes }}</textarea></div>
+            <div class="edit-row"><label for="repo-edit-origin">Origin</label>
+              <input id="repo-edit-origin" type="url" name="origin" value="{{ ctx.origin }}" placeholder="https://github.com/owner/repo.git"></div>
+            <div class="edit-row"><label for="repo-edit-folder">Folder</label>
+              <input id="repo-edit-folder" type="text" name="folder" value="{{ ctx.folder }}" list="repo-edit-folders" placeholder="tools/rust">
+              <datalist id="repo-edit-folders">
+                {% for f in ctx.folder_options %}
+                <option value="{{ f }}"></option>
+                {% endfor %}
+              </datalist></div>
+          </div>
+        </section>
+        {% endif %}
+
+        <section class="edit-section">
+          <h3 class="edit-section-title">Remote checks</h3>
+          <div class="edit-list">
+            <div class="edit-row"><label for="repo-edit-schedule">Days per remote check</label>
+              <span class="edit-control">
+                {% if ctx.is_bulk %}
+                <input id="repo-edit-schedule" class="edit-number" type="number" name="schedule_days" min="0" placeholder="—">
+                {% else %}
+                <input id="repo-edit-schedule" class="edit-number" type="number" name="schedule_days" min="0" value="{{ ctx.schedule_days }}">
+                <span class="edit-unit">days</span>
+                {% endif %}
+              </span></div>
+          </div>
+          <p class="edit-hint">0 = never update automatically. Manual refresh still works.</p>
+        </section>
+
+        <section class="edit-section">
+          <h3 class="edit-section-title">Retention</h3>
+          <div class="edit-list">
+            <div class="edit-row"><label for="repo-edit-keep-branch">Branch snapshots</label>
+              <span class="edit-control">
+                {% if ctx.is_bulk %}
+                <input id="repo-edit-keep-branch" class="edit-number" type="number" name="keep_branch" min="-1" placeholder="—">
+                {% else %}
+                <input id="repo-edit-keep-branch" class="edit-number" type="number" name="keep_branch" min="-1" value="{{ ctx.keep_branch }}">
+                <span class="edit-unit">kept</span>
+                {% endif %}
+              </span></div>
+            <div class="edit-row"><label for="repo-edit-keep-releases">Releases</label>
+              <span class="edit-control">
+                {% if ctx.is_bulk %}
+                <input id="repo-edit-keep-releases" class="edit-number" type="number" name="keep_releases" min="-1" placeholder="—">
+                {% else %}
+                <input id="repo-edit-keep-releases" class="edit-number" type="number" name="keep_releases" min="-1" value="{{ ctx.keep_releases }}">
+                <span class="edit-unit">kept</span>
+                {% endif %}
+              </span></div>
+          </div>
+          <p class="edit-hint">-1 = keep all &middot; 0 = keep none after the next prune.</p>
+        </section>
+
+        <section class="edit-section">
+          <h3 class="edit-section-title">Appearance</h3>
+          <div class="edit-list">
+            <div class="edit-row edit-stacked"><label>Card color</label>
+              <div class="color-swatch-row edit-colors">
+                {% if ctx.keep_color %}
+                <label class="color-swatch color-swatch-none" title="Keep the current color">
+                  <input type="radio" name="color" value="__keep" checked>No change</label>
+                {% endif %}
+                <label class="color-swatch color-swatch-none" title="No tint">
+                  <input type="radio" name="color" value="none" {% if !ctx.keep_color && ctx.color == "none" %}checked{% endif %}>None</label>
+                <label class="color-swatch color-swatch-none" title="Automatic color">
+                  <input type="radio" name="color" value="" {% if !ctx.keep_color && ctx.color.is_empty() %}checked{% endif %}>Auto</label>
+                {% for c in ctx.color_choices %}
+                <label class="color-swatch" title="{{ c.name }}">
+                  <input type="radio" name="color" value="{{ c.key }}" {% if !ctx.keep_color && ctx.color == c.key %}checked{% endif %}>
+                  <span class="dot {{ c.class }}"></span></label>
+                {% endfor %}
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <div class="edit-footer">
+        <button type="button" class="dim-btn" onclick="document.getElementById('repo-edit-modal').remove()">Cancel</button>
+        <button type="submit" class="refresh-btn"><span class="spinner htmx-indicator"></span>Save changes</button>
+      </div>
+    </form>
+  </div>
+</div>

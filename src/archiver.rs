@@ -389,6 +389,14 @@ pub struct Archiver {
     pub http_cache: Arc<std::sync::Mutex<crate::httpcache::HttpCache>>,
 }
 
+/// Options for a single add operation, grouped to keep the internal helper's
+/// argument list small.
+struct AddOptions<'a> {
+    tags: &'a [String],
+    notes: Option<String>,
+    auto_update: bool,
+}
+
 impl Archiver {
     pub fn new(cfg: Config) -> Self {
         let cache = crate::httpcache::HttpCache::load(Path::new(&cfg.archive.root));
@@ -411,7 +419,7 @@ impl Archiver {
     /// [`add_repo_in_folder`].
     #[tracing::instrument(skip(self, notes))]
     pub async fn add_repo(&self, url: &str, tags: &[String], notes: Option<String>) -> Result<PathBuf> {
-        self.add_repo_in_folder(url, tags, notes, None).await
+        self.add_repo_in_folder(url, tags, notes, None, true).await
     }
 
     /// Add a repo, optionally under a category folder. The archive path
@@ -430,6 +438,7 @@ impl Archiver {
         tags: &[String],
         notes: Option<String>,
         folder: Option<&str>,
+        auto_update: bool,
     ) -> Result<PathBuf> {
         let info = forge::detect(url)?;
         let root = Path::new(&self.cfg.archive.root);
@@ -471,7 +480,17 @@ impl Archiver {
         // leave the on-disk snapshots alone rather than destroying user data.
         let pre_existing = repo_dir.exists();
         match self
-            .add_repo_inner(url, &info, &repo_dir, &rel, tags, notes)
+            .add_repo_inner(
+                url,
+                &info,
+                &repo_dir,
+                &rel,
+                AddOptions {
+                    tags,
+                    notes,
+                    auto_update,
+                },
+            )
             .await
         {
             Ok(()) => Ok(repo_dir),
@@ -491,9 +510,13 @@ impl Archiver {
         info: &forge::ForgeInfo,
         repo_dir: &Path,
         rel: &str,
-        tags: &[String],
-        notes: Option<String>,
+        opts: AddOptions<'_>,
     ) -> Result<()> {
+        let AddOptions {
+            tags,
+            notes,
+            auto_update,
+        } = opts;
         fs::create_dir_all(repo_dir)
             .with_context(|| format!("cannot create {}", repo_dir.display()))?;
         let manifest_path = repo_dir.join("repo.json");
@@ -587,7 +610,13 @@ impl Archiver {
             stars,
             suggested_tags,
             default_branch: branch.clone(),
-            schedule: Default::default(),
+            schedule: crate::types::ScheduleCfg {
+                interval_days: if auto_update {
+                    self.cfg.scheduler.default_interval_days
+                } else {
+                    0
+                },
+            },
             retention: Default::default(),
             last_checked: Some(now_rfc3339()),
             notes,
@@ -1070,9 +1099,28 @@ impl Archiver {
 
     /// Refresh one repo against its remote: re-snapshot the default branch if
     /// it moved, archive a newer semver release if one exists, prune per
-    /// retention, and record the check time
+    /// retention, and record the check time.
+    ///
+    /// Manual refreshes always snapshot a changed branch. Scheduled refreshes
+    /// use [`Self::refresh_repo_scheduled`], which also respects the repo's
+    /// snapshot cadence (release polling still happens on its own cadence).
     #[tracing::instrument(skip(self))]
     pub async fn refresh_repo(&self, repo_dir: &Path) -> Result<RefreshSummary> {
+        self.refresh_repo_inner(repo_dir, false).await
+    }
+
+    /// Scheduled refresh: poll releases on the scheduler's cadence, but only
+    /// take a branch snapshot when the repo's `interval_days` has elapsed.
+    #[tracing::instrument(skip(self))]
+    pub async fn refresh_repo_scheduled(&self, repo_dir: &Path) -> Result<RefreshSummary> {
+        self.refresh_repo_inner(repo_dir, true).await
+    }
+
+    async fn refresh_repo_inner(
+        &self,
+        repo_dir: &Path,
+        respect_branch_interval: bool,
+    ) -> Result<RefreshSummary> {
         let manifest_path = repo_dir.join("repo.json");
         let mut manifest: RepoManifest = crate::types::read_json(&manifest_path)
             .with_context(|| format!("cannot read manifest in {}", repo_dir.display()))?;
@@ -1088,6 +1136,10 @@ impl Archiver {
         if origin.is_empty() {
             tracing::warn!(repo = %rel, "no origin (unidentified import); nothing to refresh");
             summary.remote_unavailable = true;
+            return Ok(summary);
+        }
+        if respect_branch_interval && manifest.schedule.interval_days == 0 {
+            tracing::debug!(repo = %rel, "automatic updates disabled; skipping scheduled refresh");
             return Ok(summary);
         }
         let name = manifest.name.clone();
@@ -1141,7 +1193,18 @@ impl Archiver {
         // current archived state: compare against snapshot sidecars
         // (mirror mode can also use the local git store, but sidecars are
         // the truth in both modes; keep one code path)
-        let local_sha = latest_branch_commit(repo_dir, &branch).unwrap_or_default();
+        let local_branch = latest_branch_snapshot(repo_dir, &branch);
+        let local_sha = local_branch
+            .as_ref()
+            .map(|sc| sc.commit.clone())
+            .unwrap_or_default();
+        // The scheduler may poll releases daily while branch snapshots stay on
+        // a weekly cadence. Use the newest branch snapshot (not `last_checked`,
+        // which moves on every release poll) to decide whether it is due.
+        let branch_due = !respect_branch_interval
+            || local_branch.as_ref().is_none_or(|sc| {
+                branch_snapshot_is_due(&sc.archived_at, manifest.schedule.interval_days)
+            });
 
         self.pace_remote(&origin).await?;
         let remote_branch_sha = git(self.cfg.git.timeout_secs, &["ls-remote", &origin, &branch_ref], None)
@@ -1151,6 +1214,14 @@ impl Archiver {
             .unwrap_or_default();
         let branch_changed =
             !remote_branch_sha.is_empty() && remote_branch_sha != local_sha;
+        let branch_work = branch_changed && branch_due;
+        if branch_changed && !branch_due {
+            tracing::debug!(
+                repo = %rel,
+                interval_days = manifest.schedule.interval_days,
+                "branch moved; waiting for the snapshot cadence"
+            );
+        }
 
         // releases check (before deciding to clone anything)
         let new_release_tag = self.latest_release_tag(&origin).await.ok().flatten();
@@ -1181,7 +1252,7 @@ impl Archiver {
         }
 
         // nothing to do? no clone at all: refresh costs one ls-remote
-        let need_work = branch_changed
+        let need_work = branch_work
             || release_needed
             || manifest.language.is_none()
             || (manifest.default_branch != "unknown" && remote_branch_sha.is_empty() && !local_sha.is_empty());
@@ -1195,7 +1266,7 @@ impl Archiver {
         // ephemeral depth-1 clone (shallow fetch provides no incremental
         // benefit anyway: a changed tree must be re-downloaded regardless)
         let temp = if mirror {
-            if branch_changed {
+            if branch_work {
                 self.fetch_branch(&shallow, &origin, &branch).await?;
             }
             None
@@ -1215,7 +1286,7 @@ impl Archiver {
 
         // branch snapshot, with a commit-level changelog when the forge can
         // compare the previous and new commits (GitHub only for now)
-        if branch_changed {
+        if branch_work {
             let changelog = if !local_sha.is_empty() && !remote_branch_sha.is_empty() {
                 match crate::forgeapi::github_compare(&self.cfg, &self.governor, &self.http_cache, &origin, &local_sha, &remote_branch_sha).await {
                     Some(info) => {
@@ -1416,8 +1487,8 @@ fn archived_release_tags(repo_dir: &Path) -> Vec<String> {
 }
 
 /// The newest semver version archived under releases/, if any.
-/// Newest archived commit of a branch, straight from the snapshot sidecars.
-fn latest_branch_commit(repo_dir: &Path, branch: &str) -> Option<String> {
+/// Newest branch snapshot (with its commit and archive time).
+fn latest_branch_snapshot(repo_dir: &Path, branch: &str) -> Option<SnapshotSidecar> {
     let dir = repo_dir.join("branch").join(sanitize(branch));
     let entries = fs::read_dir(&dir).ok()?;
     let mut best: Option<SnapshotSidecar> = None;
@@ -1433,7 +1504,21 @@ fn latest_branch_commit(repo_dir: &Path, branch: &str) -> Option<String> {
             }
         }
     }
-    best.map(|sc| sc.commit)
+    best
+}
+
+/// Whether enough time has passed since the newest branch snapshot. An absent
+/// or unparseable timestamp is treated as due so a broken sidecar cannot pin a
+/// repo to an old snapshot forever.
+fn branch_snapshot_is_due(archived_at: &str, interval_days: u32) -> bool {
+    if interval_days == 0 {
+        return false;
+    }
+    let Ok(t) = OffsetDateTime::parse(archived_at, &Rfc3339) else {
+        return true;
+    };
+    let elapsed = OffsetDateTime::now_utc() - t;
+    elapsed >= time::Duration::hours(i64::from(interval_days) * 24)
 }
 
 fn archived_latest_release(repo_dir: &Path) -> Option<semver::Version> {
@@ -1459,6 +1544,20 @@ fn archived_latest_release(repo_dir: &Path) -> Option<semver::Version> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn branch_snapshot_cadence_uses_snapshot_time() {
+        let now = OffsetDateTime::now_utc();
+        let ago = |days: i64| {
+            (now - time::Duration::days(days))
+                .format(&Rfc3339)
+                .unwrap()
+        };
+        assert!(branch_snapshot_is_due(&ago(8), 7));
+        assert!(!branch_snapshot_is_due(&ago(6), 7));
+        assert!(branch_snapshot_is_due("not a timestamp", 7));
+        assert!(!branch_snapshot_is_due(&ago(30), 0), "0 days = never update");
+    }
 
     #[test]
     fn git_host_only_paces_http_remotes() {

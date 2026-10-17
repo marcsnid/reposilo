@@ -229,7 +229,11 @@ pub fn scan_zip(path: &Path) -> ScanRow {
     let Ok(mut z) = open_zip(path) else {
         return row; // unreadable zip; still listed so the user can deal with it
     };
-    let names: Vec<String> = z.file_names().map(String::from).collect();
+    let names: Vec<String> = z
+        .file_names()
+        .filter_map(|n| n.ok())
+        .map(|n| n.into_owned())
+        .collect();
     if names.is_empty() {
         return row;
     }
@@ -534,7 +538,9 @@ pub async fn import_one(
             description: row.detected_description.clone(),
             language: row.detected_language.clone(),
             default_branch: "unknown".into(),
-            schedule: Default::default(),
+            schedule: crate::types::ScheduleCfg {
+                interval_days: cfg.scheduler.default_interval_days,
+            },
             retention: Default::default(),
             last_checked: None,
             notes: None,

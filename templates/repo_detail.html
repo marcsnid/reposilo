@@ -55,42 +55,11 @@
 
       <section class="panel{% if !ctx.tint.is_empty() %} tinted{% endif %}"{% if !ctx.tint.is_empty() %} style="--tint: {{ ctx.tint }}"{% endif %}>
         <h2>About</h2>
-        <details class="metadata-editor">
-          <summary>&#9998; Edit metadata</summary>
-          <form class="metadata-form" hx-post="/repos/{{ ctx.rel }}/metadata" hx-target="#toast" hx-swap="innerHTML" hx-indicator="find .spinner">
-            <div class="settings-row"><label>Name</label>
-              <input type="text" name="name" value="{{ ctx.name }}"></div>
-            <div class="settings-row"><label>Description</label>
-              <textarea name="description" rows="2" placeholder="shown on the card">{{ ctx.description }}</textarea></div>
-            <div class="settings-row"><label>Notes</label>
-              <textarea name="notes" rows="2" placeholder="private notes">{{ ctx.notes }}</textarea></div>
-            <div class="settings-row"><label>Origin</label>
-              <input type="url" name="origin" value="{{ ctx.origin }}" placeholder="https://github.com/owner/repo.git"></div>
-            <div class="settings-row"><label>Color</label>
-              <div class="color-swatch-row">
-                <label class="color-swatch color-swatch-none" title="No color">
-                  <input type="radio" name="color" value="" {% if ctx.color.is_empty() %}checked{% endif %}>None</label>
-                {% for c in ctx.color_choices %}
-                <label class="color-swatch" title="{{ c.name }}">
-                  <input type="radio" name="color" value="{{ c.key }}" {% if ctx.color == c.key %}checked{% endif %}>
-                  <span class="dot {{ c.class }}"></span></label>
-                {% endfor %}
-              </div></div>
-            <div class="settings-row"><label>Folder</label>
-              <input type="text" name="folder" value="{{ ctx.folder }}" list="folder-list" placeholder="e.g. tools/go/tui, blank = root">
-              <datalist id="folder-list">
-                {% for f in ctx.folder_options %}
-                <option value="{{ f }}"></option>
-                {% endfor %}
-              </datalist></div>
-            <button type="submit" class="refresh-btn"><span class="spinner htmx-indicator"></span>Save metadata</button>
-          </form>
-        </details>
         <dl class="meta">
           <dt>Archived size</dt><dd>{{ ctx.total_size }}</dd>
           {% if !ctx.language.is_empty() %}<dt>Language</dt><dd><span class="lang"><i class="dot {{ ctx.lang_class }}"></i> {{ ctx.language }}</span></dd>{% endif %}
           <dt>Default branch</dt><dd>{{ ctx.default_branch }}</dd>
-          <dt>Schedule</dt><dd>Every {{ ctx.schedule_days }} days</dd>
+          <dt>Schedule</dt><dd>{% if ctx.schedule_days == 0 %}Never (manual refresh only){% else %}Every {{ ctx.schedule_days }} days{% endif %}</dd>
           <dt>Retention</dt><dd>
             {% if ctx.keep_branch == -1 %}Keep all snapshots{% else %}Keep newest {{ ctx.keep_branch }} snapshot(s){% endif %},
             {% if ctx.keep_releases == -1 %}keep all releases{% else %}keep newest {{ ctx.keep_releases }} release(s){% endif %}
@@ -156,6 +125,9 @@
       <section class="panel">
         <h2>Actions</h2>
         <div class="actions">
+          <button class="refresh-btn"
+            hx-get="/repos/{{ ctx.rel }}/edit"
+            hx-target="#modal-root" hx-swap="innerHTML">&#9998; Edit</button>
           <button class="refresh-btn"
             hx-post="/repos/{{ ctx.rel }}/refresh"
             hx-target="#toast" hx-swap="innerHTML">⟳ Force Refresh</button>
