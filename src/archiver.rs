@@ -389,6 +389,14 @@ pub struct Archiver {
     pub http_cache: Arc<std::sync::Mutex<crate::httpcache::HttpCache>>,
 }
 
+/// Options for a single add operation, grouped to keep the internal helper's
+/// argument list small.
+struct AddOptions<'a> {
+    tags: &'a [String],
+    notes: Option<String>,
+    auto_update: bool,
+}
+
 impl Archiver {
     pub fn new(cfg: Config) -> Self {
         let cache = crate::httpcache::HttpCache::load(Path::new(&cfg.archive.root));
@@ -472,7 +480,17 @@ impl Archiver {
         // leave the on-disk snapshots alone rather than destroying user data.
         let pre_existing = repo_dir.exists();
         match self
-            .add_repo_inner(url, &info, &repo_dir, &rel, tags, notes, auto_update)
+            .add_repo_inner(
+                url,
+                &info,
+                &repo_dir,
+                &rel,
+                AddOptions {
+                    tags,
+                    notes,
+                    auto_update,
+                },
+            )
             .await
         {
             Ok(()) => Ok(repo_dir),
@@ -492,10 +510,13 @@ impl Archiver {
         info: &forge::ForgeInfo,
         repo_dir: &Path,
         rel: &str,
-        tags: &[String],
-        notes: Option<String>,
-        auto_update: bool,
+        opts: AddOptions<'_>,
     ) -> Result<()> {
+        let AddOptions {
+            tags,
+            notes,
+            auto_update,
+        } = opts;
         fs::create_dir_all(repo_dir)
             .with_context(|| format!("cannot create {}", repo_dir.display()))?;
         let manifest_path = repo_dir.join("repo.json");
