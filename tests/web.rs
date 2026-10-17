@@ -1333,6 +1333,13 @@ async fn repo_edit_dialog_updates_the_whole_record() -> Result<()> {
     assert!(detail.contains("Never (manual refresh only)"), "{detail}");
     assert!(detail.contains("Keep newest 5 snapshot(s)"), "{detail}");
     assert!(detail.contains("keep all releases"), "{detail}");
+    let edit_at = detail.find("/repos/owner-demo/edit").expect("edit action");
+    let refresh_at = detail.find("/repos/owner-demo/refresh").expect("refresh action");
+    let delete_at = detail.find("/repos/owner-demo/delete").expect("delete action");
+    assert!(
+        edit_at < refresh_at && refresh_at < delete_at,
+        "Actions must be Edit, Force Refresh, Delete"
+    );
     Ok(())
 }
 
@@ -1399,6 +1406,10 @@ async fn bulk_edit_updates_schedule_retention_and_color() -> Result<()> {
         let m: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(root.join(rel).join("repo.json"))?)?;
         assert_eq!(m["color"], "none");
+        // Blank fields must not overwrite values set by the previous bulk edit.
+        assert_eq!(m["schedule"]["interval_days"], 0);
+        assert_eq!(m["retention"]["keep_branch_snapshots"], 2);
+        assert_eq!(m["retention"]["keep_releases"], -1);
     }
     let page = client.get(format!("{base}/")).send().await?.text().await?;
     assert!(!page.contains("card tinted"), "None should remove card tints: {page}");

@@ -133,6 +133,13 @@ async fn full_api_lifecycle() -> Result<()> {
     assert_eq!(resp["job_id"], 1);
     let job = wait_job(&base, 1).await;
     assert_eq!(job["status"], "done", "add job failed: {job}");
+    let manifest: Value = serde_json::from_str(&fs::read_to_string(
+        tmp.path().join("archive/remotes-apiproj/repo.json"),
+    )?)?;
+    assert_eq!(
+        manifest["schedule"]["interval_days"], 7,
+        "API add should keep auto-update enabled by default"
+    );
 
     // list: one repo, filterable
     let list: Value = client.get(format!("{base}/api/repos")).send().await?.json().await?;
@@ -411,5 +418,30 @@ async fn stats_endpoint_reports_totals_and_activity() -> Result<()> {
 
     // counters are persisted for the next process start
     assert!(archive.join("metrics.json").exists());
+    Ok(())
+}
+
+/// The REST add endpoint can opt a repo out of all future automatic checks.
+#[tokio::test]
+async fn api_add_can_start_archive_only() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let (remote, _work) = make_remote(tmp.path(), "apihoard");
+    let (base, _st) = spawn_server(test_cfg(&tmp.path().join("archive"))).await;
+    let client = reqwest::Client::new();
+
+    let resp: Value = client
+        .post(format!("{base}/api/repos"))
+        .json(&serde_json::json!({ "url": file_url(&remote), "auto_update": false }))
+        .send()
+        .await?
+        .json()
+        .await?;
+    let job = wait_job(&base, resp["job_id"].as_u64().unwrap()).await;
+    assert_eq!(job["status"], "done", "add job failed: {job}");
+
+    let manifest: Value = serde_json::from_str(&fs::read_to_string(
+        tmp.path().join("archive/remotes-apihoard/repo.json"),
+    )?)?;
+    assert_eq!(manifest["schedule"]["interval_days"], 0);
     Ok(())
 }
