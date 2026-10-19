@@ -2,6 +2,7 @@
 //! pruning and refreshes All git operations go through the
 //! `git` CLI as a subprocess.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -34,11 +35,22 @@ impl SnapshotKind {
     }
 }
 
+/// One branch snapshot created during a refresh.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct BranchSnapshotSummary {
+    pub branch: String,
+    pub is_default: bool,
+    pub commits: Option<u64>,
+    pub changelog: Option<String>,
+    pub anchor: Option<String>,
+}
+
 /// Result of refreshing a repo against its remote.
 #[derive(Debug, Default, Serialize)]
 pub struct RefreshSummary {
     pub repo: String,
     pub new_branch_snapshot: bool,
+    pub branch_snapshots: Vec<BranchSnapshotSummary>,
     pub new_release: Option<String>,
     pub pruned: Vec<String>,
     /// True when the remote could not be reached at all.
@@ -603,6 +615,7 @@ impl Archiver {
             origin: Some(url.to_string()),
             forge: info.kind.id().to_string(),
             name: info.name.clone(),
+            display_name: None,
             added: now_rfc3339(),
             tags: manifest_tags,
             description,
@@ -610,6 +623,7 @@ impl Archiver {
             stars,
             suggested_tags,
             default_branch: branch.clone(),
+            branches: Vec::new(),
             schedule: crate::types::ScheduleCfg {
                 interval_days: if auto_update {
                     self.cfg.scheduler.default_interval_days
@@ -1101,16 +1115,13 @@ impl Archiver {
     /// it moved, archive a newer semver release if one exists, prune per
     /// retention, and record the check time.
     ///
-    /// Manual refreshes always snapshot a changed branch. Scheduled refreshes
-    /// use [`Self::refresh_repo_scheduled`], which also respects the repo's
-    /// snapshot cadence (release polling still happens on its own cadence).
     #[tracing::instrument(skip(self))]
     pub async fn refresh_repo(&self, repo_dir: &Path) -> Result<RefreshSummary> {
         self.refresh_repo_inner(repo_dir, false).await
     }
 
-    /// Scheduled refresh: poll releases on the scheduler's cadence, but only
-    /// take a branch snapshot when the repo's `interval_days` has elapsed.
+    /// Scheduled refresh. The scheduler only calls this when the repo's single
+    /// `interval_days` cadence has elapsed; archive-only repos are skipped.
     #[tracing::instrument(skip(self))]
     pub async fn refresh_repo_scheduled(&self, repo_dir: &Path) -> Result<RefreshSummary> {
         self.refresh_repo_inner(repo_dir, true).await
@@ -1119,7 +1130,7 @@ impl Archiver {
     async fn refresh_repo_inner(
         &self,
         repo_dir: &Path,
-        respect_branch_interval: bool,
+        automatic: bool,
     ) -> Result<RefreshSummary> {
         let manifest_path = repo_dir.join("repo.json");
         let mut manifest: RepoManifest = crate::types::read_json(&manifest_path)
@@ -1138,7 +1149,7 @@ impl Archiver {
             summary.remote_unavailable = true;
             return Ok(summary);
         }
-        if respect_branch_interval && manifest.schedule.interval_days == 0 {
+        if automatic && manifest.schedule.interval_days == 0 {
             tracing::debug!(repo = %rel, "automatic updates disabled; skipping scheduled refresh");
             return Ok(summary);
         }
@@ -1187,41 +1198,44 @@ impl Archiver {
                 manifest.default_branch = rb.to_string();
             }
         }
-        let branch = manifest.default_branch.clone();
-        let branch_ref = format!("refs/heads/{branch}");
+        let default_branch = manifest.default_branch.clone();
+        let tracked_branches = manifest.tracked_branches();
 
-        // current archived state: compare against snapshot sidecars
-        // (mirror mode can also use the local git store, but sidecars are
-        // the truth in both modes; keep one code path)
-        let local_branch = latest_branch_snapshot(repo_dir, &branch);
-        let local_sha = local_branch
-            .as_ref()
-            .map(|sc| sc.commit.clone())
-            .unwrap_or_default();
-        // The scheduler may poll releases daily while branch snapshots stay on
-        // a weekly cadence. Use the newest branch snapshot (not `last_checked`,
-        // which moves on every release poll) to decide whether it is due.
-        let branch_due = !respect_branch_interval
-            || local_branch.as_ref().is_none_or(|sc| {
-                branch_snapshot_is_due(&sc.archived_at, manifest.schedule.interval_days)
-            });
-
-        self.pace_remote(&origin).await?;
-        let remote_branch_sha = git(self.cfg.git.timeout_secs, &["ls-remote", &origin, &branch_ref], None)
-            .await
-            .ok()
-            .and_then(|s| s.split('\t').next().map(str::to_string))
-            .unwrap_or_default();
-        let branch_changed =
-            !remote_branch_sha.is_empty() && remote_branch_sha != local_sha;
-        let branch_work = branch_changed && branch_due;
-        if branch_changed && !branch_due {
-            tracing::debug!(
-                repo = %rel,
-                interval_days = manifest.schedule.interval_days,
-                "branch moved; waiting for the snapshot cadence"
-            );
+        // One ls-remote for every tracked branch. Branches that disappeared
+        // from the remote simply produce no ref and keep their archived copy.
+        let mut remote_shas: HashMap<String, String> = HashMap::new();
+        if !tracked_branches.is_empty() {
+            self.pace_remote(&origin).await?;
+            let refspecs: Vec<String> = tracked_branches
+                .iter()
+                .map(|b| format!("refs/heads/{b}"))
+                .collect();
+            let mut args: Vec<&str> = vec!["ls-remote", &origin];
+            args.extend(refspecs.iter().map(String::as_str));
+            let refs = git(self.cfg.git.timeout_secs, &args, None)
+                .await
+                .ok()
+                .unwrap_or_default();
+            for line in refs.lines() {
+                if let Some((sha, name)) = line.split_once('\t') {
+                    if let Some(branch) = name.strip_prefix("refs/heads/") {
+                        remote_shas.insert(branch.to_string(), sha.to_string());
+                    }
+                }
+            }
         }
+
+        // Compare each tracked branch against its newest archived snapshot.
+        let mut branch_changes: Vec<(String, String, String)> = Vec::new();
+        for branch in &tracked_branches {
+            let local_sha = latest_branch_commit(repo_dir, branch).unwrap_or_default();
+            let remote_sha = remote_shas.get(branch).cloned().unwrap_or_default();
+            if !remote_sha.is_empty() && remote_sha != local_sha {
+                branch_changes.push((branch.clone(), local_sha, remote_sha));
+            }
+        }
+        let default_local_sha = latest_branch_commit(repo_dir, &default_branch).unwrap_or_default();
+        let default_remote_sha = remote_shas.get(&default_branch).cloned().unwrap_or_default();
 
         // releases check (before deciding to clone anything)
         let new_release_tag = self.latest_release_tag(&origin).await.ok().flatten();
@@ -1252,10 +1266,12 @@ impl Archiver {
         }
 
         // nothing to do? no clone at all: refresh costs one ls-remote
-        let need_work = branch_work
+        let need_work = !branch_changes.is_empty()
             || release_needed
             || manifest.language.is_none()
-            || (manifest.default_branch != "unknown" && remote_branch_sha.is_empty() && !local_sha.is_empty());
+            || (default_branch != "unknown"
+                && default_remote_sha.is_empty()
+                && !default_local_sha.is_empty());
         if !need_work {
             manifest.last_checked = Some(now_rfc3339());
             crate::types::write_json(&manifest_path, &manifest)?;
@@ -1266,46 +1282,60 @@ impl Archiver {
         // ephemeral depth-1 clone (shallow fetch provides no incremental
         // benefit anyway: a changed tree must be re-downloaded regardless)
         let temp = if mirror {
-            if branch_work {
-                self.fetch_branch(&shallow, &origin, &branch).await?;
+            for (branch, _, _) in &branch_changes {
+                self.fetch_branch(&shallow, &origin, branch).await?;
             }
             None
         } else {
             let t = tempfile::tempdir().context("tempdir for refresh")?;
             self.clone_shallow(&origin, t.path()).await?;
+            // The shallow clone follows HEAD only; bring in every other
+            // changed branch before snapshotting it.
+            for (branch, _, _) in &branch_changes {
+                self.fetch_branch(t.path(), &origin, branch).await?;
+            }
             Some(t)
         };
         let git_dir = temp.as_ref().map(|t| t.path()).unwrap_or(&shallow);
 
         // fill in language for repos that never had it detected (imports)
         if manifest.language.is_none() {
-            if let Ok(tree) = crate::files::ls_tree(git_dir, &branch).await {
+            if let Ok(tree) = crate::files::ls_tree(git_dir, &default_branch).await {
                 manifest.language = crate::files::detect_language(&tree);
             }
         }
 
-        // branch snapshot, with a commit-level changelog when the forge can
-        // compare the previous and new commits (GitHub only for now)
-        if branch_work {
-            let changelog = if !local_sha.is_empty() && !remote_branch_sha.is_empty() {
-                match crate::forgeapi::github_compare(&self.cfg, &self.governor, &self.http_cache, &origin, &local_sha, &remote_branch_sha).await {
-                    Some(info) => {
-                        summary.branch_commits = Some(info.total_commits);
-                        Some(render_branch_changelog(&info))
-                    }
-                    None => None,
+        // Snapshot every tracked branch that moved, each with its own
+        // commit-level changelog when the forge supports compare.
+        for (branch, local_sha, remote_sha) in &branch_changes {
+            let (commits, changelog) = if !local_sha.is_empty() && !remote_sha.is_empty() {
+                match crate::forgeapi::github_compare(&self.cfg, &self.governor, &self.http_cache, &origin, local_sha, remote_sha).await {
+                    Some(info) => (Some(info.total_commits), Some(render_branch_changelog(&info))),
+                    None => (None, None),
                 }
             } else {
-                None
+                (None, None)
             };
             let sc = self
-                .snapshot_ref(repo_dir, git_dir, &rel, &name, &origin, &branch, SnapshotKind::Branch, None, None, changelog.as_deref())
+                .snapshot_ref(repo_dir, git_dir, &rel, &name, &origin, branch, SnapshotKind::Branch, None, None, changelog.as_deref())
                 .await?;
-            summary.branch_snapshot_anchor = Some(sc.anchor());
-            tracing::info!(repo = %rel, commits = ?summary.branch_commits, "new branch snapshot archived");
-            summary.branch_changelog = changelog;
-            summary.new_branch_snapshot = true;
+            let is_default = branch == &default_branch;
+            let item = BranchSnapshotSummary {
+                branch: branch.clone(),
+                is_default,
+                commits,
+                changelog: changelog.clone(),
+                anchor: Some(sc.anchor()),
+            };
+            if is_default {
+                summary.branch_commits = item.commits;
+                summary.branch_changelog = changelog.clone();
+                summary.branch_snapshot_anchor = item.anchor.clone();
+            }
+            summary.branch_snapshots.push(item);
+            tracing::info!(repo = %rel, branch = %branch, commits = ?commits, "new branch snapshot archived");
         }
+        summary.new_branch_snapshot = !summary.branch_snapshots.is_empty();
 
         // release snapshot
         if release_needed {
@@ -1371,7 +1401,10 @@ impl Archiver {
         }
         let keep_branch = manifest.retention.keep_branch_snapshots.unwrap_or(keep_branch);
         let keep_releases = manifest.retention.keep_releases.unwrap_or(keep_releases);
-        let mut pruned = self.prune_branch_snapshots(repo_dir, &manifest.default_branch, keep_branch)?;
+        let mut pruned = Vec::new();
+        for branch in manifest.tracked_branches() {
+            pruned.extend(self.prune_branch_snapshots(repo_dir, &branch, keep_branch)?);
+        }
         pruned.extend(self.prune_releases(repo_dir, keep_releases)?);
         Ok(pruned)
     }
@@ -1487,8 +1520,8 @@ fn archived_release_tags(repo_dir: &Path) -> Vec<String> {
 }
 
 /// The newest semver version archived under releases/, if any.
-/// Newest branch snapshot (with its commit and archive time).
-fn latest_branch_snapshot(repo_dir: &Path, branch: &str) -> Option<SnapshotSidecar> {
+/// Newest archived commit of a branch, straight from the snapshot sidecars.
+fn latest_branch_commit(repo_dir: &Path, branch: &str) -> Option<String> {
     let dir = repo_dir.join("branch").join(sanitize(branch));
     let entries = fs::read_dir(&dir).ok()?;
     let mut best: Option<SnapshotSidecar> = None;
@@ -1504,21 +1537,7 @@ fn latest_branch_snapshot(repo_dir: &Path, branch: &str) -> Option<SnapshotSidec
             }
         }
     }
-    best
-}
-
-/// Whether enough time has passed since the newest branch snapshot. An absent
-/// or unparseable timestamp is treated as due so a broken sidecar cannot pin a
-/// repo to an old snapshot forever.
-fn branch_snapshot_is_due(archived_at: &str, interval_days: u32) -> bool {
-    if interval_days == 0 {
-        return false;
-    }
-    let Ok(t) = OffsetDateTime::parse(archived_at, &Rfc3339) else {
-        return true;
-    };
-    let elapsed = OffsetDateTime::now_utc() - t;
-    elapsed >= time::Duration::hours(i64::from(interval_days) * 24)
+    best.map(|sc| sc.commit)
 }
 
 fn archived_latest_release(repo_dir: &Path) -> Option<semver::Version> {
@@ -1544,20 +1563,6 @@ fn archived_latest_release(repo_dir: &Path) -> Option<semver::Version> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn branch_snapshot_cadence_uses_snapshot_time() {
-        let now = OffsetDateTime::now_utc();
-        let ago = |days: i64| {
-            (now - time::Duration::days(days))
-                .format(&Rfc3339)
-                .unwrap()
-        };
-        assert!(branch_snapshot_is_due(&ago(8), 7));
-        assert!(!branch_snapshot_is_due(&ago(6), 7));
-        assert!(branch_snapshot_is_due("not a timestamp", 7));
-        assert!(!branch_snapshot_is_due(&ago(30), 0), "0 days = never update");
-    }
 
     #[test]
     fn git_host_only_paces_http_remotes() {

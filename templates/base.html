@@ -120,6 +120,27 @@
       return out;
     }
     // drag-and-drop: repo cards onto sidebar folders
+    // Native drag starts from the card, and dragstart.target is the card even
+    // when the press began on a button. The reliable fix is to make the card
+    // temporarily non-draggable while the pointer is down in the action slot.
+    var pressedActionCard = null;
+    function restoreActionCard() {
+      if (pressedActionCard) {
+        pressedActionCard.draggable = true;
+        pressedActionCard = null;
+      }
+    }
+    document.addEventListener('pointerdown', function (ev) {
+      var actions = ev.target.closest && ev.target.closest('.card-actions');
+      if (!actions) return;
+      var card = actions.closest('.card');
+      if (!card) return;
+      pressedActionCard = card;
+      card.draggable = false;
+    }, true);
+    document.addEventListener('pointerup', restoreActionCard, true);
+    document.addEventListener('pointercancel', restoreActionCard, true);
+    document.addEventListener('dragend', restoreActionCard, true);
     function dragRepo(ev) {
       ev.dataTransfer.setData('text/reposilo-rel', ev.currentTarget.dataset.rel);
       ev.dataTransfer.effectAllowed = 'move';

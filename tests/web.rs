@@ -333,8 +333,13 @@ async fn add_repo_can_start_archive_only() -> Result<()> {
         tmp.path().join("archive/remotes-hoard/repo.json"),
     )?)?;
     assert_eq!(manifest["schedule"]["interval_days"], 0);
-    let page = client.get(format!("{base}/")).send().await?.text().await?;
-    assert!(page.contains("archive only"), "card should show archive-only: {page}");
+    let detail = client
+        .get(format!("{base}/repos/remotes-hoard"))
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert!(detail.contains("Never (manual refresh only)"), "{detail}");
     Ok(())
 }
 
@@ -1196,8 +1201,16 @@ async fn gallery_card_has_quick_actions() -> Result<()> {
     let html = client.get(format!("{base}/")).send().await?.text().await?;
 
     assert!(html.contains("card-actions"), "card actions missing: {html}");
+    assert!(
+        html.contains("card-actions\" draggable=\"false\""),
+        "action slot must not start a card drag: {html}"
+    );
     assert!(html.contains(r#"hx-post="/repos/owner-demo/refresh""#), "{html}");
     assert!(html.contains(r#"href="https://github.com/owner/demo.git""#), "{html}");
+    assert!(
+        html.contains(r#"<p class="card-desc"></p>"#),
+        "empty README description must still reserve its card slot: {html}"
+    );
 
     // unidentified repos (no origin) only get the refresh action
     let mystery = root.join("_unknown/mystery");
@@ -1288,14 +1301,18 @@ async fn repo_edit_dialog_updates_the_whole_record() -> Result<()> {
     assert!(modal.contains("Days per remote check"), "schedule label should be explicit: {modal}");
     assert!(modal.contains("name=\"keep_branch\""), "snapshot retention missing: {modal}");
     assert!(modal.contains("name=\"keep_releases\""), "release retention missing: {modal}");
+    assert!(modal.contains("name=\"display_name\""), "display name field missing: {modal}");
+    assert!(!modal.contains("name=\"name\""), "edit dialog must not rename the real repo: {modal}");
     assert!(modal.contains("name=\"tags\""), "tags field missing: {modal}");
+    assert!(modal.contains("name=\"branches\""), "branches field missing: {modal}");
     assert!(modal.contains("0 = never update automatically"), "never-update hint missing: {modal}");
 
     let resp = client
         .post(format!("{base}/repos/owner-demo/edit"))
         .form(&[
-            ("name", "demo-renamed"),
+            ("display_name", "Demo Nickname"),
             ("tags", "cli, rust, cli"),
+            ("branches", "main, develop, main"),
             ("description", "edited description"),
             ("notes", "edited notes"),
             ("origin", ""),
@@ -1315,8 +1332,10 @@ async fn repo_edit_dialog_updates_the_whole_record() -> Result<()> {
 
     let m: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(root.join("owner-demo/repo.json"))?)?;
-    assert_eq!(m["name"], "demo-renamed");
+    assert_eq!(m["name"], "demo");
+    assert_eq!(m["display_name"], "Demo Nickname");
     assert_eq!(m["tags"], serde_json::json!(["cli", "rust"]));
+    assert_eq!(m["branches"], serde_json::json!(["main", "develop"]));
     assert_eq!(m["description"], "edited description");
     assert_eq!(m["notes"], "edited notes");
     assert_eq!(m["schedule"]["interval_days"], 0);
@@ -1324,12 +1343,17 @@ async fn repo_edit_dialog_updates_the_whole_record() -> Result<()> {
     assert_eq!(m["retention"]["keep_releases"], -1);
     assert_eq!(m["color"], "purple");
 
+    let page = client.get(format!("{base}/")).send().await?.text().await?;
+    assert!(page.contains(">Demo Nickname<"), "card should use the display name: {page}");
+    assert!(!page.contains("href=\"/repos/Demo Nickname\""), "display name must not change the link: {page}");
+
     let detail = client
         .get(format!("{base}/repos/owner-demo"))
         .send()
         .await?
         .text()
         .await?;
+    assert!(detail.contains("Demo Nickname"), "detail should use the display name: {detail}");
     assert!(detail.contains("Never (manual refresh only)"), "{detail}");
     assert!(detail.contains("Keep newest 5 snapshot(s)"), "{detail}");
     assert!(detail.contains("keep all releases"), "{detail}");
@@ -1391,9 +1415,6 @@ async fn bulk_edit_updates_schedule_retention_and_color() -> Result<()> {
         assert_eq!(m["retention"]["keep_releases"], -1);
         assert_eq!(m["color"], "red");
     }
-    let page = client.get(format!("{base}/")).send().await?.text().await?;
-    assert!(page.contains("archive only"), "cards should show the archive-only state: {page}");
-
     // "None" is an explicit no-tint choice, not just "clear the user color".
     let resp = client
         .post(format!("{base}/repos/bulk/edit"))

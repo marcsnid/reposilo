@@ -13,8 +13,10 @@ goes away.
 - Keeps any git repo as a zip (or tar.zst) snapshot plus release tags, on a
   schedule you set, with per-repo retention.
 - Edit one repo or a multi-selection from the same dialog: schedule, retention,
-  tags, and card color. Set the schedule to `0` for archive-only repos that are
-  never checked automatically (manual refresh still works).
+  tags, branches, and card color. Set the schedule to `0` for archive-only repos
+  that are never checked automatically (manual refresh still works).
+- Track extra branches per repo by adding them in the edit dialog; every tracked
+  branch gets its own snapshots and retention pruning.
 - Snapshots stay browsable without unzipping (README, file listing, downloads),
   so a copy survives its remote. A repo unreachable for three weeks is marked
   dead and stops being checked.

@@ -59,6 +59,7 @@
           <dt>Archived size</dt><dd>{{ ctx.total_size }}</dd>
           {% if !ctx.language.is_empty() %}<dt>Language</dt><dd><span class="lang"><i class="dot {{ ctx.lang_class }}"></i> {{ ctx.language }}</span></dd>{% endif %}
           <dt>Default branch</dt><dd>{{ ctx.default_branch }}</dd>
+          <dt>Branches</dt><dd>{{ ctx.branches }}</dd>
           <dt>Schedule</dt><dd>{% if ctx.schedule_days == 0 %}Never (manual refresh only){% else %}Every {{ ctx.schedule_days }} days{% endif %}</dd>
           <dt>Retention</dt><dd>
             {% if ctx.keep_branch == -1 %}Keep all snapshots{% else %}Keep newest {{ ctx.keep_branch }} snapshot(s){% endif %},
@@ -68,7 +69,7 @@
           <dt>Last refreshed</dt><dd title="{{ ctx.last_checked_exact }}">{{ ctx.last_checked }}</dd>
         </dl>
         {% if !ctx.notes.is_empty() %}
-        <h2>Notes</h2>
+        <h2 class="notes-title">Notes</h2>
         <p class="notes">{{ ctx.notes }}</p>
         {% endif %}
       </section>

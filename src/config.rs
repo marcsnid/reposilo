@@ -96,10 +96,8 @@ impl Default for UiCfg {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SchedulerCfg {
-    /// Default-branch snapshot cadence.
+    /// Default automatic check interval for branches and releases.
     pub default_interval_days: u32,
-    /// How often to poll remotes for new tags/releases.
-    pub release_poll_hours: u32,
     /// Archive immediately when a repo is added.
     pub run_on_add: bool,
     /// Whether the background scheduler runs when serving.
@@ -117,7 +115,6 @@ impl Default for SchedulerCfg {
     fn default() -> Self {
         Self {
             default_interval_days: 7,
-            release_poll_hours: 24,
             run_on_add: true,
             enabled: true,
             poll_every_secs: 900,

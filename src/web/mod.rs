@@ -618,6 +618,22 @@ fn parse_tags(raw: &str) -> Vec<String> {
     tags
 }
 
+/// Parse a comma-separated branch list, preserving order and deduplicating
+/// exact names. The manifest helper always re-adds the default branch.
+fn parse_branches(raw: &str) -> Vec<String> {
+    let mut branches: Vec<String> = Vec::new();
+    for branch in raw.split(',') {
+        let branch = branch.trim();
+        if branch.is_empty() || branch == "unknown" {
+            continue;
+        }
+        if !branches.iter().any(|b| b == branch) {
+            branches.push(branch.to_string());
+        }
+    }
+    branches
+}
+
 /// POST /repos/{rel}/metadata or /repos/{rel}/edit (form): edit the whole
 /// repo record. The edit modal uses `/edit` (and gets a page redirect); the
 /// older `/metadata` endpoint keeps its fragment response for compatibility.
@@ -688,10 +704,16 @@ async fn save_metadata_ui(
         if let Some(name) = form.get("name").map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
             manifest.name = name;
         }
+        if let Some(nickname) = form.get("display_name") {
+            manifest.display_name = Some(nickname.trim().to_string()).filter(|s| !s.is_empty());
+        }
         manifest.description = form.get("description").map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
         manifest.notes = form.get("notes").map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
         if let Some(raw) = form.get("tags") {
             manifest.tags = parse_tags(raw);
+        }
+        if let Some(raw) = form.get("branches") {
+            manifest.branches = parse_branches(raw);
         }
         if let Some(days) = schedule_days {
             manifest.schedule.interval_days = days;
@@ -1532,7 +1554,6 @@ async fn settings_save(
     cfg.retention.keep_releases = num(&f, "keep_releases", cfg.retention.keep_releases);
     cfg.scheduler.enabled = f.0.get("sched_enabled").map(|v| v == "1").unwrap_or(false);
     cfg.scheduler.default_interval_days = num(&f, "interval_days", cfg.scheduler.default_interval_days).max(1);
-    cfg.scheduler.release_poll_hours = num(&f, "poll_hours", cfg.scheduler.release_poll_hours).max(1);
     cfg.scheduler.poll_every_secs = num(&f, "poll_every", cfg.scheduler.poll_every_secs).max(60);
     cfg.scheduler.dead_after_days = num(&f, "dead_after", cfg.scheduler.dead_after_days);
     cfg.verify.enabled = f.0.get("verify_enabled").map(|v| v == "1").unwrap_or(false);

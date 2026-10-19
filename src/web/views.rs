@@ -242,8 +242,6 @@ pub struct RepoCard {
     pub tags: Vec<TagUrl>,
     pub remote_gone: bool,
     pub remote_dead: bool,
-    /// Automatic updates are disabled (`interval_days = 0`).
-    pub archive_only: bool,
     pub branch: String,
     pub language: String,
     pub lang_class: String,
@@ -454,7 +452,11 @@ pub async fn build_list_ctx(
                 .sum();
             RepoCard {
                 rel: r.rel.clone(),
-                name: r.manifest.name.clone(),
+                name: r
+                    .manifest
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| r.manifest.name.clone()),
                 forge: r.manifest.forge.clone(),
                 origin: r.manifest.origin.clone().unwrap_or_default(),
                 description: r.manifest.description.clone().unwrap_or_default(),
@@ -466,7 +468,6 @@ pub async fn build_list_ctx(
                     .collect(),
                 remote_gone: r.manifest.remote_state.as_deref() == Some("unavailable"),
                 remote_dead: r.manifest.remote_state.as_deref() == Some("dead"),
-                archive_only: r.manifest.schedule.interval_days == 0,
                 branch: r.manifest.default_branch.clone(),
                 language: r.manifest.language.clone().unwrap_or_default(),
                 lang_class: r.manifest.language.as_deref().map(lang_class).unwrap_or_default().to_string(),
@@ -666,6 +667,7 @@ pub struct DetailCtx {
     pub unidentified: bool,
     pub stars: String,
     pub default_branch: String,
+    pub branches: String,
     pub language: String,
     pub lang_class: String,
     pub added: String,           // "3d ago"
@@ -706,10 +708,14 @@ pub struct RepoEditCtx {
     /// True when editing the current multi-selection: per-repo identity fields
     /// are hidden and blank inputs mean "leave unchanged".
     pub is_bulk: bool,
+    /// The repository's real name (used as the placeholder).
     pub name: String,
+    /// Optional presentation-only nickname.
+    pub display_name: String,
     pub description: String,
     pub notes: String,
     pub tags: String,
+    pub branches: String,
     pub origin: String,
     pub folder: String,
     pub folder_options: Vec<String>,
@@ -916,7 +922,10 @@ pub async fn build_detail_ctx(st: &Arc<AppState>, repo: &crate::index::RepoEntry
 
     DetailCtx {
         rel: repo.rel.clone(),
-        name: m.name.clone(),
+        name: m
+            .display_name
+            .clone()
+            .unwrap_or_else(|| m.name.clone()),
         origin: m.origin.clone().unwrap_or_default(),
         forge: m.forge.clone(),
         description: m.description.clone().unwrap_or_default(),
@@ -933,6 +942,7 @@ pub async fn build_detail_ctx(st: &Arc<AppState>, repo: &crate::index::RepoEntry
             .collect(),
         tags: m.tags.clone(),
         default_branch: m.default_branch.clone(),
+        branches: m.tracked_branches().join(", "),
         language: m.language.clone().unwrap_or_default(),
         lang_class: m.language.as_deref().map(lang_class).unwrap_or_default().to_string(),
         added,
@@ -992,9 +1002,11 @@ pub async fn build_repo_edit_ctx(
         post_url: format!("/repos/{}/edit", repo.rel),
         is_bulk: false,
         name: m.name.clone(),
+        display_name: m.display_name.clone().unwrap_or_default(),
         description: m.description.clone().unwrap_or_default(),
         notes: m.notes.clone().unwrap_or_default(),
         tags: m.tags.join(", "),
+        branches: m.tracked_branches().join(", "),
         origin: m.origin.clone().unwrap_or_default(),
         folder,
         folder_options,
@@ -1023,9 +1035,11 @@ pub async fn build_bulk_edit_ctx(_st: &Arc<AppState>) -> RepoEditCtx {
         post_url: "/repos/bulk/edit".to_string(),
         is_bulk: true,
         name: String::new(),
+        display_name: String::new(),
         description: String::new(),
         notes: String::new(),
         tags: String::new(),
+        branches: String::new(),
         origin: String::new(),
         folder: String::new(),
         folder_options: Vec::new(),
@@ -1164,7 +1178,6 @@ pub struct SettingsCtx {
     // scheduler
     pub sched_enabled: bool,
     pub interval_days: String,
-    pub poll_hours: String,
     pub poll_every: String,
     pub dead_after: String,
     // scheduled integrity checks
@@ -1284,7 +1297,6 @@ pub fn settings_ctx_from(cfg: &crate::config::Config, saved: bool, outdated_repo
         keep_releases: cfg.retention.keep_releases.to_string(),
         sched_enabled: cfg.scheduler.enabled,
         interval_days: cfg.scheduler.default_interval_days.to_string(),
-        poll_hours: cfg.scheduler.release_poll_hours.to_string(),
         poll_every: cfg.scheduler.poll_every_secs.to_string(),
         dead_after: cfg.scheduler.dead_after_days.to_string(),
         verify_enabled: cfg.verify.enabled,

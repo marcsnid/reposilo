@@ -49,6 +49,10 @@ pub struct RepoManifest {
     /// "github" | "gitlab" | "forgejo" | "generic"
     pub forge: String,
     pub name: String,
+    /// Optional presentation-only nickname. Never changes the repo path, URL,
+    /// or the project name used in snapshot filenames.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     /// RFC3339 timestamp when the repo was added.
     pub added: String,
     #[serde(default)]
@@ -59,6 +63,10 @@ pub struct RepoManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
     pub default_branch: String,
+    /// Additional branches to snapshot. The default branch is always included
+    /// by [`RepoManifest::tracked_branches`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub branches: Vec<String>,
     #[serde(default)]
     pub schedule: ScheduleCfg,
     #[serde(default)]
@@ -97,6 +105,28 @@ pub struct RepoManifest {
     /// `crate::migrations::SCHEMA_VERSION`.
     #[serde(default)]
     pub schema: u32,
+}
+
+impl RepoManifest {
+    /// Branches this repo should snapshot: the default branch plus any extras,
+    /// deduplicated and with placeholders removed.
+    pub fn tracked_branches(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let default = self.default_branch.trim();
+        if !default.is_empty() && default != "unknown" {
+            out.push(default.to_string());
+        }
+        for branch in &self.branches {
+            let branch = branch.trim();
+            if branch.is_empty() || branch == "unknown" {
+                continue;
+            }
+            if !out.iter().any(|b| b == branch) {
+                out.push(branch.to_string());
+            }
+        }
+        out
+    }
 }
 
 /// Info about a stored zip, embedded in the sidecar.
