@@ -353,6 +353,7 @@ html[data-view="list"] .card .chips .chip {
 .meta { display: grid; grid-template-columns: auto 1fr; gap: 0.3rem 0.9rem; margin: 0; font-size: 0.85rem; }
 .meta dt { color: var(--text-muted); }
 .meta dd { margin: 0; word-break: break-word; }
+.panel h2.notes-title { margin-top: 1.15rem; }
 
 .snaps { list-style: none; margin: 0; padding: 0; }
 .snaps li { padding: 0.35rem 0; border-bottom: 1px solid var(--border); }
