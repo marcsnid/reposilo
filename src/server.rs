@@ -739,6 +739,7 @@ fn repo_json(repo: &RepoEntry, detail: bool) -> Value {
         "description": m.description,
         "notes": m.notes,
         "default_branch": m.default_branch,
+        "branches": m.tracked_branches(),
         "remote_state": m.remote_state,
         "last_checked": m.last_checked,
         "added": m.added,
@@ -1195,6 +1196,23 @@ fn snapshot_notification_title(commits: Option<u64>) -> String {
     }
 }
 
+/// Notification title for one branch snapshot. Extra branches name the branch
+/// so multiple notifications from one refresh are distinguishable.
+fn branch_snapshot_notification_title(
+    branch: &str,
+    is_default: bool,
+    commits: Option<u64>,
+) -> String {
+    if is_default {
+        return snapshot_notification_title(commits);
+    }
+    match commits {
+        Some(1) => format!("{branch}: 1 new commit"),
+        Some(n) => format!("{branch}: {n} new commits"),
+        None => format!("{branch}: new snapshot archived"),
+    }
+}
+
 /// Shared background job for manual + scheduled refreshes.
 /// Caller must have locked the repo via try_lock_repo; the job unlocks when
 /// it finishes. An optional semaphore permit bounds scheduler concurrency.
@@ -1242,16 +1260,22 @@ pub async fn spawn_refresh_job(
                     .await;
                     fields.push("new_releases");
                 }
-                if summary.new_branch_snapshot {
-                    let title = snapshot_notification_title(summary.branch_commits);
+                for snapshot in &summary.branch_snapshots {
+                    let title = branch_snapshot_notification_title(
+                        &snapshot.branch,
+                        snapshot.is_default,
+                        snapshot.commits,
+                    );
                     st.push_notification(
                         "new_snapshot",
                         &rel,
                         title,
-                        summary.branch_changelog,
-                        summary.branch_snapshot_anchor.clone(),
+                        snapshot.changelog.clone(),
+                        snapshot.anchor.clone(),
                     )
                     .await;
+                }
+                if !summary.branch_snapshots.is_empty() {
                     fields.push("new_snapshots");
                 }
                 if summary.remote_unavailable {
@@ -1478,6 +1502,15 @@ async fn repo_patch(
     if let Some(tags) = body["tags"].as_array() {
         manifest.tags = tags.iter().filter_map(|t| t.as_str().map(String::from)).collect();
     }
+    if let Some(branches) = body["branches"].as_array() {
+        manifest.branches = branches
+            .iter()
+            .filter_map(|b| b.as_str())
+            .map(str::trim)
+            .filter(|b| !b.is_empty() && *b != "unknown")
+            .map(String::from)
+            .collect();
+    }
     if let Some(n) = body["notes"].as_str() {
         manifest.notes = Some(n.to_string());
     }
@@ -1497,7 +1530,7 @@ async fn repo_patch(
         manifest.retention.keep_releases = Some(k);
     }
     if body.as_object().is_some_and(|o| o.is_empty()) {
-        return Err(ApiError::bad_request("no editable fields provided (tags, notes, description, schedule, retention)"));
+        return Err(ApiError::bad_request("no editable fields provided (tags, branches, notes, description, schedule, retention)"));
     }
     write_json(&repo.dir.join("repo.json"), &manifest).map_err(ApiError::internal)?;
     st.reindex().await.map_err(ApiError::internal)?;
@@ -1931,6 +1964,14 @@ mod tests {
         assert_eq!(snapshot_notification_title(None), "new branch snapshot archived");
         assert_eq!(snapshot_notification_title(Some(1)), "1 new commit on the default branch");
         assert_eq!(snapshot_notification_title(Some(17)), "17 new commits on the default branch");
+        assert_eq!(
+            branch_snapshot_notification_title("main", true, Some(2)),
+            "2 new commits on the default branch"
+        );
+        assert_eq!(
+            branch_snapshot_notification_title("develop", false, Some(2)),
+            "develop: 2 new commits"
+        );
     }
 
     #[test]
@@ -2096,6 +2137,7 @@ mod tests {
             description: None,
             language: None,
             default_branch: "master".into(),
+            branches: Vec::new(),
             schedule: Default::default(),
             retention: Default::default(),
             last_checked,

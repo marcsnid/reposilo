@@ -166,6 +166,7 @@ mod tests {
                 description: None,
                 language: None,
                 default_branch: "main".into(),
+                branches: Vec::new(),
                 schedule: Default::default(),
                 retention: Default::default(),
                 last_checked: None,

@@ -1289,6 +1289,7 @@ async fn repo_edit_dialog_updates_the_whole_record() -> Result<()> {
     assert!(modal.contains("name=\"keep_branch\""), "snapshot retention missing: {modal}");
     assert!(modal.contains("name=\"keep_releases\""), "release retention missing: {modal}");
     assert!(modal.contains("name=\"tags\""), "tags field missing: {modal}");
+    assert!(modal.contains("name=\"branches\""), "branches field missing: {modal}");
     assert!(modal.contains("0 = never update automatically"), "never-update hint missing: {modal}");
 
     let resp = client
@@ -1296,6 +1297,7 @@ async fn repo_edit_dialog_updates_the_whole_record() -> Result<()> {
         .form(&[
             ("name", "demo-renamed"),
             ("tags", "cli, rust, cli"),
+            ("branches", "main, develop, main"),
             ("description", "edited description"),
             ("notes", "edited notes"),
             ("origin", ""),
@@ -1317,6 +1319,7 @@ async fn repo_edit_dialog_updates_the_whole_record() -> Result<()> {
         serde_json::from_str(&fs::read_to_string(root.join("owner-demo/repo.json"))?)?;
     assert_eq!(m["name"], "demo-renamed");
     assert_eq!(m["tags"], serde_json::json!(["cli", "rust"]));
+    assert_eq!(m["branches"], serde_json::json!(["main", "develop"]));
     assert_eq!(m["description"], "edited description");
     assert_eq!(m["notes"], "edited notes");
     assert_eq!(m["schedule"]["interval_days"], 0);

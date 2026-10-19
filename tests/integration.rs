@@ -255,6 +255,60 @@ async fn archive_only_repo_skips_scheduled_updates_but_manual_refresh_works() ->
 }
 
 #[tokio::test]
+async fn refresh_snapshots_extra_branches_and_prunes_them() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let archive = tmp.path().join("archive");
+    fs::create_dir_all(&archive)?;
+
+    let remote = make_remote(tmp.path(), "branches");
+    let work = tmp.path().join("work-branches");
+    let archiver = Archiver::new(test_cfg(&archive));
+    let repo_dir = archiver.add_repo(&file_url(&remote), &[], None).await?;
+
+    // Create a second branch on the remote.
+    git_ok(&["checkout", "-b", "develop"], Some(&work));
+    fs::write(work.join("develop.txt"), "develop\n")?;
+    git_ok(&["add", "."], Some(&work));
+    let mut args = ID.to_vec();
+    args.extend(["commit", "-m", "develop one"]);
+    git_ok(&args, Some(&work));
+    git_ok(&["push", "origin", "develop"], Some(&work));
+    git_ok(&["checkout", "master"], Some(&work));
+
+    // Track it alongside the default branch.
+    let manifest_path = repo_dir.join("repo.json");
+    let mut manifest = read_json::<reposilo::types::RepoManifest>(&manifest_path)?;
+    manifest.branches = vec!["develop".into()];
+    write_manifest(&manifest_path, &manifest)?;
+
+    let summary = archiver.refresh_repo(&repo_dir).await?;
+    assert!(summary.new_branch_snapshot);
+    assert!(
+        summary.branch_snapshots.iter().any(|b| b.branch == "develop"),
+        "develop should be snapshotted: {:?}",
+        summary.branch_snapshots
+    );
+    assert!(repo_dir.join("branch/develop").is_dir());
+
+    // A second develop commit must produce a new snapshot, and retention must
+    // prune that branch independently of the default branch.
+    git_ok(&["checkout", "develop"], Some(&work));
+    fs::write(work.join("develop.txt"), "develop two\n")?;
+    git_ok(&["add", "."], Some(&work));
+    let mut args = ID.to_vec();
+    args.extend(["commit", "-m", "develop two"]);
+    git_ok(&args, Some(&work));
+    git_ok(&["push", "origin", "develop"], Some(&work));
+    git_ok(&["checkout", "master"], Some(&work));
+
+    let summary = archiver.refresh_repo(&repo_dir).await?;
+    assert!(summary.branch_snapshots.iter().any(|b| b.branch == "develop"));
+    let develop_entries = fs::read_dir(repo_dir.join("branch/develop"))?.count();
+    assert_eq!(develop_entries, 2, "one develop zip + one sidecar after pruning");
+    Ok(())
+}
+
+#[tokio::test]
 async fn keep_all_retention_keeps_history() -> Result<()> {
     let tmp = tempfile::tempdir()?;
     let archive = tmp.path().join("archive");
