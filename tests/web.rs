@@ -333,8 +333,13 @@ async fn add_repo_can_start_archive_only() -> Result<()> {
         tmp.path().join("archive/remotes-hoard/repo.json"),
     )?)?;
     assert_eq!(manifest["schedule"]["interval_days"], 0);
-    let page = client.get(format!("{base}/")).send().await?.text().await?;
-    assert!(page.contains("archive only"), "card should show archive-only: {page}");
+    let detail = client
+        .get(format!("{base}/repos/remotes-hoard"))
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert!(detail.contains("Never (manual refresh only)"), "{detail}");
     Ok(())
 }
 
@@ -1196,8 +1201,16 @@ async fn gallery_card_has_quick_actions() -> Result<()> {
     let html = client.get(format!("{base}/")).send().await?.text().await?;
 
     assert!(html.contains("card-actions"), "card actions missing: {html}");
+    assert!(
+        html.contains("card-actions\" draggable=\"false\""),
+        "action slot must not start a card drag: {html}"
+    );
     assert!(html.contains(r#"hx-post="/repos/owner-demo/refresh""#), "{html}");
     assert!(html.contains(r#"href="https://github.com/owner/demo.git""#), "{html}");
+    assert!(
+        html.contains(r#"<p class="card-desc"></p>"#),
+        "empty README description must still reserve its card slot: {html}"
+    );
 
     // unidentified repos (no origin) only get the refresh action
     let mystery = root.join("_unknown/mystery");
@@ -1394,9 +1407,6 @@ async fn bulk_edit_updates_schedule_retention_and_color() -> Result<()> {
         assert_eq!(m["retention"]["keep_releases"], -1);
         assert_eq!(m["color"], "red");
     }
-    let page = client.get(format!("{base}/")).send().await?.text().await?;
-    assert!(page.contains("archive only"), "cards should show the archive-only state: {page}");
-
     // "None" is an explicit no-tint choice, not just "clear the user color".
     let resp = client
         .post(format!("{base}/repos/bulk/edit"))

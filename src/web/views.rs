@@ -242,8 +242,6 @@ pub struct RepoCard {
     pub tags: Vec<TagUrl>,
     pub remote_gone: bool,
     pub remote_dead: bool,
-    /// Automatic updates are disabled (`interval_days = 0`).
-    pub archive_only: bool,
     pub branch: String,
     pub language: String,
     pub lang_class: String,
@@ -466,7 +464,6 @@ pub async fn build_list_ctx(
                     .collect(),
                 remote_gone: r.manifest.remote_state.as_deref() == Some("unavailable"),
                 remote_dead: r.manifest.remote_state.as_deref() == Some("dead"),
-                archive_only: r.manifest.schedule.interval_days == 0,
                 branch: r.manifest.default_branch.clone(),
                 language: r.manifest.language.clone().unwrap_or_default(),
                 lang_class: r.manifest.language.as_deref().map(lang_class).unwrap_or_default().to_string(),
