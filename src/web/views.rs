@@ -452,7 +452,11 @@ pub async fn build_list_ctx(
                 .sum();
             RepoCard {
                 rel: r.rel.clone(),
-                name: r.manifest.name.clone(),
+                name: r
+                    .manifest
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| r.manifest.name.clone()),
                 forge: r.manifest.forge.clone(),
                 origin: r.manifest.origin.clone().unwrap_or_default(),
                 description: r.manifest.description.clone().unwrap_or_default(),
@@ -704,7 +708,10 @@ pub struct RepoEditCtx {
     /// True when editing the current multi-selection: per-repo identity fields
     /// are hidden and blank inputs mean "leave unchanged".
     pub is_bulk: bool,
+    /// The repository's real name (used as the placeholder).
     pub name: String,
+    /// Optional presentation-only nickname.
+    pub display_name: String,
     pub description: String,
     pub notes: String,
     pub tags: String,
@@ -915,7 +922,10 @@ pub async fn build_detail_ctx(st: &Arc<AppState>, repo: &crate::index::RepoEntry
 
     DetailCtx {
         rel: repo.rel.clone(),
-        name: m.name.clone(),
+        name: m
+            .display_name
+            .clone()
+            .unwrap_or_else(|| m.name.clone()),
         origin: m.origin.clone().unwrap_or_default(),
         forge: m.forge.clone(),
         description: m.description.clone().unwrap_or_default(),
@@ -992,6 +1002,7 @@ pub async fn build_repo_edit_ctx(
         post_url: format!("/repos/{}/edit", repo.rel),
         is_bulk: false,
         name: m.name.clone(),
+        display_name: m.display_name.clone().unwrap_or_default(),
         description: m.description.clone().unwrap_or_default(),
         notes: m.notes.clone().unwrap_or_default(),
         tags: m.tags.join(", "),
@@ -1024,6 +1035,7 @@ pub async fn build_bulk_edit_ctx(_st: &Arc<AppState>) -> RepoEditCtx {
         post_url: "/repos/bulk/edit".to_string(),
         is_bulk: true,
         name: String::new(),
+        display_name: String::new(),
         description: String::new(),
         notes: String::new(),
         tags: String::new(),

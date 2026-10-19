@@ -704,6 +704,9 @@ async fn save_metadata_ui(
         if let Some(name) = form.get("name").map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
             manifest.name = name;
         }
+        if let Some(nickname) = form.get("display_name") {
+            manifest.display_name = Some(nickname.trim().to_string()).filter(|s| !s.is_empty());
+        }
         manifest.description = form.get("description").map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
         manifest.notes = form.get("notes").map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
         if let Some(raw) = form.get("tags") {

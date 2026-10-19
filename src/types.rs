@@ -49,6 +49,10 @@ pub struct RepoManifest {
     /// "github" | "gitlab" | "forgejo" | "generic"
     pub forge: String,
     pub name: String,
+    /// Optional presentation-only nickname. Never changes the repo path, URL,
+    /// or the project name used in snapshot filenames.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     /// RFC3339 timestamp when the repo was added.
     pub added: String,
     #[serde(default)]

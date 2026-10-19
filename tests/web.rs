@@ -1301,6 +1301,8 @@ async fn repo_edit_dialog_updates_the_whole_record() -> Result<()> {
     assert!(modal.contains("Days per remote check"), "schedule label should be explicit: {modal}");
     assert!(modal.contains("name=\"keep_branch\""), "snapshot retention missing: {modal}");
     assert!(modal.contains("name=\"keep_releases\""), "release retention missing: {modal}");
+    assert!(modal.contains("name=\"display_name\""), "display name field missing: {modal}");
+    assert!(!modal.contains("name=\"name\""), "edit dialog must not rename the real repo: {modal}");
     assert!(modal.contains("name=\"tags\""), "tags field missing: {modal}");
     assert!(modal.contains("name=\"branches\""), "branches field missing: {modal}");
     assert!(modal.contains("0 = never update automatically"), "never-update hint missing: {modal}");
@@ -1308,7 +1310,7 @@ async fn repo_edit_dialog_updates_the_whole_record() -> Result<()> {
     let resp = client
         .post(format!("{base}/repos/owner-demo/edit"))
         .form(&[
-            ("name", "demo-renamed"),
+            ("display_name", "Demo Nickname"),
             ("tags", "cli, rust, cli"),
             ("branches", "main, develop, main"),
             ("description", "edited description"),
@@ -1330,7 +1332,8 @@ async fn repo_edit_dialog_updates_the_whole_record() -> Result<()> {
 
     let m: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(root.join("owner-demo/repo.json"))?)?;
-    assert_eq!(m["name"], "demo-renamed");
+    assert_eq!(m["name"], "demo");
+    assert_eq!(m["display_name"], "Demo Nickname");
     assert_eq!(m["tags"], serde_json::json!(["cli", "rust"]));
     assert_eq!(m["branches"], serde_json::json!(["main", "develop"]));
     assert_eq!(m["description"], "edited description");
@@ -1340,12 +1343,17 @@ async fn repo_edit_dialog_updates_the_whole_record() -> Result<()> {
     assert_eq!(m["retention"]["keep_releases"], -1);
     assert_eq!(m["color"], "purple");
 
+    let page = client.get(format!("{base}/")).send().await?.text().await?;
+    assert!(page.contains(">Demo Nickname<"), "card should use the display name: {page}");
+    assert!(!page.contains("href=\"/repos/Demo Nickname\""), "display name must not change the link: {page}");
+
     let detail = client
         .get(format!("{base}/repos/owner-demo"))
         .send()
         .await?
         .text()
         .await?;
+    assert!(detail.contains("Demo Nickname"), "detail should use the display name: {detail}");
     assert!(detail.contains("Never (manual refresh only)"), "{detail}");
     assert!(detail.contains("Keep newest 5 snapshot(s)"), "{detail}");
     assert!(detail.contains("keep all releases"), "{detail}");

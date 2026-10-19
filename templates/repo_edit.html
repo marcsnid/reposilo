@@ -15,8 +15,8 @@
         <section class="edit-section">
           <h3 class="edit-section-title">Repository</h3>
           <div class="edit-list">
-            <div class="edit-row"><label for="repo-edit-name">Name</label>
-              <input id="repo-edit-name" type="text" name="name" value="{{ ctx.name }}" autofocus></div>
+            <div class="edit-row"><label for="repo-edit-display-name">Display name</label>
+              <input id="repo-edit-display-name" type="text" name="display_name" value="{{ ctx.display_name }}" placeholder="{{ ctx.name }}" autofocus></div>
             <div class="edit-row"><label for="repo-edit-tags">Tags</label>
               <input id="repo-edit-tags" type="text" name="tags" value="{{ ctx.tags }}" placeholder="cli, rust, tools"></div>
             <div class="edit-row"><label for="repo-edit-branches">Branches</label>

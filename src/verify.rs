@@ -161,6 +161,7 @@ mod tests {
                 origin: Some("https://github.com/owner/demo".into()),
                 forge: "github".into(),
                 name: "demo".into(),
+                display_name: None,
                 added: "2025-01-01T00:00:00Z".into(),
                 tags: vec![],
                 description: None,

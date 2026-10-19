@@ -529,6 +529,7 @@ pub async fn import_one(
             origin: if unknown { None } else { Some(origin.map(str::to_string).or_else(|| row.detected_origin.clone()).unwrap_or_default()) },
             forge,
             name: row.detected_name.clone().unwrap_or_else(|| stem.to_string()),
+            display_name: None,
             added: crate::archiver::now_rfc3339(),
             tags: if unknown && tags.is_empty() {
                 vec!["unidentified".into()]

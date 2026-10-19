@@ -615,6 +615,7 @@ impl Archiver {
             origin: Some(url.to_string()),
             forge: info.kind.id().to_string(),
             name: info.name.clone(),
+            display_name: None,
             added: now_rfc3339(),
             tags: manifest_tags,
             description,

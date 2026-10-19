@@ -732,6 +732,7 @@ fn repo_json(repo: &RepoEntry, detail: bool) -> Value {
     let base = json!({
         "path": repo.rel,
         "name": m.name,
+        "display_name": m.display_name,
         "origin": m.origin,
         "forge": m.forge,
         "tags": m.tags,
@@ -1520,6 +1521,9 @@ async fn repo_patch(
     if let Some(n) = body["name"].as_str().filter(|s| !s.trim().is_empty()) {
         manifest.name = n.trim().to_string();
     }
+    if let Some(n) = body["display_name"].as_str() {
+        manifest.display_name = Some(n.trim().to_string()).filter(|s| !s.is_empty());
+    }
     if let Some(days) = body["schedule"]["interval_days"].as_u64() {
         manifest.schedule.interval_days = days as u32;
     }
@@ -1530,7 +1534,7 @@ async fn repo_patch(
         manifest.retention.keep_releases = Some(k);
     }
     if body.as_object().is_some_and(|o| o.is_empty()) {
-        return Err(ApiError::bad_request("no editable fields provided (tags, branches, notes, description, schedule, retention)"));
+        return Err(ApiError::bad_request("no editable fields provided (tags, branches, name, display_name, notes, description, schedule, retention)"));
     }
     write_json(&repo.dir.join("repo.json"), &manifest).map_err(ApiError::internal)?;
     st.reindex().await.map_err(ApiError::internal)?;
@@ -2132,6 +2136,7 @@ mod tests {
             origin: origin.map(str::to_string),
             forge: "generic".into(),
             name: "x".into(),
+            display_name: None,
             added: "2025-01-01T00:00:00Z".into(),
             tags: vec![],
             description: None,
