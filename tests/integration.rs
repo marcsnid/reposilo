@@ -203,7 +203,7 @@ async fn refresh_picks_up_new_branch_and_release_and_prunes() -> Result<()> {
 }
 
 #[tokio::test]
-async fn scheduled_refresh_respects_branch_cadence() -> Result<()> {
+async fn scheduled_refresh_checks_branches_and_releases_together() -> Result<()> {
     let tmp = tempfile::tempdir()?;
     let archive = tmp.path().join("archive");
     fs::create_dir_all(&archive)?;
@@ -216,30 +216,10 @@ async fn scheduled_refresh_respects_branch_cadence() -> Result<()> {
     push_commit(&work, "new.txt", "new\n", "second");
     push_tag(&work, "v1.1.0");
 
-    // A scheduled check during the 7-day window polls and archives the release
-    // but leaves the branch alone (the default branch snapshot cadence is 7d).
+    // One scheduled check captures both kinds of change at the same time.
     let summary = archiver.refresh_repo_scheduled(&repo_dir).await?;
-    assert!(!summary.new_branch_snapshot, "daily release poll must not force a branch snapshot");
+    assert!(summary.new_branch_snapshot);
     assert_eq!(summary.new_release.as_deref(), Some("1.1.0"));
-
-    let branch_dir = repo_dir.join("branch").join("master");
-    let branch_sidecars: Vec<_> = fs::read_dir(&branch_dir)?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "json"))
-        .collect();
-    assert_eq!(branch_sidecars.len(), 1, "still only the snapshot from add");
-
-    // Age that snapshot past the cadence; the next scheduled check catches up.
-    let path = branch_sidecars[0].clone();
-    let mut sc = read_json::<reposilo::types::SnapshotSidecar>(&path)?;
-    sc.archived_at = (time::OffsetDateTime::now_utc() - time::Duration::days(8))
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap();
-    fs::write(&path, serde_json::to_string_pretty(&sc)?)?;
-
-    let summary = archiver.refresh_repo_scheduled(&repo_dir).await?;
-    assert!(summary.new_branch_snapshot, "cadence elapsed -> branch snapshot");
     Ok(())
 }
 

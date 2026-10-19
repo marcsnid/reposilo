@@ -65,10 +65,8 @@
     <p class="note">How often the background loop checks remotes. Unchanged repos cost a single ls-remote; nothing is cloned unless something moved.</p>
     <div class="settings-row"><label>Enabled</label>
       <input type="checkbox" name="sched_enabled" value="1" {% if ctx.sched_enabled %}checked{% endif %}></div>
-    <div class="settings-row"><label>Snapshot cadence (days)</label>
+    <div class="settings-row"><label>Default check interval (days)</label>
       <input type="number" name="interval_days" value="{{ ctx.interval_days }}" min="1"></div>
-    <div class="settings-row"><label>Release polling (hours)</label>
-      <input type="number" name="poll_hours" value="{{ ctx.poll_hours }}" min="1"></div>
     <div class="settings-row"><label>Loop interval (seconds)</label>
       <input type="number" name="poll_every" value="{{ ctx.poll_every }}" min="60"></div>
     <div class="settings-row"><label>Dead after (days unreachable)</label>

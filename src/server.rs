@@ -1705,8 +1705,6 @@ fn hours_since_rfc3339(s: &str) -> Option<f64> {
 }
 
 async fn compute_due(st: &Arc<AppState>) -> Vec<String> {
-    // read config first, then the index: never hold one async lock across another
-    let poll_h = st.cfg().await.scheduler.release_poll_hours as f64;
     let index = st.index.read().await;
     index
         .repos
@@ -1726,12 +1724,8 @@ async fn compute_due(st: &Arc<AppState>) -> Vec<String> {
             if r.manifest.schedule.interval_days == 0 {
                 return None;
             }
-            // Wake up at whichever cadence is sooner: release polling or the
-            // branch-snapshot interval. `refresh_repo_scheduled` then enforces
-            // the branch interval, so daily release polls do not create daily
-            // branch snapshots.
-            let branch_h = r.manifest.schedule.interval_days as f64 * 24.0;
-            let due_h = branch_h.min(poll_h);
+            // One per-repo cadence drives both branch and release checks.
+            let due_h = r.manifest.schedule.interval_days as f64 * 24.0;
             match r.manifest.last_checked.as_deref().and_then(hours_since_rfc3339) {
                 Some(h) if h >= due_h => Some(r.rel.clone()),
                 None => Some(r.rel.clone()),
@@ -2137,6 +2131,7 @@ mod tests {
         };
         let cases = [
             ("fresh", manifest(Some("file:///r/fresh"), Some(rfc_days_ago(0)), None)),
+            ("recent", manifest(Some("file:///r/recent"), Some(rfc_days_ago(2)), None)),
             ("stale", manifest(Some("file:///r/stale"), Some(rfc_days_ago(30)), None)),
             ("dead", manifest(Some("file:///r/dead"), Some(rfc_days_ago(30)), Some("dead"))),
             ("imported", manifest(None, Some(rfc_days_ago(30)), None)),
@@ -2151,7 +2146,6 @@ mod tests {
         }
         let mut cfg = Config::default();
         cfg.archive.root = root.to_string_lossy().into_owned();
-        cfg.scheduler.release_poll_hours = 24;
         let st = Arc::new(AppState::new(cfg, None).await.unwrap());
         let mut due = compute_due(&st).await;
         due.sort();

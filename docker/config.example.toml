@@ -36,10 +36,8 @@ keep_releases = 1
 [scheduler]
 # Whether the background scheduler runs while serving.
 enabled = true
-# Default-branch snapshot cadence.
+# Default automatic check interval for branches and releases.
 default_interval_days = 7
-# How often to poll remotes for new tags and releases.
-release_poll_hours = 24
 # Archive immediately when a repo is added.
 run_on_add = true
 # How often (seconds) the scheduler loop looks for due repos.

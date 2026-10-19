@@ -1532,7 +1532,6 @@ async fn settings_save(
     cfg.retention.keep_releases = num(&f, "keep_releases", cfg.retention.keep_releases);
     cfg.scheduler.enabled = f.0.get("sched_enabled").map(|v| v == "1").unwrap_or(false);
     cfg.scheduler.default_interval_days = num(&f, "interval_days", cfg.scheduler.default_interval_days).max(1);
-    cfg.scheduler.release_poll_hours = num(&f, "poll_hours", cfg.scheduler.release_poll_hours).max(1);
     cfg.scheduler.poll_every_secs = num(&f, "poll_every", cfg.scheduler.poll_every_secs).max(60);
     cfg.scheduler.dead_after_days = num(&f, "dead_after", cfg.scheduler.dead_after_days);
     cfg.verify.enabled = f.0.get("verify_enabled").map(|v| v == "1").unwrap_or(false);

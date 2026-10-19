@@ -1164,7 +1164,6 @@ pub struct SettingsCtx {
     // scheduler
     pub sched_enabled: bool,
     pub interval_days: String,
-    pub poll_hours: String,
     pub poll_every: String,
     pub dead_after: String,
     // scheduled integrity checks
@@ -1284,7 +1283,6 @@ pub fn settings_ctx_from(cfg: &crate::config::Config, saved: bool, outdated_repo
         keep_releases: cfg.retention.keep_releases.to_string(),
         sched_enabled: cfg.scheduler.enabled,
         interval_days: cfg.scheduler.default_interval_days.to_string(),
-        poll_hours: cfg.scheduler.release_poll_hours.to_string(),
         poll_every: cfg.scheduler.poll_every_secs.to_string(),
         dead_after: cfg.scheduler.dead_after_days.to_string(),
         verify_enabled: cfg.verify.enabled,
